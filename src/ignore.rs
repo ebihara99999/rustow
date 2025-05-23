@@ -1,7 +1,7 @@
 // src/ignore.rs
 
 use regex::Regex;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -12,21 +12,21 @@ pub struct IgnorePatterns {
 
 #[derive(Debug)]
 pub enum IgnoreError {
-    Io(io::Error),
-    Regex(regex::Error),
+    Io(()),
+    Regex(()),
     // Placeholder for potential future path resolution errors (e.g., for home_dir)
     // PathResolution(String),
 }
 
 impl From<io::Error> for IgnoreError {
-    fn from(err: io::Error) -> Self {
-        IgnoreError::Io(err)
+    fn from(_err: io::Error) -> Self {
+        IgnoreError::Io(())
     }
 }
 
 impl From<regex::Error> for IgnoreError {
-    fn from(err: regex::Error) -> Self {
-        IgnoreError::Regex(err)
+    fn from(_err: regex::Error) -> Self {
+        IgnoreError::Regex(())
     }
 }
 
@@ -69,7 +69,7 @@ fn read_patterns_from_file(file_path: &Path) -> Result<Vec<Regex>, IgnoreError> 
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
             continue;
         }
-        patterns.push(Regex::new(trimmed_line).map_err(IgnoreError::Regex)?);
+        patterns.push(Regex::new(trimmed_line)?);
     }
     Ok(patterns)
 }
@@ -99,7 +99,7 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
 fn get_default_ignore_patterns() -> Result<Vec<Regex>, IgnoreError> {
     DEFAULT_IGNORE_PATTERNS
         .iter()
-        .map(|s| Regex::new(s).map_err(IgnoreError::Regex))
+        .map(|s| Regex::new(s).map_err(IgnoreError::from))
         .collect()
 }
 
