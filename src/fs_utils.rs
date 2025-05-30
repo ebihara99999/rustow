@@ -164,6 +164,15 @@ impl RawStowItem {
     fn sort_key(&self) -> PathBuf {
         self.package_relative_path.clone()
     }
+
+    // Method to get the basename of the item from its package_relative_path
+    pub fn basename(&self) -> String {
+        self.package_relative_path
+            .file_name()
+            .unwrap_or_default() // Use OsStr::new("") or handle more gracefully if needed
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {

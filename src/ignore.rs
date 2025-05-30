@@ -4,6 +4,7 @@ use regex::Regex;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use regex;
 
 #[derive(Debug, Clone)]
 pub struct IgnorePatterns {
@@ -12,22 +13,8 @@ pub struct IgnorePatterns {
 
 #[derive(Debug)]
 pub enum IgnoreError {
-    Io(()),
-    Regex(()),
-    // Placeholder for potential future path resolution errors (e.g., for home_dir)
-    // PathResolution(String),
-}
-
-impl From<io::Error> for IgnoreError {
-    fn from(_err: io::Error) -> Self {
-        IgnoreError::Io(())
-    }
-}
-
-impl From<regex::Error> for IgnoreError {
-    fn from(_err: regex::Error) -> Self {
-        IgnoreError::Regex(())
-    }
+    FileIoError { path: PathBuf, source: io::Error },
+    InvalidPattern { pattern: String, source: regex::Error },
 }
 
 // item_package_relative_path is expected to start with "/" (e.g., "/file.txt", "/dir/item.conf")
@@ -58,18 +45,27 @@ pub fn is_ignored(
 
 // Helper function to read patterns from a file, skipping comments and empty lines
 fn read_patterns_from_file(file_path: &Path) -> Result<Vec<Regex>, IgnoreError> {
-    let file = File::open(file_path)?;
+    let file = File::open(file_path).map_err(|e| IgnoreError::FileIoError { 
+        path: file_path.to_path_buf(), 
+        source: e 
+    })?;
     let reader = BufReader::new(file);
     let mut patterns = Vec::new();
 
     for line_result in reader.lines() {
-        let line = line_result?;
+        let line = line_result.map_err(|e| IgnoreError::FileIoError { 
+            path: file_path.to_path_buf(), 
+            source: e 
+        })?;
         let trimmed_line = line.trim();
 
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
             continue;
         }
-        patterns.push(Regex::new(trimmed_line)?);
+        patterns.push(Regex::new(trimmed_line).map_err(|e| IgnoreError::InvalidPattern {
+            pattern: trimmed_line.to_string(),
+            source: e,
+        })?);
     }
     Ok(patterns)
 }
@@ -99,7 +95,10 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
 fn get_default_ignore_patterns() -> Result<Vec<Regex>, IgnoreError> {
     DEFAULT_IGNORE_PATTERNS
         .iter()
-        .map(|s| Regex::new(s).map_err(IgnoreError::from))
+        .map(|s| Regex::new(s).map_err(|e| IgnoreError::InvalidPattern{
+            pattern: (*s).to_string(), // Dereference &&str to &str, then to_string()
+            source: e,
+        }))
         .collect()
 }
 
@@ -113,6 +112,11 @@ impl IgnorePatterns {
                 .map(|s| Regex::new(s).unwrap())
                 .collect(),
         }
+    }
+
+    // Public method to iterate over the compiled regex patterns
+    pub fn iter_patterns(&self) -> impl Iterator<Item = &Regex> {
+        self.patterns.iter()
     }
 
     pub fn load(
@@ -345,23 +349,30 @@ mod tests {
 
     #[test]
     fn test_load_ignore_patterns_invalid_regex_in_file() {
-        let base_dir = setup_load_test_dir("load_invalid_regex");
-        let stow_dir = base_dir.join("stow_root");
-        fs::create_dir_all(&stow_dir).unwrap();
-        let package_name = "pkg_invalid";
+        let base_dir = setup_load_test_dir("invalid_regex_test");
+        let stow_dir = base_dir.join("stow");
+        let home_dir = base_dir.join("home");
+        let package_name = "pkg_with_invalid_regex";
         let package_dir = stow_dir.join(package_name);
         fs::create_dir_all(&package_dir).unwrap();
-        
-        create_temp_file_for_test(&package_dir.join(".stow-local-ignore"), "[invalid").unwrap();
-        let home_dir = base_dir.join("home_dummy");
-        fs::create_dir_all(&home_dir).unwrap();
+
+        // File with an invalid regex pattern, e.g., an unclosed parenthesis
+        let ignore_content = "valid_pattern\n*[invalid\nanother_valid";
+        create_temp_file_for_test(&package_dir.join(".stow-local-ignore"), ignore_content).unwrap();
 
         let result = IgnorePatterns::load(&stow_dir, Some(package_name), &home_dir);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            IgnoreError::Regex(_) => {} // Expected
-            other_err => panic!("Expected Regex error, got {:?}", other_err),
+        match result.err().unwrap() {
+            IgnoreError::InvalidPattern { pattern, source: _ } => {
+                assert_eq!(pattern, "*[invalid"); // Check that the correct failing pattern is reported
+            }
+            // Remove or comment out the catch-all for other error types if not expected
+            // Or, if Io errors are possible here (e.g. if file disappears after check), 
+            // add a specific match arm for `IgnoreError::FileIoError { .. }`
+            // For now, let's assume only InvalidPattern is expected here.
+            e => panic!("Expected InvalidPattern error, but got {:?}", e),
         }
+
         teardown_load_test_dir(&base_dir);
     }
 
