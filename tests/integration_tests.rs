@@ -1,19 +1,16 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tempfile::{tempdir, TempDir};
+use std::ffi::OsStr;
 
 use rustow::cli::Args;
-use rustow::config::Config;
-use rustow::stow::stow_packages; // Assuming stow_packages is the main entry point
-use rustow::stow::ActionType;
-use std::ffi::OsStr; // Import OsStr
-use rustow::config::StowMode; // Add this import
-use rustow::stow::TargetActionReport;
-use rustow::stow::TargetActionReportStatus;
-use rustow::stow::StowItem;
-use rustow::stow::StowItemType;
-// Add other necessary imports from your crate, e.g., for error types or specific structs
+use rustow::config::{Config, StowMode};
+use rustow::stow::{stow_packages, ActionType, TargetActionReportStatus, StowItemType};
+use tempfile::{tempdir, TempDir};
+
+lazy_static::lazy_static! {
+// ... existing code ...
+}
 
 // Helper function to set up a test environment with stow and target directories
 fn setup_test_environment() -> (TempDir, PathBuf, PathBuf) {
@@ -522,30 +519,57 @@ fn test_dotfiles_processing_edge_cases() {
     let report_pkg4_nodotprefix_file = actions.iter().find(|r| {
         r.original_action.source_item.as_ref().map_or(false, |item| {
             item.package_relative_path == Path::new("nodotprefix") &&
-            item.target_name_after_dotfiles_processing == Path::new("nodotprefix")
+            item.target_name_after_dotfiles_processing == Path::new("nodotprefix") &&
+            item.item_type == StowItemType::File // Ensure we are checking the file from package4
         })
     }).expect("Report for package4/nodotprefix (target: nodotprefix) not found");
 
     assert_eq!(
         report_pkg4_nodotprefix_file.status,
-        TargetActionReportStatus::Success,
-        "Expected package4/nodotprefix processing to be Success, but got {:?}. Message: {:?}",
+        TargetActionReportStatus::ConflictPrevented, // EXPECT CONFLICT
+        "Expected package4/nodotprefix processing to be ConflictPrevented, but got {:?}. Message: {:?}",
         report_pkg4_nodotprefix_file.status,
         report_pkg4_nodotprefix_file.message
     );
+    assert_eq!(report_pkg4_nodotprefix_file.original_action.action_type, ActionType::Conflict, "ActionType for package4/nodotprefix should be Conflict");
     let expected_target_pkg4_nodotprefix_file = target_dir.join("nodotprefix");
-    assert!(
-        expected_target_pkg4_nodotprefix_file.exists(),
-        "Target nodotprefix for package4 was not created. Report details: {:?}",
-        report_pkg4_nodotprefix_file
-    );
-    assert!(
-        fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file).unwrap().file_type().is_symlink(),
-        "Target nodotprefix for package4 is not a symlink. Report details: {:?}",
-        report_pkg4_nodotprefix_file
-    );
-    assert_eq!(report_pkg4_nodotprefix_file.original_action.action_type, ActionType::CreateSymlink, "ActionType for nodotprefix should be CreateSymlink");
+    // In case of conflict, the file from package4 might not be created, 
+    // or if an earlier package created something, it might remain.
+    // For this specific test, package4 is processed before package5. 
+    // So, if package4 attempts to create a symlink and package5 attempts a directory, 
+    // one of them will be a conflict. If stow_packages processes them sequentially 
+    // and the conflict detection is global *after* all plans, then execute_actions sees the Conflict.
+    // Let's assume the symlink from package4 *would* have been created if no conflict from package5 existed.
+    // However, because of the conflict, its action is marked Conflict, and it should NOT be created by execute_actions.
+    // The *other* conflicting item (from package5) will also be marked Conflict.
+    // So, the target path should ideally be empty or untouched by these conflicting actions.
+    // However, the current execute_actions creates the *first* non-conflicting item if multiple packages target the same path 
+    // before the inter-package conflict marks them all as Conflict. This needs refinement.
+    // For now, we will assert that the final state of the target does not correspond to package4's successful symlink 
+    // when a conflict with package5 is present and detected.
+    // If the conflict is properly handled, neither package4's file symlink nor package5's directory should solely occupy the target.
+    // The test output showed package4's symlink IS created, then package5's dir fails.
+    // This implies the conflict detection in plan_actions might not be preventing the *first* action if multiple packages are involved.
+    // Let's adjust the expectation: package4 creates its link, then package5's dir creation action is marked as Conflict.
+    // No, the new `plan_actions` inter-package conflict should mark BOTH as conflict *before* execution.
 
+    // After proper conflict handling, the target path should not be a symlink *from package4* specifically 
+    // if the conflict with package5 (directory) was identified *before* execution.
+    // It's possible the target path remains as it was before any operation from these two packages.
+    // For this test, we'll assume if it's a conflict, the symlink from package4 does not get created.
+    // This means the assertion `expected_target_pkg4_nodotprefix_file.exists()` might be false.
+    // And `is_symlink` would also be false or panic if it doesn't exist.
+
+    // Given the current test failure (package4's symlink IS created), 
+    // the inter-package conflict detection in `plan_actions` might not be effective across packages, 
+    // or `execute_actions` doesn't respect it fully for the first item.
+    // Let's assume the `plan_actions` conflict detection *should* prevent creation.
+    assert!(
+        !expected_target_pkg4_nodotprefix_file.exists() || !fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file).map_or(false, |m| m.file_type().is_symlink()),
+        "Target nodotprefix for package4 SHOULD NOT be a symlink due to conflict. Current state: exists={}, is_symlink={}",
+        expected_target_pkg4_nodotprefix_file.exists(),
+        expected_target_pkg4_nodotprefix_file.exists() && fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file).map_or(false, |m| m.file_type().is_symlink())
+    );
 
     // Verify package5: "nodotprefix/file.txt" -> "nodotprefix/file.txt"
     // First, verify the parent directory "nodotprefix" for package5
@@ -559,23 +583,21 @@ fn test_dotfiles_processing_edge_cases() {
 
     assert_eq!(
         report_pkg5_nodotprefix_dir.status,
-        TargetActionReportStatus::Success,
-        "Expected package5/nodotprefix (directory) processing to be Success, but got {:?}. Message: {:?}",
+        TargetActionReportStatus::ConflictPrevented, // EXPECT CONFLICT
+        "Expected package5/nodotprefix (directory) processing to be ConflictPrevented, but got {:?}. Message: {:?}",
         report_pkg5_nodotprefix_dir.status,
         report_pkg5_nodotprefix_dir.message
     );
+    assert_eq!(report_pkg5_nodotprefix_dir.original_action.action_type, ActionType::Conflict, "ActionType for package5/nodotprefix (directory) should be Conflict");
     let expected_target_pkg5_nodotprefix_dir = target_dir.join("nodotprefix");
+    // If conflict is properly handled, package5's directory should not be created.
     assert!(
+        !expected_target_pkg5_nodotprefix_dir.exists() || !expected_target_pkg5_nodotprefix_dir.is_dir(),
+        "Target nodotprefix for package5 SHOULD NOT be a directory due to conflict. Current state: exists={}, is_dir={}",
         expected_target_pkg5_nodotprefix_dir.exists(),
-        "Target directory nodotprefix for package5 was not created. Report details: {:?}",
-        report_pkg5_nodotprefix_dir
+        expected_target_pkg5_nodotprefix_dir.exists() && expected_target_pkg5_nodotprefix_dir.is_dir()
     );
-    assert!(
-        expected_target_pkg5_nodotprefix_dir.is_dir(),
-        "Target nodotprefix for package5 is not a directory. Report details: {:?}",
-        report_pkg5_nodotprefix_dir
-    );
-    assert_eq!(report_pkg5_nodotprefix_dir.original_action.action_type, ActionType::CreateDirectory, "ActionType for package5/nodotprefix (directory) should be CreateDirectory");
+
 
     // Next, verify the nested file "nodotprefix/file.txt" for package5
     let report_pkg5_nested_file = actions.iter().find(|r| {
@@ -585,63 +607,23 @@ fn test_dotfiles_processing_edge_cases() {
         })
     }).expect("Report for package5/nodotprefix/file.txt not found");
 
+    // If the parent directory `nodotprefix` for package5 is a Conflict, 
+    // then the nested file should also be treated as a Conflict or at least not Success.
     assert_eq!(
         report_pkg5_nested_file.status,
-        TargetActionReportStatus::Success,
-        "Expected package5/nodotprefix/file.txt processing to be Success, but got {:?}. Message: {:?}",
+        TargetActionReportStatus::ConflictPrevented, // EXPECT CONFLICT (due to parent conflict)
+        "Expected package5/nodotprefix/file.txt processing to be ConflictPrevented due to parent, but got {:?}. Message: {:?}",
         report_pkg5_nested_file.status,
         report_pkg5_nested_file.message
     );
+    assert_eq!(report_pkg5_nested_file.original_action.action_type, ActionType::Conflict, "ActionType for package5/nodotprefix/file.txt should be Conflict due to parent");
     let expected_target_pkg5_nested_file = target_dir.join("nodotprefix/file.txt");
     assert!(
-        expected_target_pkg5_nested_file.exists(),
-        "Target nodotprefix/file.txt for package5 was not created. Report details: {:?}",
-        report_pkg5_nested_file
+        !expected_target_pkg5_nested_file.exists(),
+        "Target nodotprefix/file.txt for package5 SHOULD NOT exist due to parent conflict. Current state: exists={}",
+        expected_target_pkg5_nested_file.exists()
     );
-    assert!(
-        fs::symlink_metadata(&expected_target_pkg5_nested_file).unwrap().file_type().is_symlink(),
-        "Target nodotprefix/file.txt for package5 is not a symlink. Report details: {:?}",
-        report_pkg5_nested_file
-    );
-    assert_eq!(report_pkg5_nested_file.original_action.action_type, ActionType::CreateSymlink, "ActionType for package5/nodotprefix/file.txt should be CreateSymlink");
 
-
-    // Print details for debugging if needed
-    // ---- START DEBUG PRINT (Original) ----
-    println!("--- DEBUG: test_dotfiles_processing_edge_cases --- ACTIONS ---");
-    for report in &actions {
-        if let Some(item) = &report.original_action.source_item {
-            println!(
-                "  Source: {:?}, Processed Name: {:?}, Target Path: {:?}",
-                item.package_relative_path,
-                item.target_name_after_dotfiles_processing,
-                report.original_action.target_path
-            );
-        } else {
-            println!("  Action with no source item: Target Path: {:?}", report.original_action.target_path);
-        }
-    }
-    println!("--- END DEBUG --- ACTIONS ---");
-    // ---- END DEBUG PRINT (Original) ----
-
-    // ---- START NEW DETAILED DEBUG PRINT ----
-    use std::ffi::OsStr;
-    println!("--- DEBUG: file_name() results ---");
-    for report in &actions {
-        if let Some(file_name_os_str) = report.original_action.target_path.file_name() {
-            let file_name_str = file_name_os_str.to_string_lossy();
-            println!(
-                "  Target: {:?}, FileName: {:?}, Is it '.': {}",
-                report.original_action.target_path,
-                file_name_str,
-                file_name_os_str == OsStr::new(".")
-            );
-        } else {
-            println!("  Target: {:?}, FileName: None", report.original_action.target_path);
-        }
-    }
-    println!("--- END DEBUG: file_name() results ---");
-    // ---- END NEW DETAILED DEBUG PRINT ----
 }
 
 // Note: True relative path calculation for symlinks is complex and depends on the target OS's symlink behavior.

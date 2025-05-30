@@ -7,6 +7,7 @@ use crate::fs_utils::{self};
 use crate::dotfiles;
 use std::path::PathBuf;
 use crate::ignore::{self, IgnorePatterns};
+use std::collections::HashMap;
 
 // --- Action Planning Enums and Structs ---
 
@@ -74,12 +75,12 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
         )).into());
     }
 
-    if config.verbosity > 1 {
-        println!("  Loaded ignore patterns for '{}':", package_name);
-        for pattern in current_ignore_patterns.iter_patterns() {
-            println!("    - {}", pattern.as_str());
-        }
-    }
+    // if config.verbosity > 1 {
+    //     println!("  Loaded ignore patterns for '{}':", package_name);
+    //     for pattern in current_ignore_patterns.iter_patterns() {
+    //         println!("    - {}", pattern.as_str());
+    //     }
+    // }
 
     let raw_items = match fs_utils::walk_package_dir(&package_path) {
         Ok(items) => items,
@@ -94,13 +95,13 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
             raw_item.package_relative_path.to_str().unwrap_or(""), 
             config.dotfiles
         ));
-        if config.verbosity > 3 { // Add verbose logging for debugging
-            println!(
-                "    DEBUG: raw_item.package_relative_path: {:?}, processed_target_relative_path: {:?}",
-                raw_item.package_relative_path,
-                processed_target_relative_path
-            );
-        }
+        // if config.verbosity > 3 { // Add verbose logging for debugging
+        //     println!(
+        //         "    DEBUG: raw_item.package_relative_path: {:?}, processed_target_relative_path: {:?}",
+        //         raw_item.package_relative_path,
+        //         processed_target_relative_path
+        //     );
+        // }
         
         let path_for_ignore_check_fullpath = PathBuf::from("/").join(&processed_target_relative_path);
         let basename_for_ignore_check = processed_target_relative_path.file_name()
@@ -109,10 +110,10 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
             .into_owned();
 
         if ignore::is_ignored(&path_for_ignore_check_fullpath, &basename_for_ignore_check, current_ignore_patterns) {
-            if config.verbosity > 2 {
-                println!("    Ignoring item '{:?}' (processed target: '{:?}') based on ignore patterns.", 
-                    raw_item.package_relative_path, processed_target_relative_path);
-            }
+            // if config.verbosity > 2 {
+            //     println!("    Ignoring item '{:?}' (processed target: '{:?}') based on ignore patterns.", 
+            //         raw_item.package_relative_path, processed_target_relative_path);
+            // }
             continue;
         }
 
@@ -138,7 +139,7 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
         let link_target_for_symlink = pathdiff::diff_paths(&stow_item_for_action.source_path, relative_to_target_parent)
             .unwrap_or_else(|| PathBuf::from("..").join(config.stow_dir.file_name().unwrap_or_default()).join(package_name).join(&stow_item_for_action.package_relative_path));
 
-        let mut planned_action_type = ActionType::CreateSymlink; // Default for files/symlinks
+        let planned_action_type: ActionType;
         let mut conflict_details_str: Option<String> = None;
         let mut final_link_target: Option<PathBuf> = Some(link_target_for_symlink.clone());
 
@@ -185,13 +186,13 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
 
             // Check if parent_path itself is a file (conflicting with the need for it to be a directory for the current item)
             if fs_utils::path_exists(parent_path) && !fs_utils::is_directory(parent_path) {
-                if config.verbosity > 1 {
-                    println!(
-                        "    CONFLICT (parent is file): Item {:?} conflicts because parent path {:?} is a file.",
-                        refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
-                        parent_path
-                    );
-                }
+                // if config.verbosity > 1 {
+                //     println!(
+                //         "    CONFLICT (parent is file): Item {:?} conflicts because parent path {:?} is a file.",
+                //         refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
+                //         parent_path
+                //     );
+                // }
                 refined_actions[i].action_type = ActionType::Conflict;
                 refined_actions[i].conflict_details = Some(format!("Parent path {:?} is a file, but current item {:?} needs it to be a directory (or part of one).", parent_path, refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource"))));
                 refined_actions[i].link_target_path = None;
@@ -230,13 +231,13 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
             }
 
             if parent_is_target_of_conflict {
-                 if config.verbosity > 1 {
-                    println!(
-                        "    CONFLICT (parent conflict): Item {:?} conflicts because parent path {:?} is part of another conflicting action.",
-                        refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
-                        parent_path
-                    );
-                }
+                 // if config.verbosity > 1 {
+                 //    println!(
+                 //        "    CONFLICT (parent conflict): Item {:?} conflicts because parent path {:?} is part of another conflicting action.",
+                 //        refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
+                 //        parent_path
+                 //    );
+                 // }
                 refined_actions[i].action_type = ActionType::Conflict;
                 refined_actions[i].conflict_details = Some(format!("Parent path {:?} is part of a conflicting item tree.", parent_path));
                 refined_actions[i].link_target_path = None;
@@ -249,6 +250,10 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
             parent_path_opt = parent_path.parent();
         }
     }
+
+    // --- REMOVE: Inter-package conflict detection logic from plan_actions --- 
+    // This logic will be moved to stow_packages after all actions are collected.
+
     Ok(refined_actions)
 }
 
@@ -279,9 +284,9 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
                 action.source_item.as_ref().map_or_else(|| PathBuf::from("N/A"), |si| si.source_path.clone()),
                 action.link_target_path.as_ref().map_or_else(|| PathBuf::from("N/A"), |p| p.clone())
             );
-            if config.verbosity > 1 { // Corresponds to INFO level or higher
-                println!("{}", message);
-            }
+            // if config.verbosity > 1 { // Corresponds to INFO level or higher
+            //     println!("{}", message);
+            // }
             reports.push(TargetActionReport {
                 original_action: action.clone(),
                 status: TargetActionReportStatus::Skipped,
@@ -305,9 +310,9 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
             ActionType::CreateDirectory => {
                 match fs_utils::create_dir_all(&action.target_path) {
                     Ok(_) => {
-                        if config.verbosity > 1 {
-                            println!("CREATED Directory: {:?}", action.target_path);
-                        }
+                        // if config.verbosity > 1 {
+                        //     println!("CREATED Directory: {:?}", action.target_path);
+                        // }
                         reports.push(TargetActionReport {
                             original_action: action.clone(),
                             status: TargetActionReportStatus::Success,
@@ -315,9 +320,9 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
                         });
                     }
                     Err(e) => {
-                        if config.verbosity > 0 {
-                            eprintln!("ERROR creating directory {:?}: {}", action.target_path, e);
-                        }
+                        // if config.verbosity > 0 {
+                        //     eprintln!("ERROR creating directory {:?}: {}", action.target_path, e);
+                        // }
                         reports.push(TargetActionReport {
                             original_action: action.clone(),
                             status: TargetActionReportStatus::Failure(e.to_string()),
@@ -330,12 +335,12 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
                 if let Some(parent_dir) = action.target_path.parent() {
                     if !fs_utils::path_exists(parent_dir) {
                         if let Err(e) = fs_utils::create_dir_all(parent_dir) {
-                            if config.verbosity > 0 {
-                                eprintln!(
-                                    "ERROR creating parent directory {:?} for symlink {:?}: {}",
-                                    parent_dir, action.target_path, e
-                                );
-                            }
+                            // if config.verbosity > 0 {
+                            //     eprintln!(
+                            //         "ERROR creating parent directory {:?} for symlink {:?}: {}",
+                            //         parent_dir, action.target_path, e
+                            //     );
+                            // }
                             reports.push(TargetActionReport {
                                 original_action: action.clone(),
                                 status: TargetActionReportStatus::Failure(format!(
@@ -349,9 +354,9 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
                             });
                             continue; // Skip to next action if parent dir creation failed
                         }
-                        if config.verbosity > 1 {
-                            println!("CREATED Parent Directory: {:?} for symlink {:?}", parent_dir, action.target_path);
-                        }
+                        // if config.verbosity > 1 {
+                        //     println!("CREATED Parent Directory: {:?} for symlink {:?}", parent_dir, action.target_path);
+                        // }
                     }
                 }
 
@@ -359,13 +364,13 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
                     Some(link_target) => {
                         match fs_utils::create_symlink(&action.target_path, link_target) {
                             Ok(_) => {
-                                if config.verbosity > 1 {
-                                    println!(
-                                        "CREATED Symlink: {:?} -> {:?}",
-                                        action.target_path,
-                                        link_target
-                                    );
-                                }
+                                // if config.verbosity > 1 {
+                                //     println!(
+                                //         "CREATED Symlink: {:?} -> {:?}",
+                                //         action.target_path,
+                                //         link_target
+                                //     );
+                                // }
                                 reports.push(TargetActionReport {
                                     original_action: action.clone(),
                                     status: TargetActionReportStatus::Success,
@@ -377,12 +382,12 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
                                 });
                             }
                             Err(e) => {
-                                if config.verbosity > 0 {
-                                    eprintln!(
-                                        "ERROR creating symlink {:?} -> {:?}: {}",
-                                        action.target_path, link_target, e
-                                    );
-                                }
+                                // if config.verbosity > 0 {
+                                //     eprintln!(
+                                //         "ERROR creating symlink {:?} -> {:?}: {}",
+                                //         action.target_path, link_target, e
+                                //     );
+                                // }
                                 reports.push(TargetActionReport {
                                     original_action: action.clone(),
                                     status: TargetActionReportStatus::Failure(e.to_string()),
@@ -397,12 +402,12 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
                     None => {
                         // This case should ideally not happen for CreateSymlink action type
                         // if plan_actions is correct.
-                        if config.verbosity > 0 {
-                            eprintln!(
-                                "ERROR: CreateSymlink action for {:?} is missing link_target_path.",
-                                action.target_path
-                            );
-                        }
+                        // if config.verbosity > 0 {
+                        //     eprintln!(
+                        //         "ERROR: CreateSymlink action for {:?} is missing link_target_path.",
+                        //         action.target_path
+                        //     );
+                        // }
                         reports.push(TargetActionReport {
                             original_action: action.clone(),
                             status: TargetActionReportStatus::Failure(
@@ -464,5 +469,95 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowE
         }
     }
 
-    execute_actions(&all_planned_actions, config)
+    // --- START: Inter-package conflict detection (Moved to stow_packages) ---
+    let mut final_actions = all_planned_actions; // Work on a mutable copy or the original if appropriate
+    let mut target_map: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+
+    for (index, action) in final_actions.iter().enumerate() {
+        if action.action_type != ActionType::Conflict { // Only consider non-conflicting actions for new conflicts
+            target_map.entry(action.target_path.clone()).or_default().push(index);
+        }
+    }
+
+    for (_target_path, action_indices) in target_map {
+        if action_indices.len() > 1 {
+            for index in action_indices {
+                let conflicting_action = &mut final_actions[index];
+                conflicting_action.action_type = ActionType::Conflict;
+                if conflicting_action.conflict_details.is_none() {
+                    let sources_involved = conflicting_action.source_item.as_ref()
+                        .map(|si| si.source_path.display().to_string())
+                        .unwrap_or_else(|| "Unknown source".to_string());
+                    conflicting_action.conflict_details = Some(format!(
+                        "Inter-package conflict: Multiple packages attempt to manage target path {:?}. Source: {}.",
+                        conflicting_action.target_path,
+                        sources_involved
+                    ));
+                }
+                // if config.verbosity > 0 {
+                //     println!(
+                //         "    INTER-PACKAGE CONFLICT (stow_packages): Target path {:?} is targeted by multiple packages. Action for source '{}' marked as Conflict. Details: {:?}",
+                //         conflicting_action.target_path,
+                //         conflicting_action.source_item.as_ref().map(|si| si.source_path.display().to_string()).unwrap_or_else(|| "N/A".to_string()),
+                //         conflicting_action.conflict_details
+                //     );
+                // }
+                conflicting_action.link_target_path = None;
+            }
+        }
+    }
+    // --- END: Inter-package conflict detection ---
+
+    // --- START: Propagate conflicts to child items ---
+    // (1) 収集フェーズ: どのアイテムが親の衝突の影響を受けるか特定する
+    let mut child_conflict_updates: Vec<(usize, String)> = Vec::new(); // (index, conflict_message)
+
+    // 最初に、直接的な衝突（stow_packagesの最初のループで設定されたもの）を把握
+    let parent_conflicts: std::collections::HashSet<PathBuf> = final_actions.iter()
+        .filter(|action| action.action_type == ActionType::Conflict)
+        .map(|action| action.target_path.clone())
+        .collect();
+
+    // 次に、子が親の衝突の影響を受けるかチェックする
+    // このループでは final_actions を変更しない
+    for (i, action) in final_actions.iter().enumerate() {
+        if action.action_type == ActionType::Conflict {
+            continue; // すでに直接的な衝突があるものはスキップ
+        }
+
+        if let Some(parent_target_path) = action.target_path.parent() {
+            // action.target_path の親が parent_conflicts に含まれていたら、
+            // この action も衝突とみなす
+            if parent_conflicts.contains(parent_target_path) {
+                let conflict_message = format!(
+                    "Parent path {:?} is in conflict, so child item {:?} is also a conflict.",
+                    parent_target_path,
+                    action.source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource"))
+                );
+                child_conflict_updates.push((i, conflict_message));
+            }
+        }
+    }
+
+    // (2) 更新フェーズ: 収集した情報に基づいて final_actions を更新
+    for (index_to_update, conflict_message) in child_conflict_updates {
+        let action_to_update = &mut final_actions[index_to_update];
+        if action_to_update.action_type != ActionType::Conflict { // まだ衝突マークされていなければ更新
+            action_to_update.action_type = ActionType::Conflict;
+            action_to_update.conflict_details = Some(conflict_message.clone());
+            action_to_update.link_target_path = None;
+
+            // if config.verbosity > 1 {
+            //     println!(
+            //         "    PROPAGATED CONFLICT (stow_packages): Item {:?} at {:?} marked as Conflict. Reason: {}",
+            //         action_to_update.source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
+            //         action_to_update.target_path,
+            //         conflict_message
+            //     );
+            // }
+        }
+    }
+    // --- END: Propagate conflicts to child items ---
+
+    execute_actions(&final_actions, config)
 } 
