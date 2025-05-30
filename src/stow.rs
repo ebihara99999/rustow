@@ -6,152 +6,285 @@ use crate::error::{RustowError, StowError, FsError};
 use crate::fs_utils::{self};
 use crate::dotfiles;
 use std::path::PathBuf;
+use crate::ignore::{self, IgnorePatterns};
 
-// 仮の TargetAction 構造体（tests/integration_tests.rs で使われているため）
-// 本来は stow モジュール内でちゃんと定義するのだ
+// --- Action Planning Enums and Structs ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionType {
+    CreateSymlink,      // Create a symbolic link
+    DeleteSymlink,      // Delete a symbolic link
+    CreateDirectory,    // Create a directory (for folding)
+    DeleteDirectory,    // Delete an empty directory (during unstow)
+    AdoptFile,          // Move a file from target to stow dir, then link (for --adopt)
+    AdoptDirectory,     // Move a directory from target to stow dir, then link (for --adopt)
+    Skip,               // Skip an operation (e.g., due to --defer or already correct state)
+    Conflict,           // A conflict was detected that cannot be resolved by options
+    // Maybe add more specific conflict types later if needed
+}
+
+// Re-define TargetAction based on the design document
+// The existing one in tests/integration_tests.rs is a placeholder.
+// We'll keep the existing one for now in stow.rs to avoid breaking tests immediately,
+// but we should aim to replace it or make it compatible.
+// For now, let's rename the existing one slightly to avoid direct collision if needed.
+// Actually, let's define the proper one here. Tests will need to adapt.
+
 #[derive(Debug, Clone)]
 pub struct TargetAction {
-    pub source_item: Option<StowItem>,
-    pub target_path: PathBuf,
-    pub link_target_path: Option<PathBuf>,
-    // pub action_type: ActionType, // ActionType も仮で定義が必要になるかもしれないのだ
-    pub conflict_details: Option<String>,
+    pub source_item: Option<StowItem>, // Original item from the package
+    pub target_path: PathBuf,        // Absolute path in the target directory
+    pub link_target_path: Option<PathBuf>, // Path the symlink should point to (relative to link's parent dir)
+    pub action_type: ActionType,
+    pub conflict_details: Option<String>, // Description of the conflict
 }
 
-// 仮の StowItem 構造体
-#[derive(Debug, Clone)]
+// StowItem re-definition from design document
+// The existing one in tests/integration_tests.rs is a placeholder.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)] // Added PartialEq, Eq, Hash as per design doc
+pub enum StowItemType {
+    File,
+    Directory,
+    Symlink, // Represents a symlink within the package itself (less common for typical stow usage)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)] // Added PartialEq, Eq, Hash
 pub struct StowItem {
-    pub package_relative_path: PathBuf, // Original path in package
-    pub source_path: PathBuf,           // Absolute path to source item in stow dir
-    pub target_name_after_dotfiles_processing: String, // Name in target dir after dot- prefix conversion
-    // pub item_type: RawStowItemType, // Potentially add this later
+    pub package_relative_path: PathBuf, // Path relative to the package root (e.g., "bin/script", "dot-config/nvim/init.vim")
+    pub source_path: PathBuf,           // Absolute path to the item in the stow directory
+    pub item_type: StowItemType,        // Type of the item in the stow package
+    // Name of the item as it should appear in the target directory after dotfiles processing.
+    // For "file.txt", it's "file.txt". For "dot-bashrc" with --dotfiles, it's ".bashrc".
+    // For "dir/dot-foo", it's "dir/.foo".
+    pub target_name_after_dotfiles_processing: PathBuf,
 }
 
-
-pub fn stow_packages(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
+fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &IgnorePatterns) -> Result<Vec<TargetAction>, RustowError> {
     let mut actions: Vec<TargetAction> = Vec::new();
+    let package_path = config.stow_dir.join(package_name);
 
-    if config.packages.is_empty() {
-        return Ok(actions); // No packages, no actions
+    if !fs_utils::path_exists(&package_path) {
+        return Err(StowError::PackageNotFound(package_name.to_string()).into());
+    }
+    if !fs_utils::is_directory(&package_path) {
+        return Err(StowError::InvalidPackageStructure(format!(
+            "Package '{}' is not a directory at {:?}",
+            package_name,
+            package_path
+        )).into());
     }
 
-    for package_name in &config.packages {
-        let package_path = config.stow_dir.join(package_name);
-
-        if !fs_utils::path_exists(&package_path) {
-            // For test_nonexistent_package to pass, we need to return an error here.
-            return Err(StowError::PackageNotFound(package_name.clone()).into());
+    if config.verbosity > 1 {
+        println!("  Loaded ignore patterns for '{}':", package_name);
+        for pattern in current_ignore_patterns.iter_patterns() {
+            println!("    - {}", pattern.as_str());
         }
-        if !fs_utils::is_directory(&package_path) {
-            return Err(StowError::InvalidPackageStructure(format!(
-                "Package '{}' is not a directory at {:?}",
-                package_name,
-                package_path
-            )).into());
+    }
+
+    let raw_items = match fs_utils::walk_package_dir(&package_path) {
+        Ok(items) => items,
+        Err(RustowError::Fs(FsError::NotFound(_))) => {
+            return Err(StowError::PackageNotFound(package_name.to_string()).into());
         }
+        Err(e) => return Err(e),
+    };    
 
-        // Load ignore patterns for the current package
-        let current_ignore_patterns = crate::ignore::IgnorePatterns::load(
-            &config.stow_dir, 
-            Some(package_name),
-            &config.home_dir
-        ).map_err(|e: crate::ignore::IgnoreError| {
-            RustowError::Ignore(crate::error::IgnoreError::LoadPatternsError(
-                format!("Failed to load ignore patterns for package '{}': {:?}", package_name, e)
-            ))
-        })?;
+    for raw_item in raw_items {
+        let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
+            raw_item.package_relative_path.to_str().unwrap_or(""), 
+            config.dotfiles
+        ));
+        if config.verbosity > 3 { // Add verbose logging for debugging
+            println!(
+                "    DEBUG: raw_item.package_relative_path: {:?}, processed_target_relative_path: {:?}",
+                raw_item.package_relative_path,
+                processed_target_relative_path
+            );
+        }
+        
+        let path_for_ignore_check_fullpath = PathBuf::from("/").join(&processed_target_relative_path);
+        let basename_for_ignore_check = processed_target_relative_path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
 
-        if config.verbosity > 1 { // Or a new specific verbosity level for ignore patterns
-            println!("  Loaded ignore patterns for '{}':", package_name);
-            for pattern in current_ignore_patterns.iter_patterns() {
-                println!("    - {}", pattern.as_str());
+        if ignore::is_ignored(&path_for_ignore_check_fullpath, &basename_for_ignore_check, current_ignore_patterns) {
+            if config.verbosity > 2 {
+                println!("    Ignoring item '{:?}' (processed target: '{:?}') based on ignore patterns.", 
+                    raw_item.package_relative_path, processed_target_relative_path);
             }
+            continue;
         }
 
-        let raw_items = match fs_utils::walk_package_dir(&package_path) {
-            Ok(items) => items,
-            Err(RustowError::Fs(FsError::NotFound(_))) => {
-                return Err(StowError::PackageNotFound(package_name.clone()).into());
-            }
-            Err(e) => return Err(e),
+        let target_path_abs = config.target_dir.join(&processed_target_relative_path);
+
+        let item_type_stow = match raw_item.item_type {
+            fs_utils::RawStowItemType::File => StowItemType::File,
+            fs_utils::RawStowItemType::Directory => StowItemType::Directory,
+            fs_utils::RawStowItemType::Symlink => StowItemType::Symlink,
         };
 
-        for raw_item in raw_items {
-            let package_relative_path_str = raw_item.package_relative_path.to_str().unwrap_or("");
-            let processed_path_str_after_dotfiles = dotfiles::process_item_name(
-                package_relative_path_str,
-                config.dotfiles,
-            );
+        let stow_item_for_action = StowItem {
+            source_path: raw_item.absolute_path.clone(),
+            package_relative_path: raw_item.package_relative_path.clone(), // Original relative path
+            target_name_after_dotfiles_processing: processed_target_relative_path.clone(), // Name after dotfiles processing
+            item_type: item_type_stow,
+        };
+        
+        let relative_to_target_parent = match target_path_abs.parent() {
+            Some(parent) => parent,
+            None => &config.target_dir,
+        };
+        let link_target_for_symlink = pathdiff::diff_paths(&stow_item_for_action.source_path, relative_to_target_parent)
+            .unwrap_or_else(|| PathBuf::from("..").join(config.stow_dir.file_name().unwrap_or_default()).join(package_name).join(&stow_item_for_action.package_relative_path));
 
-            // Check if item (or any parent) is ignored AFTER dotfiles processing
-            let mut is_item_ignored = false;
-            let path_to_check_ignore = PathBuf::from(&processed_path_str_after_dotfiles);
+        let mut planned_action_type = ActionType::CreateSymlink; // Default for files/symlinks
+        let mut conflict_details_str: Option<String> = None;
+        let mut final_link_target: Option<PathBuf> = Some(link_target_for_symlink.clone());
 
-            // Check 1: Full path ignore patterns (relative to target_dir, effectively starts with /package_name/...)
-            // This is how default patterns like `^/README.*` are expected to work.
-            // The `processed_path_str_after_dotfiles` is package_relative_path, 
-            // so we need to prepend `/` to match patterns like `^/README.md`
-            let path_for_full_match = PathBuf::from("/").join(&path_to_check_ignore);
-            for pattern in current_ignore_patterns.iter_patterns() {
-                if pattern.is_match(path_for_full_match.to_str().unwrap_or_default()) {
-                    if config.verbosity > 2 {
-                        println!("    Ignoring '{}' due to full path pattern: {}", path_for_full_match.display(), pattern.as_str());
-                    }
-                    is_item_ignored = true;
+        if fs_utils::path_exists(&target_path_abs) {
+            planned_action_type = ActionType::Conflict;
+            conflict_details_str = Some(format!("Target path {:?} already exists.", target_path_abs));
+            final_link_target = None; 
+        } else {
+            match stow_item_for_action.item_type {
+                StowItemType::Directory => {
+                    planned_action_type = ActionType::CreateDirectory;
+                    final_link_target = None; 
+                }
+                StowItemType::File | StowItemType::Symlink => {
+                    planned_action_type = ActionType::CreateSymlink;
+                }
+            }
+        }
+
+        actions.push(TargetAction {
+            source_item: Some(stow_item_for_action),
+            target_path: target_path_abs,
+            link_target_path: final_link_target,
+            action_type: planned_action_type,
+            conflict_details: conflict_details_str,
+        });
+    }
+
+    let mut refined_actions = actions; // Modify in place or clone if necessary for safety
+
+    for i in 0..refined_actions.len() {
+        // If action is already a conflict (e.g. direct file collision), skip further parent checks for THIS action.
+        if refined_actions[i].action_type == ActionType::Conflict {
+            continue;
+        }
+
+        let current_action_target_path = refined_actions[i].target_path.clone();
+        let mut parent_path_opt = current_action_target_path.parent();
+
+        while let Some(parent_path) = parent_path_opt {
+            if !parent_path.starts_with(&config.target_dir) || parent_path == config.target_dir {
+                break; // Stop if we go above target_dir or reach target_dir itself
+            }
+
+            // Check if parent_path itself is a file (conflicting with the need for it to be a directory for the current item)
+            if fs_utils::path_exists(parent_path) && !fs_utils::is_directory(parent_path) {
+                if config.verbosity > 1 {
+                    println!(
+                        "    CONFLICT (parent is file): Item {:?} conflicts because parent path {:?} is a file.",
+                        refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
+                        parent_path
+                    );
+                }
+                refined_actions[i].action_type = ActionType::Conflict;
+                refined_actions[i].conflict_details = Some(format!("Parent path {:?} is a file, but current item {:?} needs it to be a directory (or part of one).", parent_path, refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource"))));
+                refined_actions[i].link_target_path = None;
+                break; // Conflict due to parent being a file, stop checking this item's parents
+            }
+
+            // Check if this parent_path is the target of another *already decided* conflicting action in the list
+            // This requires careful iteration. If we iterate through `refined_actions` to find a conflicting parent,
+            // the order of processing items might matter, or we might need a more stable way to check pre-existing conflicts.
+            // For now, let's assume that if a parent directory *would be* a conflict (e.g. it's a file, or it's targeted by another stow package for a file),
+            // then items within it are also conflicts.
+            // The test case `test_plan_actions_basic_creation_and_conflict` specifically creates a dir_for_conflict
+            // in the target, and an item dir_for_conflict/another_nested.txt in the package.
+            // The `dir_for_conflict` (as a dir) should conflict with the package's `dir_for_conflict`.
+            // Then `another_nested.txt` should also be a conflict because its parent is.
+
+            // Simpler check: if any *other* processed StowItem maps to this exact parent_path and *that other item* is a file,
+            // but the current item expects this parent_path to be a directory (which it must be if current item is nested).
+            // This is part of the folding logic that is not fully implemented yet.
+
+            // For the specific test case: target_dir_conflict_path = target_dir.join("dir_for_conflict") exists.
+            // StowItem "dir_for_conflict" will have target_path_abs = target_dir_conflict_path. This will be a Conflict (dir vs dir, handled by basic check if types differ or adoption/override applies).
+            // StowItem "dir_for_conflict/another_nested.txt" has target_path_abs = target_dir_conflict_path.join("another_nested.txt").
+            // Its parent is target_dir_conflict_path.
+            // We need to see if the action associated with target_dir_conflict_path is a conflict.
+            
+            let mut parent_is_target_of_conflict = false;
+            for other_action_idx in 0..refined_actions.len() {
+                // We only care if the *parent path* of the current action (item i) is the *target path* of another action (item j)
+                // AND that other action (j) is a conflict.
+                if refined_actions[other_action_idx].target_path == parent_path && 
+                   refined_actions[other_action_idx].action_type == ActionType::Conflict {
+                    parent_is_target_of_conflict = true;
                     break;
                 }
             }
-            if is_item_ignored { continue; }
 
-            // Check 2: Basename ignore for files/dirs directly in the package root (e.g. .git)
-            // And also check if any parent component of the item is ignored.
-            let mut current_path_segment = PathBuf::new();
-            for component in path_to_check_ignore.components() {
-                current_path_segment.push(component.as_os_str());
-                let basename_to_check = current_path_segment.file_name().unwrap_or_default().to_string_lossy();
-                
-                for pattern in current_ignore_patterns.iter_patterns() {
-                    // Check if the pattern is intended for basenames (does not start with / or .)
-                    // This is a heuristic. A more robust way might be needed if patterns become complex.
-                    let pattern_str = pattern.as_str();
-                    let is_basename_pattern = !pattern_str.starts_with('/') && !pattern_str.starts_with("./") && !pattern_str.contains('/');
-
-                    if is_basename_pattern && pattern.is_match(&basename_to_check) {
-                         if config.verbosity > 2 {
-                            println!("    Ignoring '{}' (component '{}') due to basename pattern: {}", 
-                                path_to_check_ignore.display(), basename_to_check, pattern.as_str());
-                        }
-                        is_item_ignored = true;
-                        break;
-                    }
+            if parent_is_target_of_conflict {
+                 if config.verbosity > 1 {
+                    println!(
+                        "    CONFLICT (parent conflict): Item {:?} conflicts because parent path {:?} is part of another conflicting action.",
+                        refined_actions[i].source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
+                        parent_path
+                    );
                 }
-                if is_item_ignored { break; }
+                refined_actions[i].action_type = ActionType::Conflict;
+                refined_actions[i].conflict_details = Some(format!("Parent path {:?} is part of a conflicting item tree.", parent_path));
+                refined_actions[i].link_target_path = None;
+                break; // Conflict inherited from parent, stop checking this item's parents
             }
-            if is_item_ignored { continue; }
-
-            let target_path = config.target_dir.join(&processed_path_str_after_dotfiles);
-
-            let stow_item = StowItem {
-                source_path: raw_item.absolute_path.clone(),
-                package_relative_path: raw_item.package_relative_path.clone(),
-                target_name_after_dotfiles_processing: processed_path_str_after_dotfiles,
-            };
             
-            let relative_to_target_parent = match target_path.parent() {
-                Some(parent) => parent,
-                None => &config.target_dir, // Should not happen for items inside target
-            };
-            let link_target = pathdiff::diff_paths(&raw_item.absolute_path, relative_to_target_parent)
-                .unwrap_or_else(|| PathBuf::from("..").join(config.stow_dir.file_name().unwrap_or_default()).join(package_name).join(&raw_item.package_relative_path));
+            if refined_actions[i].action_type == ActionType::Conflict { // If conflict was set by any check in this loop for this parent
+                break;
+            }
+            parent_path_opt = parent_path.parent();
+        }
+    }
+    Ok(refined_actions)
+}
 
-            actions.push(TargetAction {
-                source_item: Some(stow_item),
-                target_path,
-                link_target_path: Some(link_target),
-                conflict_details: None,
-            });
+pub fn stow_packages(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
+    let mut all_actions: Vec<TargetAction> = Vec::new();
+
+    if config.packages.is_empty() {
+        return Ok(all_actions);
+    }
+
+    for package_name in &config.packages {
+        // Load ignore patterns for the current package
+        let current_ignore_patterns = match IgnorePatterns::load(
+            &config.stow_dir,
+            Some(package_name),
+            &config.home_dir, // Assuming home_dir is part of Config for global ignores
+        ) {
+            Ok(patterns) => patterns,
+            Err(e) => {
+                // Handle IgnoreError specifically if it's not already a RustowError
+                // For example, by wrapping it.
+                // Here, we assume IgnoreError can be converted or is a variant of RustowError
+                // If IgnoreError::LoadPatternsError or InvalidPattern is the type from ignore.rs,
+                // we need to map it to RustowError::Ignore.
+                // The current IgnoreError enum in ignore.rs is already well-defined.
+                return Err(RustowError::Ignore(crate::error::IgnoreError::LoadPatternsError(
+                    format!("Failed to load ignore patterns for package '{}': {:?}", package_name, e)
+                )));
+            }
+        };
+
+        match plan_actions(package_name, config, &current_ignore_patterns) { // Pass loaded patterns
+            Ok(package_actions) => all_actions.extend(package_actions),
+            Err(e) => return Err(e), 
         }
     }
 
-    Ok(actions)
+    Ok(all_actions)
 } 

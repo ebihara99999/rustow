@@ -6,6 +6,9 @@ use tempfile::{tempdir, TempDir};
 use rustow::cli::Args;
 use rustow::config::Config;
 use rustow::stow::stow_packages; // Assuming stow_packages is the main entry point
+use rustow::stow::ActionType;
+use std::ffi::OsStr; // Import OsStr
+use rustow::config::StowMode; // Add this import
 // Add other necessary imports from your crate, e.g., for error types or specific structs
 
 // Helper function to set up a test environment with stow and target directories
@@ -49,26 +52,22 @@ fn create_test_package(stow_dir: &Path, package_name: &str) -> PathBuf {
     package_dir
 }
 
-// Helper function to create a basic Config for tests
-fn create_test_config(stow_dir: PathBuf, target_dir: PathBuf, packages: Vec<String>, dotfiles: bool) -> Config {
-    // We need to create a minimal Args struct to build the Config
-    // Assuming your Config::from_args can handle this minimal set up
-    let args = Args {
-        target: Some(target_dir.clone()),
-        dir: Some(stow_dir.clone()),
-        delete: false,
-        restow: false,
+// Modified to accept verbosity
+fn create_test_config(stow_dir: PathBuf, target_dir: PathBuf, packages: Vec<String>, dotfiles: bool, verbosity: u8) -> Config {
+    Config {
+        stow_dir,
+        target_dir,
+        packages,
+        mode: StowMode::Stow, // Default to Stow mode for these tests
         adopt: false,
         no_folding: false,
         dotfiles,
-        override_conflicts: vec![],
-        defer_conflicts: vec![],
-        simulate: true, // Important: use simulate true for tests not to change FS beyond temp_dir
-        verbose: 0,
-        packages,
-    };
-
-    Config::from_args(args).expect("Failed to create Config from Args for test")
+        overrides: Vec::new(),
+        defers: Vec::new(),
+        simulate: false,
+        verbosity, // Use the passed verbosity
+        home_dir: std::env::temp_dir(), // Dummy home dir for tests, not critical for these path tests
+    }
 }
 
 
@@ -83,6 +82,7 @@ fn test_basic_stow_operation_without_dotfiles() {
         target_dir.clone(),
         vec![package_name.to_string()],
         false, // dotfiles disabled
+        0
     );
 
     let actions_result = stow_packages(&config);
@@ -126,6 +126,7 @@ fn test_basic_stow_operation_with_dotfiles() {
         target_dir.clone(),
         vec![package_name.to_string()],
         true, // dotfiles enabled
+        0
     );
 
     let actions_result = stow_packages(&config);
@@ -174,6 +175,7 @@ fn test_ignore_patterns_functionality() {
         target_dir.clone(),
         vec![package_name.to_string()],
         false, // dotfiles typically don't affect these ignore patterns
+        2
     );
 
     let actions_result = stow_packages(&config);
@@ -218,6 +220,7 @@ fn test_custom_ignore_patterns() {
         target_dir.clone(),
         vec![package_name.to_string()],
         true, // dotfiles enabled
+        0
     );
 
     let actions_result = stow_packages(&config);
@@ -281,6 +284,7 @@ fn test_multiple_packages_stow() {
         target_dir.clone(),
         vec![package1_name.to_string(), package2_name.to_string()],
         true, // dotfiles enabled for thoroughness
+        0
     );
 
     let actions_result = stow_packages(&config);
@@ -309,6 +313,7 @@ fn test_empty_package_list() {
         target_dir.clone(),
         vec![], // Empty package list
         false,
+        0
     );
 
     let actions_result = stow_packages(&config);
@@ -327,6 +332,7 @@ fn test_nonexistent_package() {
         target_dir.clone(),
         vec![package_name.to_string()],
         false,
+        0
     );
 
     let actions_result = stow_packages(&config);
@@ -339,28 +345,121 @@ fn test_nonexistent_package() {
 #[test]
 fn test_dotfiles_processing_edge_cases() {
     let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
-    let package_name = "edge_case_dots";
-    let package_dir = stow_dir.join(package_name);
-    fs::create_dir_all(&package_dir).expect("Failed to create edge case package dir");
 
-    // Files/dirs to test
-    fs::write(package_dir.join("dot-"), "content").expect("Failed to write 'dot-' file"); // dot- only
-    fs::write(package_dir.join("dot-foo-bar"), "content").expect("Failed to write 'dot-foo-bar' file");
-    fs::create_dir_all(package_dir.join("dot-dirOnly")).expect("Failed to create 'dot-dirOnly'");
-    fs::create_dir_all(package_dir.join("nodotprefix")).expect("Failed to create 'nodotprefix'");
-    fs::write(package_dir.join("nodotprefix/file.txt"), "content").expect("Failed to write file in nodotprefix");
+    // Test case 1: file named "dot-file" in package, should become ".file" in target
+    let package_dir_1 = stow_dir.join("package1");
+    fs::create_dir_all(&package_dir_1).unwrap();
+    fs::write(package_dir_1.join("dot-file"), "content for dot-file").unwrap();
+
+    // Test case 2: file starting with "dot-"
+    let package_dir_2 = stow_dir.join("package2");
+    fs::create_dir_all(&package_dir_2).unwrap();
+    fs::write(package_dir_2.join("dot-foo-bar"), "content").unwrap();
+
+    // Test case 3: directory starting with "dot-", containing a file
+    let package_dir_3 = stow_dir.join("package3");
+    fs::create_dir_all(&package_dir_3).unwrap();
+    let nested_dir_3 = package_dir_3.join("dot-dirOnly");
+    fs::create_dir_all(&nested_dir_3).unwrap();
+    fs::write(nested_dir_3.join("some_file.txt"), "content").unwrap();
+
+    // Test case 4: file NOT starting with "dot-"
+    let package_dir_4 = stow_dir.join("package4");
+    fs::create_dir_all(&package_dir_4).unwrap();
+    fs::write(package_dir_4.join("nodotprefix"), "content").unwrap();
+
+    // Test case 5: directory NOT starting with "dot-", containing a file
+    let package_dir_5 = stow_dir.join("package5");
+    fs::create_dir_all(&package_dir_5).unwrap();
+    let nested_dir_5 = package_dir_5.join("nodotprefix");
+    fs::create_dir_all(&nested_dir_5).unwrap();
+    fs::write(nested_dir_5.join("file.txt"), "content").unwrap();
 
     let config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
-        vec![package_name.to_string()],
-        true, // dotfiles enabled
+        vec![
+            "package1".to_string(),
+            "package2".to_string(),
+            "package3".to_string(),
+            "package4".to_string(),
+            "package5".to_string(),
+        ],
+        true, // enable dotfiles processing
+        4     // Set verbosity to 4 for debug logs
     );
 
     let actions_result = stow_packages(&config);
     assert!(actions_result.is_ok(), "stow_packages failed for dotfiles edge cases: {:?}", actions_result.err());
     let actions = actions_result.unwrap();
 
+    // Verify package1: "dot-file" -> ".file"
+    let has_dot_file_processed = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.package_relative_path == Path::new("dot-file") &&
+            item.target_name_after_dotfiles_processing == Path::new(".file")
+        } else {
+            false
+        }
+    });
+    assert!(has_dot_file_processed, "Expected target name '.file' for package1/dot-file");
+
+    // Verify package2: "dot-foo-bar" -> ".foo-bar"
+    let has_dot_foo_bar = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.target_name_after_dotfiles_processing == Path::new(".foo-bar")
+        } else {
+            false
+        }
+    });
+    assert!(has_dot_foo_bar, "Expected target name '.foo-bar' for package2/dot-foo-bar");
+
+    // Verify package3: "dot-dirOnly" -> ".dirOnly"
+    let has_dot_dir_only = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.package_relative_path == Path::new("dot-dirOnly") &&
+            item.target_name_after_dotfiles_processing == Path::new(".dirOnly")
+        } else {
+            false
+        }
+    });
+    assert!(has_dot_dir_only, "Expected target name '.dirOnly' for package3/dot-dirOnly");
+    
+    // Verify package3: "dot-dirOnly/some_file.txt" -> ".dirOnly/some_file.txt"
+    let has_dot_dir_only_file = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.package_relative_path == Path::new("dot-dirOnly/some_file.txt") &&
+            item.target_name_after_dotfiles_processing == Path::new(".dirOnly/some_file.txt")
+        } else {
+            false
+        }
+    });
+    assert!(has_dot_dir_only_file, "Expected target name '.dirOnly/some_file.txt' for package3/dot-dirOnly/some_file.txt");
+
+    // Verify package4: "nodotprefix" -> "nodotprefix"
+    let has_nodotprefix_file = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            // Assuming 'nodotprefix' is a top-level entry in the package
+            item.package_relative_path == std::path::PathBuf::from("nodotprefix") && 
+            item.target_name_after_dotfiles_processing == Path::new("nodotprefix")
+        } else {
+            false
+        }
+    });
+    assert!(has_nodotprefix_file, "Expected target name 'nodotprefix' for package4/nodotprefix");
+
+    // Verify package5: "nodotprefix/file.txt" -> "nodotprefix/file.txt"
+    let has_nodotprefix_nested_file = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.package_relative_path == std::path::PathBuf::from("nodotprefix/file.txt") &&
+            item.target_name_after_dotfiles_processing == Path::new("nodotprefix/file.txt")
+        } else {
+            false
+        }
+    });
+    assert!(has_nodotprefix_nested_file, "Expected target name 'nodotprefix/file.txt' for package5/nodotprefix/file.txt");
+
+    // Print details for debugging if needed
     // ---- START DEBUG PRINT (Original) ----
     println!("--- DEBUG: test_dotfiles_processing_edge_cases --- ACTIONS ---");
     for action in &actions {
@@ -396,60 +495,6 @@ fn test_dotfiles_processing_edge_cases() {
     }
     println!("--- END DEBUG: file_name() results ---");
     // ---- END NEW DETAILED DEBUG PRINT ----
-
-    let has_dot_empty = actions.iter().any(|a| {
-        if let Some(item) = &a.source_item {
-            item.target_name_after_dotfiles_processing == "."
-        } else {
-            false
-        }
-    });
-    assert!(has_dot_empty, "Expected 'dot-' to become '.' (checked via target_name_after_dotfiles_processing)");
-
-    let has_dot_foo_bar = actions.iter().any(|a| {
-        if let Some(item) = &a.source_item {
-            item.target_name_after_dotfiles_processing == ".foo-bar"
-        } else {
-            false
-        }
-    });
-    assert!(has_dot_foo_bar, "Expected 'dot-foo-bar' to become '.foo-bar' (checked via target_name_after_dotfiles_processing)");
-
-    let has_dot_dir_only = actions.iter().any(|a| {
-        if let Some(item) = &a.source_item {
-            item.target_name_after_dotfiles_processing == ".dirOnly"
-        } else {
-            false
-        }
-    });
-    assert!(has_dot_dir_only, "Expected 'dot-dirOnly' to become '.dirOnly' (checked via target_name_after_dotfiles_processing)");
-
-    // For items not starting with 'dot-', their target_name_after_dotfiles_processing should be the same as their original relative path's file_name (if it's a file)
-    // or the last component of the path (if it's a directory).
-    // This assertion needs to be more careful if package_relative_path contains directories.
-
-    // Check 'nodotprefix' directory - its target_name_after_dotfiles_processing should be 'nodotprefix'
-    let has_nodotprefix_dir = actions.iter().any(|a| {
-        if let Some(item) = &a.source_item {
-            // Assuming 'nodotprefix' is a top-level entry in the package
-            item.package_relative_path == std::path::PathBuf::from("nodotprefix") && 
-            item.target_name_after_dotfiles_processing == "nodotprefix"
-        } else {
-            false
-        }
-    });
-    assert!(has_nodotprefix_dir, "Expected 'nodotprefix' directory to remain unchanged and have correct processed name");
-    
-    // Check 'nodotprefix/file.txt' - its target_name_after_dotfiles_processing should be 'nodotprefix/file.txt'
-    let has_nodotprefix_file = actions.iter().any(|a| {
-        if let Some(item) = &a.source_item {
-            item.package_relative_path == std::path::PathBuf::from("nodotprefix/file.txt") &&
-            item.target_name_after_dotfiles_processing == "nodotprefix/file.txt"
-        } else {
-            false
-        }
-    });
-    assert!(has_nodotprefix_file, "Expected 'nodotprefix/file.txt' to remain unchanged and have correct processed name");
 }
 
 // Note: True relative path calculation for symlinks is complex and depends on the target OS's symlink behavior.
@@ -466,6 +511,7 @@ fn test_relative_path_calculation_basic() {
         target_dir.clone(),
         vec![package_name.to_string()],
         false, // dotfiles status doesn't fundamentally change relativity expectation
+        0
     );
 
     let actions_result = stow_packages(&config);
@@ -515,6 +561,98 @@ fn test_config_integration_verbosity_and_simulate() {
     let actions_result = stow_packages(&config);
     assert!(actions_result.is_ok(), "stow_packages failed with simulate config: {:?}", actions_result.err());
     assert!(!actions_result.unwrap().is_empty(), "Expected actions even in simulate mode");
+}
+
+#[test]
+fn test_plan_actions_basic_creation_and_conflict() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    let package_name = "plan_test_pkg";
+    let package_dir = stow_dir.join(package_name);
+    fs::create_dir_all(&package_dir).unwrap();
+
+    fs::write(package_dir.join("file_to_link.txt"), "link me").unwrap();
+    let dir_to_create_in_pkg = package_dir.join("dir_to_create");
+    fs::create_dir_all(&dir_to_create_in_pkg).unwrap();
+    fs::write(dir_to_create_in_pkg.join("nested_file.txt"), "i am nested").unwrap();
+    fs::write(package_dir.join("file_for_conflict.txt"), "conflict file content").unwrap();
+    let dir_for_conflict_in_pkg = package_dir.join("dir_for_conflict");
+    fs::create_dir_all(&dir_for_conflict_in_pkg).unwrap();
+    fs::write(dir_for_conflict_in_pkg.join("another_nested.txt"), "nested conflict").unwrap();
+
+    let config_empty_target = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0
+    );
+
+    let actions_empty_result = stow_packages(&config_empty_target);
+    assert!(actions_empty_result.is_ok(), "stow_packages failed for empty target: {:?}", actions_empty_result.err());
+    let actions_empty = actions_empty_result.unwrap();
+
+    let action_file_to_link = actions_empty.iter().find(|a| a.target_path.file_name().map_or(false, |name| name == OsStr::new("file_to_link.txt")));
+    assert!(action_file_to_link.is_some(), "Action for file_to_link.txt not found");
+    assert_eq!(action_file_to_link.unwrap().action_type, ActionType::CreateSymlink, "Expected CreateSymlink for file_to_link.txt");
+    assert!(action_file_to_link.unwrap().link_target_path.is_some(), "Link target path should exist for CreateSymlink");
+
+    let action_dir_to_create = actions_empty.iter().find(|a| a.target_path.file_name().map_or(false, |name| name == OsStr::new("dir_to_create")));
+    assert!(action_dir_to_create.is_some(), "Action for dir_to_create not found");
+    assert_eq!(action_dir_to_create.unwrap().action_type, ActionType::CreateDirectory, "Expected CreateDirectory for dir_to_create");
+    assert!(action_dir_to_create.unwrap().link_target_path.is_none(), "Link target path should be None for CreateDirectory");
+
+    let action_nested_file = actions_empty.iter().find(|a| a.target_path.ends_with(Path::new("dir_to_create/nested_file.txt")));
+    assert!(action_nested_file.is_some(), "Action for dir_to_create/nested_file.txt not found");
+    assert_eq!(action_nested_file.unwrap().action_type, ActionType::CreateSymlink, "Expected CreateSymlink for nested_file.txt");
+
+    let target_file_conflict_path = target_dir.join("file_for_conflict.txt");
+    fs::write(&target_file_conflict_path, "existing target file content").unwrap();
+
+    let config_file_conflict = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0
+    );
+    let actions_file_conflict_result = stow_packages(&config_file_conflict);
+    assert!(actions_file_conflict_result.is_ok(), "stow_packages failed for file conflict: {:?}", actions_file_conflict_result.err());
+    let actions_file_conflict = actions_file_conflict_result.unwrap();
+
+    let action_conflicting_file = actions_file_conflict.iter().find(|a| a.target_path.file_name().map_or(false, |name| name == OsStr::new("file_for_conflict.txt")));
+    assert!(action_conflicting_file.is_some(), "Action for file_for_conflict.txt not found in conflict scenario");
+    assert_eq!(action_conflicting_file.unwrap().action_type, ActionType::Conflict, "Expected Conflict for file_for_conflict.txt");
+    assert!(action_conflicting_file.unwrap().conflict_details.is_some(), "Conflict details should be present");
+    assert!(action_conflicting_file.unwrap().link_target_path.is_none(), "Link target should be None for Conflict");
+
+    fs::remove_file(target_file_conflict_path).unwrap();
+
+    let target_dir_conflict_path = target_dir.join("dir_for_conflict");
+    fs::create_dir_all(&target_dir_conflict_path).unwrap();
+    fs::write(target_dir_conflict_path.join("existing_file_in_target_dir.txt"), "dummy").unwrap();
+
+    let config_dir_conflict = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0
+    );
+    let actions_dir_conflict_result = stow_packages(&config_dir_conflict);
+    assert!(actions_dir_conflict_result.is_ok(), "stow_packages failed for dir conflict: {:?}", actions_dir_conflict_result.err());
+    let actions_dir_conflict = actions_dir_conflict_result.unwrap();
+    
+    let action_conflicting_dir = actions_dir_conflict.iter().find(|a| a.target_path.file_name().map_or(false, |name| name == OsStr::new("dir_for_conflict")));
+    assert!(action_conflicting_dir.is_some(), "Action for dir_for_conflict not found in conflict scenario");
+    assert_eq!(action_conflicting_dir.unwrap().action_type, ActionType::Conflict, "Expected Conflict for dir_for_conflict");
+    assert!(action_conflicting_dir.unwrap().conflict_details.is_some(), "Conflict details should be present for dir conflict");
+    assert!(action_conflicting_dir.unwrap().link_target_path.is_none(), "Link target should be None for dir Conflict");
+
+    let action_nested_in_conflicting_dir = actions_dir_conflict.iter().find(|a| a.target_path.ends_with(Path::new("dir_for_conflict/another_nested.txt")));
+    assert!(action_nested_in_conflicting_dir.is_some(), "Action for dir_for_conflict/another_nested.txt not found");
+    assert_eq!(action_nested_in_conflicting_dir.unwrap().action_type, ActionType::Conflict, "Expected Conflict for item in conflicting dir");
+
+    fs::remove_dir_all(target_dir_conflict_path).unwrap();
 }
 
 // Add more tests as needed: 

@@ -29,14 +29,58 @@ pub fn is_ignored(
     for regex_pattern in &ignore_patterns.patterns {
         let pattern_str = regex_pattern.as_str();
         if pattern_str.contains('/') {
-            // 1. Regex contains '/': match against the full relative path
             if regex_pattern.is_match(relative_path_str) {
                 return true;
             }
         } else {
-            // 2. Regex does not contain '/': match against the basename
+            // Check current item's basename directly
             if regex_pattern.is_match(item_basename) {
                 return true;
+            }
+            // Check if any parent directory component in the path matches the basename pattern
+            let mut path_accumulator = PathBuf::new(); 
+            for component in item_package_relative_path.components() {
+                match component {
+                    std::path::Component::RootDir => {
+                        path_accumulator.push(component.as_os_str());
+                    }
+                    std::path::Component::Normal(name_os_str) => {
+                        path_accumulator.push(name_os_str);
+                        let name_str_cow = name_os_str.to_string_lossy();
+                        let name_str: &str = name_str_cow.as_ref(); // Convert Cow to &str
+
+                        if regex_pattern.is_match(name_str) {
+                            // If this component (name_str) is the item_basename itself,
+                            // and the item is a top-level item (e.g. item_package_relative_path is "/.git" and name_str is ".git"),
+                            // then it was already caught by the direct item_basename check above. So we don't return true here for that case.
+                            // We want to return true if a *parent* directory component matches.
+                            
+                            // Check if the current component `name_str` is a genuine parent part of the path,
+                            // not just the item itself if it's at the root of the relative path.
+                            // Example: item_package_relative_path = "/.git", item_basename = ".git", name_str = ".git"
+                            // Here, `name_str == item_basename` is true.
+                            // `item_package_relative_path.strip_prefix("/").unwrap_or_default() == Path::new(name_str)` would be `Path::new(".git") == Path::new(".git")`, true.
+                            // So, this would NOT return true, which is correct (it was caught by the item_basename check).
+
+                            // Example: item_package_relative_path = "/.git/config", item_basename = "config", name_str = ".git"
+                            // Here, `name_str == item_basename` is false.
+                            // So, it returns true, which is correct (parent .git matched).
+                            
+                            // Example: item_package_relative_path = "/foo/.git/config", item_basename = "config", name_str = ".git"
+                            // Here, `name_str == item_basename` is false.
+                            // So, it returns true, correct.
+                            
+                            let is_top_level_item_match = 
+                                item_package_relative_path.strip_prefix("/")
+                                    .map_or(false, |p| p == Path::new(name_str));
+
+                            if !(name_str == item_basename && is_top_level_item_match) {
+                                return true;
+                            }
+                        }
+                    }
+                    _ => {} 
+                }
             }
         }
     }
