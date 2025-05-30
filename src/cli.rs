@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 /// Rustow: A Rust implementation of GNU Stow
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Args { // Ensure this is pub
     /// Target directory for symlinks

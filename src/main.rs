@@ -3,11 +3,11 @@ mod dotfiles;
 mod ignore;
 mod fs_utils;
 mod cli;
-// mod config; // Will be added later
+mod config; // Enabled config module
 
 use cli::Args;
 use clap::Parser;
-// use config::Config; // Will be used later
+use crate::config::Config; // Enabled Config import
 
 fn main() {
     // Print all arguments received by main to stderr
@@ -23,17 +23,18 @@ fn main() {
     eprintln!("stderr: Raw CLI args (non-test execution): {:?}", raw_cli_args);
 
     let args = Args::parse();
-    println!("Parsed arguments: {:?}", args);
+    // println!("Parsed arguments: {:?}", args);
+    eprintln!("stderr: Successfully parsed args in main: {:?}", args.clone()); // Clone args for eprintln if needed after move
 
-    // Later, we will do something like:
-    // match Config::from_args(args) {
-    //     Ok(config) => {
-    //         println!("Constructed config: {:?}", config);
-    //         // Proceed with stow logic based on config
-    //     }
-    //     Err(e) => {
-    //         eprintln!("Error constructing config: {}", e);
-    //         std::process::exit(1);
-    //     }
-    // }
+    match Config::from_args(args) {
+        Ok(config) => {
+            // println!("Constructed config: {:?}", config);
+            eprintln!("stderr: Successfully constructed config: {:?}", config);
+            // Proceed with stow logic based on config
+        }
+        Err(e) => {
+            eprintln!("stderr: Error constructing config: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
