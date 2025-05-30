@@ -3,37 +3,56 @@ mod dotfiles;
 mod ignore;
 mod fs_utils;
 mod cli;
-mod config; // Enabled config module
+mod config;
+mod stow;
 
 use cli::Args;
 use clap::Parser;
-use crate::config::Config; // Enabled Config import
+use crate::config::{Config, StowMode};
+use crate::stow::stow_packages;
 
 fn main() {
-    // Print all arguments received by main to stderr
-    let all_args: Vec<String> = std::env::args().collect();
-    eprintln!("stderr: main received args: {:?}", all_args);
-
-    if all_args.len() == 1 && all_args[0].contains("rustow") {
-        eprintln!("stderr: Attempting to parse arguments for main binary execution context...");
-    }
-
-    // Non-test execution continues here
-    let raw_cli_args: Vec<String> = std::env::args().collect(); // Still useful for non-test debugging
-    eprintln!("stderr: Raw CLI args (non-test execution): {:?}", raw_cli_args);
-
     let args = Args::parse();
-    // println!("Parsed arguments: {:?}", args);
-    eprintln!("stderr: Successfully parsed args in main: {:?}", args.clone()); // Clone args for eprintln if needed after move
-
+    
     match Config::from_args(args) {
         Ok(config) => {
-            // println!("Constructed config: {:?}", config);
-            eprintln!("stderr: Successfully constructed config: {:?}", config);
-            // Proceed with stow logic based on config
+            // Execute stow operation based on mode
+            match config.mode {
+                StowMode::Stow => {
+                    match stow_packages(&config) {
+                        Ok(actions) => {
+                            if config.simulate {
+                                println!("SIMULATION MODE - No changes will be made:");
+                                for action in &actions {
+                                    println!("Would create symlink: {} -> {:?}", 
+                                        action.target_path.display(),
+                                        action.link_target_path.as_ref().unwrap_or(&std::path::PathBuf::from("unknown"))
+                                    );
+                                }
+                            } else {
+                                println!("Planning to create {} symlinks", actions.len());
+                                // TODO: Implement actual action execution
+                                println!("Action execution not yet implemented");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error during stow operation: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                StowMode::Delete => {
+                    println!("Delete mode not yet implemented");
+                    // TODO: Implement delete_packages function
+                }
+                StowMode::Restow => {
+                    println!("Restow mode not yet implemented");
+                    // TODO: Implement restow_packages function
+                }
+            }
         }
         Err(e) => {
-            eprintln!("stderr: Error constructing config: {}", e);
+            eprintln!("Error constructing config: {}", e);
             std::process::exit(1);
         }
     }
