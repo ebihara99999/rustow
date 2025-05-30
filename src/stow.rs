@@ -252,11 +252,189 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
     Ok(refined_actions)
 }
 
-pub fn stow_packages(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
-    let mut all_actions: Vec<TargetAction> = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetActionReportStatus {
+    Success,
+    Skipped, // For simulation or if no action was needed
+    ConflictPrevented, // For when a planned conflict action is "executed" (i.e. prevented)
+    Failure(String), // Contains an error message
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetActionReport {
+    pub original_action: TargetAction, // The action that was planned
+    pub status: TargetActionReportStatus,
+    pub message: Option<String>, // Additional details, e.g., error message or simulation output
+}
+
+fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
+    let mut reports: Vec<TargetActionReport> = Vec::new();
+
+    for action in actions {
+        if config.simulate {
+            let message = format!(
+                "SIMULATE: Would perform {:?} on target {:?} (source: {:?}, link_target: {:?})",
+                action.action_type,
+                action.target_path,
+                action.source_item.as_ref().map_or_else(|| PathBuf::from("N/A"), |si| si.source_path.clone()),
+                action.link_target_path.as_ref().map_or_else(|| PathBuf::from("N/A"), |p| p.clone())
+            );
+            if config.verbosity > 1 { // Corresponds to INFO level or higher
+                println!("{}", message);
+            }
+            reports.push(TargetActionReport {
+                original_action: action.clone(),
+                status: TargetActionReportStatus::Skipped,
+                message: Some(message),
+            });
+            continue;
+        }
+
+        // Placeholder for actual action execution logic
+        // For now, we'll just report them as skipped if not simulating,
+        // until we implement the actual file operations.
+        // This will be replaced with calls to fs_utils based on action.action_type
+        match action.action_type {
+            ActionType::Conflict => {
+                 reports.push(TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::ConflictPrevented,
+                    message: Some(format!("CONFLICT: Operation prevented for target {:?}. Details: {}", action.target_path, action.conflict_details.as_deref().unwrap_or("N/A"))),
+                });
+            }
+            ActionType::CreateDirectory => {
+                match fs_utils::create_dir_all(&action.target_path) {
+                    Ok(_) => {
+                        if config.verbosity > 1 {
+                            println!("CREATED Directory: {:?}", action.target_path);
+                        }
+                        reports.push(TargetActionReport {
+                            original_action: action.clone(),
+                            status: TargetActionReportStatus::Success,
+                            message: Some(format!("Successfully created directory {:?}", action.target_path)),
+                        });
+                    }
+                    Err(e) => {
+                        if config.verbosity > 0 {
+                            eprintln!("ERROR creating directory {:?}: {}", action.target_path, e);
+                        }
+                        reports.push(TargetActionReport {
+                            original_action: action.clone(),
+                            status: TargetActionReportStatus::Failure(e.to_string()),
+                            message: Some(format!("Failed to create directory {:?}: {}", action.target_path, e)),
+                        });
+                    }
+                }
+            }
+            ActionType::CreateSymlink => {
+                if let Some(parent_dir) = action.target_path.parent() {
+                    if !fs_utils::path_exists(parent_dir) {
+                        if let Err(e) = fs_utils::create_dir_all(parent_dir) {
+                            if config.verbosity > 0 {
+                                eprintln!(
+                                    "ERROR creating parent directory {:?} for symlink {:?}: {}",
+                                    parent_dir, action.target_path, e
+                                );
+                            }
+                            reports.push(TargetActionReport {
+                                original_action: action.clone(),
+                                status: TargetActionReportStatus::Failure(format!(
+                                    "Failed to create parent directory {:?} for symlink: {}",
+                                    parent_dir, e
+                                )),
+                                message: Some(format!(
+                                    "Failed to create parent directory {:?} for symlink {:?}: {}",
+                                    parent_dir, action.target_path, e
+                                )),
+                            });
+                            continue; // Skip to next action if parent dir creation failed
+                        }
+                        if config.verbosity > 1 {
+                            println!("CREATED Parent Directory: {:?} for symlink {:?}", parent_dir, action.target_path);
+                        }
+                    }
+                }
+
+                match &action.link_target_path {
+                    Some(link_target) => {
+                        match fs_utils::create_symlink(&action.target_path, link_target) {
+                            Ok(_) => {
+                                if config.verbosity > 1 {
+                                    println!(
+                                        "CREATED Symlink: {:?} -> {:?}",
+                                        action.target_path,
+                                        link_target
+                                    );
+                                }
+                                reports.push(TargetActionReport {
+                                    original_action: action.clone(),
+                                    status: TargetActionReportStatus::Success,
+                                    message: Some(format!(
+                                        "Successfully created symlink {:?} -> {:?}",
+                                        action.target_path,
+                                        link_target
+                                    )),
+                                });
+                            }
+                            Err(e) => {
+                                if config.verbosity > 0 {
+                                    eprintln!(
+                                        "ERROR creating symlink {:?} -> {:?}: {}",
+                                        action.target_path, link_target, e
+                                    );
+                                }
+                                reports.push(TargetActionReport {
+                                    original_action: action.clone(),
+                                    status: TargetActionReportStatus::Failure(e.to_string()),
+                                    message: Some(format!(
+                                        "Failed to create symlink {:?} -> {:?}: {}",
+                                        action.target_path, link_target, e
+                                    )),
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        // This case should ideally not happen for CreateSymlink action type
+                        // if plan_actions is correct.
+                        if config.verbosity > 0 {
+                            eprintln!(
+                                "ERROR: CreateSymlink action for {:?} is missing link_target_path.",
+                                action.target_path
+                            );
+                        }
+                        reports.push(TargetActionReport {
+                            original_action: action.clone(),
+                            status: TargetActionReportStatus::Failure(
+                                "CreateSymlink action missing link_target_path".to_string(),
+                            ),
+                            message: Some(format!(
+                                "CreateSymlink action for {:?} is missing link_target_path.",
+                                action.target_path
+                            )),
+                        });
+                    }
+                }
+            }
+            // TODO: Implement other action types
+            _ => {
+                 reports.push(TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Skipped, // Placeholder
+                    message: Some(format!("Action {:?} not yet implemented for target {:?}", action.action_type, action.target_path)),
+                });
+            }
+        }
+    }
+    Ok(reports)
+}
+
+pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
+    let mut all_planned_actions: Vec<TargetAction> = Vec::new();
 
     if config.packages.is_empty() {
-        return Ok(all_actions);
+        // If there are no packages, return an empty list of reports directly.
+        return Ok(Vec::new());
     }
 
     for package_name in &config.packages {
@@ -281,10 +459,10 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetAction>, RustowError> 
         };
 
         match plan_actions(package_name, config, &current_ignore_patterns) { // Pass loaded patterns
-            Ok(package_actions) => all_actions.extend(package_actions),
+            Ok(package_actions) => all_planned_actions.extend(package_actions),
             Err(e) => return Err(e), 
         }
     }
 
-    Ok(all_actions)
+    execute_actions(&all_planned_actions, config)
 } 
