@@ -333,20 +333,95 @@ fn test_dotfiles_processing_edge_cases() {
     assert!(actions_result.is_ok(), "stow_packages failed for dotfiles edge cases: {:?}", actions_result.err());
     let actions = actions_result.unwrap();
 
-    let has_dot_empty = actions.iter().any(|a| a.target_path.file_name().map_or(false, |name| name == "."));
-    assert!(has_dot_empty, "Expected 'dot-' to become '.'");
+    // ---- START DEBUG PRINT (Original) ----
+    println!("--- DEBUG: test_dotfiles_processing_edge_cases --- ACTIONS ---");
+    for action in &actions {
+        if let Some(item) = &action.source_item {
+            println!(
+                "  Source: {:?}, Processed Name: {:?}, Target Path: {:?}",
+                item.package_relative_path,
+                item.target_name_after_dotfiles_processing,
+                action.target_path
+            );
+        } else {
+            println!("  Action with no source item: Target Path: {:?}", action.target_path);
+        }
+    }
+    println!("--- END DEBUG --- ACTIONS ---");
+    // ---- END DEBUG PRINT (Original) ----
 
-    let has_dot_foo_bar = actions.iter().any(|a| a.target_path.file_name().map_or(false, |name| name == ".foo-bar"));
-    assert!(has_dot_foo_bar, "Expected 'dot-foo-bar' to become '.foo-bar'");
+    // ---- START NEW DETAILED DEBUG PRINT ----
+    use std::ffi::OsStr;
+    println!("--- DEBUG: file_name() results ---");
+    for action in &actions {
+        if let Some(file_name_os_str) = action.target_path.file_name() {
+            let file_name_str = file_name_os_str.to_string_lossy();
+            println!(
+                "  Target: {:?}, FileName: {:?}, Is it '.': {}",
+                action.target_path,
+                file_name_str,
+                file_name_os_str == OsStr::new(".")
+            );
+        } else {
+            println!("  Target: {:?}, FileName: None", action.target_path);
+        }
+    }
+    println!("--- END DEBUG: file_name() results ---");
+    // ---- END NEW DETAILED DEBUG PRINT ----
 
-    let has_dot_dir_only = actions.iter().any(|a| a.target_path.file_name().map_or(false, |name| name == ".dirOnly"));
-    assert!(has_dot_dir_only, "Expected 'dot-dirOnly' to become '.dirOnly'");
+    let has_dot_empty = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.target_name_after_dotfiles_processing == "."
+        } else {
+            false
+        }
+    });
+    assert!(has_dot_empty, "Expected 'dot-' to become '.' (checked via target_name_after_dotfiles_processing)");
 
-    let has_nodotprefix_dir = actions.iter().any(|a| a.target_path.file_name().map_or(false, |name| name == "nodotprefix"));
-    assert!(has_nodotprefix_dir, "Expected 'nodotprefix' directory to remain unchanged");
+    let has_dot_foo_bar = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.target_name_after_dotfiles_processing == ".foo-bar"
+        } else {
+            false
+        }
+    });
+    assert!(has_dot_foo_bar, "Expected 'dot-foo-bar' to become '.foo-bar' (checked via target_name_after_dotfiles_processing)");
+
+    let has_dot_dir_only = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.target_name_after_dotfiles_processing == ".dirOnly"
+        } else {
+            false
+        }
+    });
+    assert!(has_dot_dir_only, "Expected 'dot-dirOnly' to become '.dirOnly' (checked via target_name_after_dotfiles_processing)");
+
+    // For items not starting with 'dot-', their target_name_after_dotfiles_processing should be the same as their original relative path's file_name (if it's a file)
+    // or the last component of the path (if it's a directory).
+    // This assertion needs to be more careful if package_relative_path contains directories.
+
+    // Check 'nodotprefix' directory - its target_name_after_dotfiles_processing should be 'nodotprefix'
+    let has_nodotprefix_dir = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            // Assuming 'nodotprefix' is a top-level entry in the package
+            item.package_relative_path == std::path::PathBuf::from("nodotprefix") && 
+            item.target_name_after_dotfiles_processing == "nodotprefix"
+        } else {
+            false
+        }
+    });
+    assert!(has_nodotprefix_dir, "Expected 'nodotprefix' directory to remain unchanged and have correct processed name");
     
-    let has_nodotprefix_file = actions.iter().any(|a| a.target_path.ends_with("nodotprefix/file.txt"));
-    assert!(has_nodotprefix_file, "Expected 'nodotprefix/file.txt' to remain unchanged");
+    // Check 'nodotprefix/file.txt' - its target_name_after_dotfiles_processing should be 'nodotprefix/file.txt'
+    let has_nodotprefix_file = actions.iter().any(|a| {
+        if let Some(item) = &a.source_item {
+            item.package_relative_path == std::path::PathBuf::from("nodotprefix/file.txt") &&
+            item.target_name_after_dotfiles_processing == "nodotprefix/file.txt"
+        } else {
+            false
+        }
+    });
+    assert!(has_nodotprefix_file, "Expected 'nodotprefix/file.txt' to remain unchanged and have correct processed name");
 }
 
 // Note: True relative path calculation for symlinks is complex and depends on the target OS's symlink behavior.

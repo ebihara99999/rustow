@@ -4,6 +4,7 @@
 use crate::config::Config;
 use crate::error::{RustowError, StowError, FsError};
 use crate::fs_utils::{self, RawStowItem, RawStowItemType};
+use crate::dotfiles;
 use std::path::{Path, PathBuf};
 
 // 仮の TargetAction 構造体（tests/integration_tests.rs で使われているため）
@@ -20,9 +21,10 @@ pub struct TargetAction {
 // 仮の StowItem 構造体
 #[derive(Debug, Clone)]
 pub struct StowItem {
-    pub package_relative_path: PathBuf, // Added from discussion
-    pub source_path: PathBuf,
-    // pub item_type: StowItemType, //  Potentially add this later
+    pub package_relative_path: PathBuf, // Original path in package
+    pub source_path: PathBuf,           // Absolute path to source item in stow dir
+    pub target_name_after_dotfiles_processing: String, // Name in target dir after dot- prefix conversion
+    // pub item_type: RawStowItemType, // Potentially add this later
 }
 
 
@@ -59,24 +61,29 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetAction>, RustowError> 
         };
 
         for raw_item in raw_items {
-            // Basic transformation for now, ignoring dotfiles, ignore patterns, etc.
-            let target_path = config.target_dir.join(&raw_item.package_relative_path);
+            let processed_item_name_str = dotfiles::process_item_name(
+                raw_item.package_relative_path.to_str().unwrap_or(""), // Convert PathBuf to &str
+                config.dotfiles,
+            );
+            // The processed_item_name_str is the full relative path after dot- processing.
+            // For target_path, we join this with target_dir.
+            let target_path = config.target_dir.join(&processed_item_name_str);
+
+            let stow_item = StowItem {
+                source_path: raw_item.absolute_path.clone(),
+                package_relative_path: raw_item.package_relative_path.clone(),
+                target_name_after_dotfiles_processing: processed_item_name_str, // Store the processed name
+            };
             
-            // Calculate a plausible relative link_target_path
-            // This assumes target_dir and stow_dir are siblings or otherwise simply related.
-            // A more robust solution would use pathdiff or similar.
             let relative_to_target_parent = match target_path.parent() {
                 Some(parent) => parent,
                 None => &config.target_dir, // Should not happen for items inside target
             };
             let link_target = pathdiff::diff_paths(&raw_item.absolute_path, relative_to_target_parent)
-                .unwrap_or_else(|| PathBuf::from("..").join(config.stow_dir.file_name().unwrap_or_default()).join(package_name).join(&raw_item.package_relative_path));
+                .unwrap_or_else(|| PathBuf::from("..").join(config.stow_dir.file_name().unwrap_or_default()).join(package_name).join(&stow_item.package_relative_path)); // Use original relative for source
 
             actions.push(TargetAction {
-                source_item: Some(StowItem {
-                    source_path: raw_item.absolute_path.clone(),
-                    package_relative_path: raw_item.package_relative_path.clone(),
-                }),
+                source_item: Some(stow_item),
                 target_path,
                 link_target_path: Some(link_target),
                 conflict_details: None,
