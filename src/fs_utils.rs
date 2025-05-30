@@ -185,23 +185,23 @@ pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {
         return Err(FsError::NotADirectory(package_path.to_path_buf()).into());
     }
 
-    let mut items = Vec::new();
+    let mut items: Vec<RawStowItem> = Vec::new();
 
-    for entry in WalkDir::new(package_path).min_depth(1) { // min_depth(1) to exclude the root itself
-        let entry = entry.map_err(|e| FsError::WalkDir {
+    for entry_result in WalkDir::new(package_path).min_depth(1) { // entry_result の型は walkdir::Result<walkdir::DirEntry>
+        let entry: walkdir::DirEntry = entry_result.map_err(|e| FsError::WalkDir { // 型を明示
             path: e.path().unwrap_or(package_path).to_path_buf(), // Use package_path if entry path is not available
             source: e.into_io_error().unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "walkdir error")),
         })?;
         
-        let absolute_path = entry.path().to_path_buf();
-        let package_relative_path = absolute_path.strip_prefix(package_path)
+        let absolute_path: PathBuf = entry.path().to_path_buf(); // 型を明示
+        let package_relative_path: PathBuf = absolute_path.strip_prefix(package_path) // 型を明示
             .map_err(|_| RustowError::Stow(crate::error::StowError::InvalidPackageStructure(
                 format!("Failed to strip prefix for {:?} from {:?}", absolute_path, package_path)
             )))?
             .to_path_buf();
 
-        let file_type = entry.file_type();
-        let item_type = if file_type.is_symlink() {
+        let file_type: std::fs::FileType = entry.file_type(); // 型を明示
+        let item_type: RawStowItemType = if file_type.is_symlink() { // 型を明示
             RawStowItemType::Symlink
         } else if file_type.is_dir() {
             RawStowItemType::Directory
@@ -228,7 +228,7 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<PathB
     }
 
     // 2. Canonicalize stow_dir for reliable comparison
-    let canonical_stow_dir = match canonicalize_path(stow_dir) {
+    let canonical_stow_dir: PathBuf = match canonicalize_path(stow_dir) { // 型を明示
         Ok(p) => p,
         Err(RustowError::Fs(FsError::Canonicalize { path, source })) => {
             // Propagate canonicalization error for stow_dir
@@ -246,20 +246,14 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<PathB
 
     // 3. Read the link's destination
     // read_link itself returns Err if not a symlink, but we've already checked.
-    let target_dest_path_from_link = match read_link(link_path) {
+    let target_dest_path_from_link: PathBuf = match read_link(link_path) { // 型を明示
         Ok(p) => p,
         Err(RustowError::Fs(FsError::NotASymlink(_))) => return Ok(None), // Should be caught by is_symlink above
         Err(e) => return Err(e),
     };
 
     // 4. Resolve the link's destination to an absolute, canonical path
-    let link_parent_dir = match link_path.parent() {
-        Some(p) => p,
-        None => return Err(RustowError::Fs(FsError::Io {
-            path: link_path.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "Link path has no parent"),
-        })),
-    };
+    let link_parent_dir: &Path = link_path.parent().unwrap_or_else(|| Path::new("")); // 型を明示
     
     let potentially_non_canonical_target_abs_path = if target_dest_path_from_link.is_absolute() {
         target_dest_path_from_link

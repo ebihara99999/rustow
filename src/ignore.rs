@@ -27,7 +27,7 @@ pub fn is_ignored(
     let relative_path_str: &str = item_package_relative_path.to_str().unwrap_or("");
 
     for regex_pattern in &ignore_patterns.patterns {
-        let pattern_str = regex_pattern.as_str();
+        let pattern_str: &str = regex_pattern.as_str();
         if pattern_str.contains('/') {
             if regex_pattern.is_match(relative_path_str) {
                 return true;
@@ -38,7 +38,7 @@ pub fn is_ignored(
                 return true;
             }
             // Check if any parent directory component in the path matches the basename pattern
-            let mut path_accumulator = PathBuf::new(); 
+            let mut path_accumulator: PathBuf = PathBuf::new();
             for component in item_package_relative_path.components() {
                 match component {
                     std::path::Component::RootDir => {
@@ -46,7 +46,7 @@ pub fn is_ignored(
                     }
                     std::path::Component::Normal(name_os_str) => {
                         path_accumulator.push(name_os_str);
-                        let name_str_cow = name_os_str.to_string_lossy();
+                        let name_str_cow: std::borrow::Cow<str> = name_os_str.to_string_lossy();
                         let name_str: &str = name_str_cow.as_ref(); // Convert Cow to &str
 
                         if regex_pattern.is_match(name_str) {
@@ -70,7 +70,7 @@ pub fn is_ignored(
                             // Here, `name_str == item_basename` is false.
                             // So, it returns true, correct.
                             
-                            let is_top_level_item_match = 
+                            let is_top_level_item_match: bool =
                                 item_package_relative_path.strip_prefix("/")
                                     .map_or(false, |p| p == Path::new(name_str));
 
@@ -89,19 +89,19 @@ pub fn is_ignored(
 
 // Helper function to read patterns from a file, skipping comments and empty lines
 fn read_patterns_from_file(file_path: &Path) -> Result<Vec<Regex>, IgnoreError> {
-    let file = File::open(file_path).map_err(|e| IgnoreError::FileIoError { 
+    let file: File = File::open(file_path).map_err(|e| IgnoreError::FileIoError { 
         path: file_path.to_path_buf(), 
         source: e 
     })?;
-    let reader = BufReader::new(file);
-    let mut patterns = Vec::new();
+    let reader: BufReader<File> = BufReader::new(file);
+    let mut patterns: Vec<Regex> = Vec::new();
 
     for line_result in reader.lines() {
-        let line = line_result.map_err(|e| IgnoreError::FileIoError { 
+        let line: String = line_result.map_err(|e| IgnoreError::FileIoError { 
             path: file_path.to_path_buf(), 
             source: e 
         })?;
-        let trimmed_line = line.trim();
+        let trimmed_line: &str = line.trim();
 
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
             continue;
@@ -170,7 +170,7 @@ impl IgnorePatterns {
     ) -> Result<Self, IgnoreError> {
         // 1. Try package-local ignore list: <stow_dir>/<package_name>/.stow-local-ignore
         if let Some(name) = package_name {
-            let local_ignore_path = stow_dir.join(name).join(".stow-local-ignore");
+            let local_ignore_path: PathBuf = stow_dir.join(name).join(".stow-local-ignore");
             if local_ignore_path.is_file() { // Check if it's a file
                 return Ok(IgnorePatterns {
                     patterns: read_patterns_from_file(&local_ignore_path)?,
@@ -179,7 +179,7 @@ impl IgnorePatterns {
         }
 
         // 2. Try global ignore list: <home_dir>/.stow-global-ignore
-        let global_ignore_path = home_dir.join(".stow-global-ignore");
+        let global_ignore_path: PathBuf = home_dir.join(".stow-global-ignore");
         if global_ignore_path.is_file() { // Check if it's a file
             return Ok(IgnorePatterns {
                 patterns: read_patterns_from_file(&global_ignore_path)?,

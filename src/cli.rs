@@ -58,11 +58,32 @@ pub struct Args { // Ensure this is pub
 mod tests {
     use super::*;
 
+    // Helper function to ensure STOW_DIR is cleared before and after tests that use it.
+    // This is to prevent interference between tests when run in parallel.
+    struct StowDirEnvGuard;
+
+    impl StowDirEnvGuard {
+        fn new() -> Self {
+            unsafe {
+                // Clear before the test in case it was set by a previous one
+                std::env::remove_var("STOW_DIR");
+            }
+            StowDirEnvGuard
+        }
+    }
+
+    impl Drop for StowDirEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                // Clear after the test to avoid affecting subsequent tests
+                std::env::remove_var("STOW_DIR");
+            }
+        }
+    }
+
     #[test]
     fn test_basic_stow_command() {
-        unsafe {
-            std::env::remove_var("STOW_DIR"); // Clear STOW_DIR before this test
-        }
+        let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear
         let args = Args::parse_from(&["rustow", "mypackage"]);
         assert_eq!(args.packages, vec!["mypackage"]);
         assert!(!args.delete);
@@ -153,28 +174,23 @@ mod tests {
         assert!(args.dotfiles);
     }
 
-    // Test for STOW_DIR environment variable
     #[test]
     fn test_stow_dir_from_env() {
+        let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
         unsafe {
             std::env::set_var("STOW_DIR", "/env/stow/path");
         }
         let args = Args::parse_from(&["rustow", "mypackage"]);
         assert_eq!(args.dir, Some(PathBuf::from("/env/stow/path")));
-        unsafe {
-            std::env::remove_var("STOW_DIR"); // Clean up env var
-        }
     }
 
     #[test]
     fn test_stow_dir_from_option_overrides_env() {
+        let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
         unsafe {
             std::env::set_var("STOW_DIR", "/env/stow/path");
         }
         let args = Args::parse_from(&["rustow", "-d", "/cmd/stow/path", "mypackage"]);
         assert_eq!(args.dir, Some(PathBuf::from("/cmd/stow/path")));
-        unsafe {
-            std::env::remove_var("STOW_DIR"); // Clean up env var
-        }
     }
 } 

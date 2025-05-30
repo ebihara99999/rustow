@@ -31,7 +31,7 @@ pub struct Config {
 impl Config {
     pub fn from_args(args: Args) -> RustowResult<Self> {
         // 1. Determine StowMode
-        let mode = if args.delete {
+        let mode: StowMode = if args.delete {
             StowMode::Delete
         } else if args.restow {
             StowMode::Restow
@@ -40,7 +40,7 @@ impl Config {
         };
 
         // 2. Resolve stow_dir
-        let stow_dir_path_unresolved = match args.dir {
+        let stow_dir_path_unresolved: PathBuf = match args.dir {
             Some(path) => path,
             None => match env::var("STOW_DIR") {
                 Ok(val) => PathBuf::from(val),
@@ -51,60 +51,60 @@ impl Config {
                 })?,
             },
         };
-        let stow_dir = fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| {
+        let stow_dir: PathBuf = fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| {
             match e {
                 RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidStowDir(format!(
-                    "Failed to canonicalize stow directory \'{}\': {}", stow_dir_path_unresolved.display(), fs_error
+                    "Failed to canonicalize stow directory '{}': {}", stow_dir_path_unresolved.display(), fs_error
                 ))),
                 _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
-                    "An unexpected error occurred while canonicalizing stow directory \'{}\': {}", stow_dir_path_unresolved.display(), e
+                    "An unexpected error occurred while canonicalizing stow directory '{}': {}", stow_dir_path_unresolved.display(), e
                 )))
             }
         })?;
 
         // 3. Resolve target_dir
-        let target_dir_path_unresolved = match args.target {
+        let target_dir_path_unresolved: PathBuf = match args.target {
             Some(path) => path,
             None => stow_dir.parent().ok_or_else(|| {
                 RustowError::Config(ConfigError::InvalidTargetDir(
-                    format!("Stow directory \'{}\' has no parent, cannot determine default target directory", stow_dir.display())
+                    format!("Stow directory '{}' has no parent, cannot determine default target directory", stow_dir.display())
                 ))
             })?.to_path_buf(),
         };
-        let target_dir = fs_utils::canonicalize_path(&target_dir_path_unresolved).map_err(|e| {
+        let target_dir: PathBuf = fs_utils::canonicalize_path(&target_dir_path_unresolved).map_err(|e| {
             match e {
                 RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                    "Failed to canonicalize target directory \'{}\': {}", target_dir_path_unresolved.display(), fs_error
+                    "Failed to canonicalize target directory '{}': {}", target_dir_path_unresolved.display(), fs_error
                 ))),
                 _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                    "An unexpected error occurred while canonicalizing target directory \'{}\': {}", target_dir_path_unresolved.display(), e
+                    "An unexpected error occurred while canonicalizing target directory '{}': {}", target_dir_path_unresolved.display(), e
                 )))
             }
         })?;
 
-        let home_dir = dirs::home_dir().ok_or_else(|| 
+        let home_dir: PathBuf = dirs::home_dir().ok_or_else(|| 
             RustowError::Config(ConfigError::InvalidStowDir(
                 "Failed to determine home directory for loading global ignore file".to_string()
             ))
         )?;
 
         // Compile override and defer patterns
-        let mut overrides_compiled = Vec::new();
+        let mut overrides_compiled: Vec<Regex> = Vec::new();
         for pattern_str in &args.override_conflicts {
             match Regex::new(pattern_str) {
                 Ok(re) => overrides_compiled.push(re),
                 Err(e) => return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                    format!("Invalid --override pattern \'{}\': {}", pattern_str, e)
+                    format!("Invalid --override pattern '{}': {}", pattern_str, e)
                 ))),
             }
         }
 
-        let mut defers_compiled = Vec::new();
+        let mut defers_compiled: Vec<Regex> = Vec::new();
         for pattern_str in &args.defer_conflicts {
             match Regex::new(pattern_str) {
                 Ok(re) => defers_compiled.push(re),
                 Err(e) => return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                    format!("Invalid --defer pattern \'{}\': {}", pattern_str, e)
+                    format!("Invalid --defer pattern '{}': {}", pattern_str, e)
                 ))),
             }
         }
@@ -130,7 +130,7 @@ impl Config {
 mod tests {
     use super::*;
     use crate::cli::Args;
-    use crate::error::FsError;
+    
     use clap::Parser;
     use std::fs;
     use tempfile::tempdir;

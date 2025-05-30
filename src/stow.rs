@@ -62,7 +62,7 @@ pub struct StowItem {
 
 fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &IgnorePatterns) -> Result<Vec<TargetAction>, RustowError> {
     let mut actions: Vec<TargetAction> = Vec::new();
-    let package_path = config.stow_dir.join(package_name);
+    let package_path: PathBuf = config.stow_dir.join(package_name);
 
     if !fs_utils::path_exists(&package_path) {
         return Err(StowError::PackageNotFound(package_name.to_string()).into());
@@ -82,7 +82,7 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
     //     }
     // }
 
-    let raw_items = match fs_utils::walk_package_dir(&package_path) {
+    let raw_items: Vec<fs_utils::RawStowItem> = match fs_utils::walk_package_dir(&package_path) {
         Ok(items) => items,
         Err(RustowError::Fs(FsError::NotFound(_))) => {
             return Err(StowError::PackageNotFound(package_name.to_string()).into());
@@ -91,7 +91,7 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
     };    
 
     for raw_item in raw_items {
-        let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
+        let processed_target_relative_path: PathBuf = PathBuf::from(dotfiles::process_item_name(
             raw_item.package_relative_path.to_str().unwrap_or(""), 
             config.dotfiles
         ));
@@ -103,8 +103,8 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
         //     );
         // }
         
-        let path_for_ignore_check_fullpath = PathBuf::from("/").join(&processed_target_relative_path);
-        let basename_for_ignore_check = processed_target_relative_path.file_name()
+        let path_for_ignore_check_fullpath: PathBuf = PathBuf::from("/").join(&processed_target_relative_path);
+        let basename_for_ignore_check: String = processed_target_relative_path.file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
@@ -117,26 +117,26 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
             continue;
         }
 
-        let target_path_abs = config.target_dir.join(&processed_target_relative_path);
+        let target_path_abs: PathBuf = config.target_dir.join(&processed_target_relative_path);
 
-        let item_type_stow = match raw_item.item_type {
+        let item_type_stow: StowItemType = match raw_item.item_type {
             fs_utils::RawStowItemType::File => StowItemType::File,
             fs_utils::RawStowItemType::Directory => StowItemType::Directory,
             fs_utils::RawStowItemType::Symlink => StowItemType::Symlink,
         };
 
-        let stow_item_for_action = StowItem {
+        let stow_item_for_action: StowItem = StowItem {
             source_path: raw_item.absolute_path.clone(),
             package_relative_path: raw_item.package_relative_path.clone(), // Original relative path
             target_name_after_dotfiles_processing: processed_target_relative_path.clone(), // Name after dotfiles processing
             item_type: item_type_stow,
         };
         
-        let relative_to_target_parent = match target_path_abs.parent() {
+        let relative_to_target_parent: &std::path::Path = match target_path_abs.parent() {
             Some(parent) => parent,
             None => &config.target_dir,
         };
-        let link_target_for_symlink = pathdiff::diff_paths(&stow_item_for_action.source_path, relative_to_target_parent)
+        let link_target_for_symlink: PathBuf = pathdiff::diff_paths(&stow_item_for_action.source_path, relative_to_target_parent)
             .unwrap_or_else(|| PathBuf::from("..").join(config.stow_dir.file_name().unwrap_or_default()).join(package_name).join(&stow_item_for_action.package_relative_path));
 
         let planned_action_type: ActionType;
@@ -168,7 +168,7 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
         });
     }
 
-    let mut refined_actions = actions; // Modify in place or clone if necessary for safety
+    let mut refined_actions: Vec<TargetAction> = actions; // Modify in place or clone if necessary for safety
 
     for i in 0..refined_actions.len() {
         // If action is already a conflict (e.g. direct file collision), skip further parent checks for THIS action.
@@ -176,8 +176,8 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
             continue;
         }
 
-        let current_action_target_path = refined_actions[i].target_path.clone();
-        let mut parent_path_opt = current_action_target_path.parent();
+        let current_action_target_path: PathBuf = refined_actions[i].target_path.clone();
+        let mut parent_path_opt: Option<&std::path::Path> = current_action_target_path.parent();
 
         while let Some(parent_path) = parent_path_opt {
             if !parent_path.starts_with(&config.target_dir) || parent_path == config.target_dir {
@@ -219,7 +219,7 @@ fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &I
             // Its parent is target_dir_conflict_path.
             // We need to see if the action associated with target_dir_conflict_path is a conflict.
             
-            let mut parent_is_target_of_conflict = false;
+            let mut parent_is_target_of_conflict: bool = false;
             for other_action_idx in 0..refined_actions.len() {
                 // We only care if the *parent path* of the current action (item i) is the *target path* of another action (item j)
                 // AND that other action (j) is a conflict.
@@ -277,7 +277,7 @@ fn execute_actions(actions: &[TargetAction], config: &Config) -> Result<Vec<Targ
 
     for action in actions {
         if config.simulate {
-            let message = format!(
+            let message: String = format!(
                 "SIMULATE: Would perform {:?} on target {:?} (source: {:?}, link_target: {:?})",
                 action.action_type,
                 action.target_path,
@@ -444,7 +444,7 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowE
 
     for package_name in &config.packages {
         // Load ignore patterns for the current package
-        let current_ignore_patterns = match IgnorePatterns::load(
+        let current_ignore_patterns: IgnorePatterns = match IgnorePatterns::load(
             &config.stow_dir,
             Some(package_name),
             &config.home_dir, // Assuming home_dir is part of Config for global ignores
@@ -470,7 +470,7 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowE
     }
 
     // --- START: Inter-package conflict detection (Moved to stow_packages) ---
-    let mut final_actions = all_planned_actions; // Work on a mutable copy or the original if appropriate
+    let mut final_actions: Vec<TargetAction> = all_planned_actions; // Work on a mutable copy or the original if appropriate
     let mut target_map: HashMap<PathBuf, Vec<usize>> = HashMap::new();
 
     for (index, action) in final_actions.iter().enumerate() {
@@ -482,10 +482,10 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowE
     for (_target_path, action_indices) in target_map {
         if action_indices.len() > 1 {
             for index in action_indices {
-                let conflicting_action = &mut final_actions[index];
+                let conflicting_action: &mut TargetAction = &mut final_actions[index];
                 conflicting_action.action_type = ActionType::Conflict;
                 if conflicting_action.conflict_details.is_none() {
-                    let sources_involved = conflicting_action.source_item.as_ref()
+                    let sources_involved: String = conflicting_action.source_item.as_ref()
                         .map(|si| si.source_path.display().to_string())
                         .unwrap_or_else(|| "Unknown source".to_string());
                     conflicting_action.conflict_details = Some(format!(
@@ -529,7 +529,7 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowE
             // action.target_path の親が parent_conflicts に含まれていたら、
             // この action も衝突とみなす
             if parent_conflicts.contains(parent_target_path) {
-                let conflict_message = format!(
+                let conflict_message: String = format!(
                     "Parent path {:?} is in conflict, so child item {:?} is also a conflict.",
                     parent_target_path,
                     action.source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource"))
@@ -541,7 +541,7 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowE
 
     // (2) 更新フェーズ: 収集した情報に基づいて final_actions を更新
     for (index_to_update, conflict_message) in child_conflict_updates {
-        let action_to_update = &mut final_actions[index_to_update];
+        let action_to_update: &mut TargetAction = &mut final_actions[index_to_update];
         if action_to_update.action_type != ActionType::Conflict { // まだ衝突マークされていなければ更新
             action_to_update.action_type = ActionType::Conflict;
             action_to_update.conflict_details = Some(conflict_message.clone());
