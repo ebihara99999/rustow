@@ -1008,6 +1008,17 @@ pub fn restow_packages(config: &Config) -> Result<Vec<TargetActionReport>, Rusto
     Ok(all_reports)
 }
 
+/// Sort deletion actions to ensure proper deletion order
+fn sort_deletion_actions(actions: &mut Vec<TargetAction>) {
+    actions.sort_by(|a, b| {
+        match (&a.action_type, &b.action_type) {
+            (ActionType::DeleteSymlink, ActionType::DeleteDirectory) => std::cmp::Ordering::Less,
+            (ActionType::DeleteDirectory, ActionType::DeleteSymlink) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        }
+    });
+}
+
 /// Plan delete actions for restow operation - removes all stow-managed symlinks for a package
 /// regardless of current package contents
 fn plan_restow_delete_actions(package_name: &str, config: &Config) -> Result<Vec<TargetAction>, RustowError> {
@@ -1023,13 +1034,7 @@ fn plan_restow_delete_actions(package_name: &str, config: &Config) -> Result<Vec
 
     // Sort actions so that symlink deletions come before directory deletions
     // This ensures that directories are only deleted after their contents are removed
-    actions.sort_by(|a, b| {
-        match (&a.action_type, &b.action_type) {
-            (ActionType::DeleteSymlink, ActionType::DeleteDirectory) => std::cmp::Ordering::Less,
-            (ActionType::DeleteDirectory, ActionType::DeleteSymlink) => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        }
-    });
+    sort_deletion_actions(&mut actions);
 
     Ok(actions)
 }
@@ -2421,10 +2426,76 @@ mod tests {
     #[test]
     fn test_prepare_canonical_package_path_nonexistent_stow_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let stow_dir = temp_dir.path().join("nonexistent_stow");
+        let nonexistent_stow_dir = temp_dir.path().join("nonexistent");
+        let package_name = "test_package";
 
-        let result = prepare_canonical_package_path(&stow_dir, "test_package");
-        assert!(result.is_err()); // Should fail for nonexistent stow directory
+        let result = prepare_canonical_package_path(&nonexistent_stow_dir, package_name);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sort_deletion_actions_mixed_types() {
+        let mut actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/dir1"),
+                link_target_path: None,
+                action_type: ActionType::DeleteDirectory,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/link1"),
+                link_target_path: None,
+                action_type: ActionType::DeleteSymlink,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/dir2"),
+                link_target_path: None,
+                action_type: ActionType::DeleteDirectory,
+                conflict_details: None,
+            },
+        ];
+
+        sort_deletion_actions(&mut actions);
+
+        assert!(matches!(actions[0].action_type, ActionType::DeleteSymlink));
+        assert!(matches!(actions[1].action_type, ActionType::DeleteDirectory));
+        assert!(matches!(actions[2].action_type, ActionType::DeleteDirectory));
+    }
+
+    #[test]
+    fn test_sort_deletion_actions_only_symlinks() {
+        let mut actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/link1"),
+                link_target_path: None,
+                action_type: ActionType::DeleteSymlink,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/link2"),
+                link_target_path: None,
+                action_type: ActionType::DeleteSymlink,
+                conflict_details: None,
+            },
+        ];
+
+        sort_deletion_actions(&mut actions);
+
+        assert!(matches!(actions[0].action_type, ActionType::DeleteSymlink));
+        assert!(matches!(actions[1].action_type, ActionType::DeleteSymlink));
+    }
+
+    #[test]
+    fn test_sort_deletion_actions_empty_list() {
+        let mut actions: Vec<TargetAction> = vec![];
+        sort_deletion_actions(&mut actions);
+        assert!(actions.is_empty());
     }
 }
 
