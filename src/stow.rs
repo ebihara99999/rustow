@@ -101,7 +101,7 @@ fn process_item_for_stow(
     let stow_item = create_stow_item_from_raw(raw_item, processed_target_relative_path);
     
     let link_target_for_symlink = calculate_link_target(&stow_item, &target_path_abs, config, package_name);
-    let action = plan_stow_action_for_item(&stow_item, &target_path_abs, link_target_for_symlink)?;
+    let action = plan_stow_action_for_item(&stow_item, &target_path_abs, link_target_for_symlink, config)?;
     
     Ok(Some(action))
 }
@@ -130,15 +130,14 @@ fn calculate_link_target(
 fn plan_stow_action_for_item(
     stow_item: &StowItem,
     target_path_abs: &Path,
-    link_target_for_symlink: PathBuf
+    link_target_for_symlink: PathBuf,
+    config: &Config
 ) -> Result<TargetAction, RustowError> {
     let (action_type, conflict_details, final_link_target) = if fs_utils::path_exists(target_path_abs) {
-        (
-            ActionType::Conflict,
-            Some(format!("Target path {:?} already exists.", target_path_abs)),
-            None
-        )
+        // Target path exists, need to check for conflicts and resolution options
+        handle_existing_target_conflict(stow_item, target_path_abs, link_target_for_symlink, config)?
     } else {
+        // Target path doesn't exist, proceed with normal action
         match stow_item.item_type {
             StowItemType::Directory => (ActionType::CreateDirectory, None, None),
             StowItemType::File | StowItemType::Symlink => {
@@ -154,6 +153,156 @@ fn plan_stow_action_for_item(
         action_type,
         conflict_details,
     })
+}
+
+/// Handle conflicts when target path already exists
+fn handle_existing_target_conflict(
+    stow_item: &StowItem,
+    target_path_abs: &Path,
+    link_target_for_symlink: PathBuf,
+    config: &Config
+) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
+
+    
+    // Check if target is a directory and we're trying to create a directory
+    if fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
+        // Check if the existing directory contains any non-stow managed files
+        if let Ok(entries) = std::fs::read_dir(target_path_abs) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let entry_path = entry.path();
+                    // If there's any file that's not a stow-managed symlink, it's a conflict
+                    if !fs_utils::is_symlink(&entry_path) {
+                        return Ok((ActionType::Conflict, 
+                                  Some(format!("Directory {:?} contains non-stow managed files", target_path_abs)), 
+                                  None));
+                    }
+                    
+                                         // Check if it's a stow-managed symlink
+                     match fs_utils::is_stow_symlink(&entry_path, &config.stow_dir) {
+                         Ok(Some(_)) => {
+                             // It's a stow-managed symlink, continue checking
+                         }
+                         Ok(None) | Err(_) => {
+                             // Not a stow-managed symlink or error checking, treat as conflict
+                             return Ok((ActionType::Conflict, 
+                                       Some(format!("Directory {:?} contains non-stow managed files", target_path_abs)), 
+                                       None));
+                         }
+                     }
+                }
+            }
+        }
+        return Ok((ActionType::CreateDirectory, None, None));
+    }
+    
+    // Check if target is a symlink pointing to the same source (already stowed)
+    if fs_utils::is_symlink(target_path_abs) {
+        if let Ok(Some((existing_package_name, existing_item_path))) = fs_utils::is_stow_symlink(target_path_abs, &config.stow_dir) {
+
+            
+            // It's a stow-managed symlink
+            if existing_item_path == stow_item.package_relative_path {
+                // Check if it's the same package
+                if let Some(current_package_name) = config.packages.get(0) {
+                    if existing_package_name == *current_package_name {
+                        // Same package and same item, no conflict - already correctly stowed
+                        return Ok((ActionType::Skip, 
+                                  Some("Target already points to the same source".to_string()), 
+                                  None));
+                    }
+                }
+                // Different package but same item path - this is a conflict that needs resolution
+                return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
+            } else {
+                // Different item path - check conflict resolution options
+                return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
+            }
+        }
+    }
+    
+    // Check if it's a file vs directory conflict
+    if fs_utils::is_directory(target_path_abs) && stow_item.item_type != StowItemType::Directory {
+        return Ok((ActionType::Conflict, 
+                  Some(format!("Cannot create file symlink at {:?}: target is a directory", target_path_abs)), 
+                  None));
+    }
+    
+    if !fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
+        return Ok((ActionType::Conflict, 
+                  Some(format!("Cannot create directory at {:?}: target is a file", target_path_abs)), 
+                  None));
+    }
+    
+    // Default conflict for non-stow managed files - but check override/defer patterns first
+    let target_relative_path = target_path_abs.strip_prefix(&config.target_dir)
+        .map_err(|_| RustowError::Stow(crate::error::StowError::InvalidPackageStructure(
+            format!("Target path {:?} is not within target directory {:?}", target_path_abs, config.target_dir)
+        )))?;
+    
+    let target_path_str = target_relative_path.to_string_lossy();
+    
+    // Check defer patterns first (defer takes precedence over override)
+    for defer_pattern in &config.defers {
+        if defer_pattern.is_match(&target_path_str) {
+            return Ok((ActionType::Skip, 
+                      Some(format!("Deferred due to pattern match: {}", defer_pattern.as_str())), 
+                      None));
+        }
+    }
+    
+    // Check override patterns
+    for override_pattern in &config.overrides {
+        if override_pattern.is_match(&target_path_str) {
+            return Ok((ActionType::CreateSymlink, 
+                      Some(format!("Overriding existing file due to pattern match: {}", override_pattern.as_str())), 
+                      Some(link_target_for_symlink)));
+        }
+    }
+    
+    // No pattern matches, it's a conflict
+    Ok((ActionType::Conflict, 
+        Some(format!("Target path {:?} already exists and is not stow-managed", target_path_abs)), 
+        None))
+}
+
+/// Handle conflicts between different stow packages
+fn handle_stow_package_conflict(
+    _stow_item: &StowItem,
+    target_path_abs: &Path,
+    link_target_for_symlink: PathBuf,
+    config: &Config
+) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
+    // Get the target path relative to the target directory for pattern matching
+    let target_relative_path = target_path_abs.strip_prefix(&config.target_dir)
+        .map_err(|_| RustowError::Stow(crate::error::StowError::InvalidPackageStructure(
+            format!("Target path {:?} is not within target directory {:?}", target_path_abs, config.target_dir)
+        )))?;
+    
+    let target_path_str = target_relative_path.to_string_lossy();
+    
+    // Check defer patterns first (defer takes precedence over override)
+    for defer_pattern in &config.defers {
+        if defer_pattern.is_match(&target_path_str) {
+            return Ok((ActionType::Skip, 
+                      Some(format!("Deferred due to pattern match: {}", defer_pattern.as_str())), 
+                      None));
+        }
+    }
+    
+    // Check override patterns
+    for override_pattern in &config.overrides {
+        if override_pattern.is_match(&target_path_str) {
+            return Ok((ActionType::CreateSymlink, 
+                      Some(format!("Overriding existing symlink due to pattern match: {}", override_pattern.as_str())), 
+                      Some(link_target_for_symlink)));
+        }
+    }
+    
+    // No pattern matches, it's a conflict
+    Ok((ActionType::Conflict, 
+        Some(format!("Target path {:?} is managed by another stow package", target_path_abs)), 
+        None))
 }
 
 /// Refine actions by checking for parent path conflicts
@@ -250,8 +399,6 @@ fn apply_conflict_to_action(action: &mut TargetAction, conflict_info: ParentConf
         }
     });
 }
-
-
 
 /// Check if parent path is the target of another conflicting action
 fn is_parent_target_of_conflict(parent_path: &Path, all_actions: &[TargetAction]) -> bool {
@@ -372,6 +519,37 @@ fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
 
     match &action.link_target_path {
         Some(link_target) => {
+            // If target already exists, remove it first (for override behavior)
+            if fs_utils::path_exists(&action.target_path) {
+                if fs_utils::is_symlink(&action.target_path) {
+                    if let Err(e) = fs_utils::delete_symlink(&action.target_path) {
+                        return TargetActionReport {
+                            original_action: action.clone(),
+                            status: TargetActionReportStatus::Failure(format!(
+                                "Failed to remove existing symlink before override: {}",
+                                e
+                            )),
+                            message: Some(format!(
+                                "Failed to remove existing symlink {:?} before creating new one: {}",
+                                action.target_path, e
+                            )),
+                        };
+                    }
+                } else {
+                    // Target exists but is not a symlink - this should have been caught in planning
+                    return TargetActionReport {
+                        original_action: action.clone(),
+                        status: TargetActionReportStatus::Failure(
+                            "Target exists and is not a symlink - cannot override".to_string(),
+                        ),
+                        message: Some(format!(
+                            "Target {:?} exists and is not a symlink - cannot override",
+                            action.target_path
+                        )),
+                    };
+                }
+            }
+
             match fs_utils::create_symlink(&action.target_path, link_target) {
                 Ok(_) => TargetActionReport {
                     original_action: action.clone(),
@@ -987,7 +1165,7 @@ fn determine_file_deletion_action(
     }
 
     match fs_utils::is_stow_symlink(target_path_abs, &config.stow_dir) {
-        Ok(Some(item_path_in_package)) => {
+        Ok(Some((_package_name, item_path_in_package))) => {
             if item_path_in_package == stow_item.package_relative_path {
                 Ok((ActionType::DeleteSymlink, None))
             } else {

@@ -732,6 +732,10 @@ fn test_plan_actions_basic_creation_and_conflict() {
     assert_eq!(action_nested_file.unwrap().original_action.action_type, ActionType::CreateSymlink, "Expected CreateSymlink for nested_file.txt");
 
     let target_file_conflict_path: PathBuf = target_dir.join("file_for_conflict.txt");
+    // Remove any existing symlink first, then create a regular file
+    if target_file_conflict_path.exists() {
+        fs::remove_file(&target_file_conflict_path).unwrap();
+    }
     fs::write(&target_file_conflict_path, "existing target file content").unwrap();
 
     let config_file_conflict: Config = create_test_config(
@@ -1379,4 +1383,200 @@ fn test_cli_integration_modes() {
     });
     assert!(restow_result.is_ok(), "CLI restow operation failed: {:?}", restow_result.err());
     assert!(target_dir.join("bin/test_script").exists(), "Symlink should be recreated via CLI restow");
+}
+
+#[test]
+fn test_conflict_resolution_override_option() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    
+    // Setup two packages that conflict on the same file
+    let package1_dir = stow_dir.join("package1");
+    let package2_dir = stow_dir.join("package2");
+    fs::create_dir_all(&package1_dir).unwrap();
+    fs::create_dir_all(&package2_dir).unwrap();
+    
+    // Both packages have a file with the same target path
+    fs::write(package1_dir.join("conflicting_file.txt"), "content from package1").unwrap();
+    fs::write(package2_dir.join("conflicting_file.txt"), "content from package2").unwrap();
+    
+    // First, stow package1 to establish the initial symlink
+    let config1 = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["package1".to_string()],
+        false,
+        0
+    );
+    let result1 = stow_packages(&config1);
+    assert!(result1.is_ok(), "Failed to stow package1: {:?}", result1.err());
+    
+    // Verify package1's symlink was created
+    let target_file = target_dir.join("conflicting_file.txt");
+    assert!(target_file.exists(), "Target file should exist after stowing package1");
+    assert!(fs::symlink_metadata(&target_file).unwrap().file_type().is_symlink(), "Target should be a symlink");
+    
+    // Now try to stow package2 without --override (should conflict)
+    let config2_no_override = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["package2".to_string()],
+        false,
+        0
+    );
+    let result2_no_override = stow_packages(&config2_no_override);
+    assert!(result2_no_override.is_ok(), "stow_packages should succeed but report conflicts");
+    
+    let reports2_no_override = result2_no_override.unwrap();
+    let conflict_report = reports2_no_override.iter().find(|r| {
+        r.original_action.target_path.file_name().map_or(false, |name| name == "conflicting_file.txt")
+    }).expect("Should find report for conflicting_file.txt");
+    
+    assert_eq!(conflict_report.original_action.action_type, ActionType::Conflict, 
+               "Should be marked as conflict without --override");
+    
+    // Now try with --override option
+    let mut config2_with_override = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["package2".to_string()],
+        false,
+        0
+    );
+    // Add override pattern that matches the conflicting file
+    config2_with_override.overrides = vec![regex::Regex::new("conflicting_file\\.txt").unwrap()];
+    
+    let result2_with_override = stow_packages(&config2_with_override);
+    assert!(result2_with_override.is_ok(), "stow_packages should succeed with --override: {:?}", result2_with_override.err());
+    
+    let reports2_with_override = result2_with_override.unwrap();
+    let override_report = reports2_with_override.iter().find(|r| {
+        r.original_action.target_path.file_name().map_or(false, |name| name == "conflicting_file.txt")
+    }).expect("Should find report for conflicting_file.txt with override");
+    
+    assert_eq!(override_report.original_action.action_type, ActionType::CreateSymlink, 
+               "Should be CreateSymlink with --override");
+    assert_eq!(override_report.status, TargetActionReportStatus::Success, 
+               "Should succeed with --override");
+    
+    // Verify the symlink now points to package2
+    let link_target = fs::read_link(&target_file).unwrap();
+    assert!(link_target.to_string_lossy().contains("package2"), 
+            "Symlink should now point to package2, but points to: {:?}", link_target);
+}
+
+#[test]
+fn test_conflict_resolution_defer_option() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    
+    // Setup two packages that conflict on the same file
+    let package1_dir = stow_dir.join("package1");
+    let package2_dir = stow_dir.join("package2");
+    fs::create_dir_all(&package1_dir).unwrap();
+    fs::create_dir_all(&package2_dir).unwrap();
+    
+    // Both packages have a file with the same target path
+    fs::write(package1_dir.join("deferred_file.txt"), "content from package1").unwrap();
+    fs::write(package2_dir.join("deferred_file.txt"), "content from package2").unwrap();
+    
+    // First, stow package1 to establish the initial symlink
+    let config1 = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["package1".to_string()],
+        false,
+        0
+    );
+    let result1 = stow_packages(&config1);
+    assert!(result1.is_ok(), "Failed to stow package1: {:?}", result1.err());
+    
+    // Verify package1's symlink was created
+    let target_file = target_dir.join("deferred_file.txt");
+    assert!(target_file.exists(), "Target file should exist after stowing package1");
+    let original_link_target = fs::read_link(&target_file).unwrap();
+    
+    // Now try to stow package2 with --defer option
+    let mut config2_with_defer = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["package2".to_string()],
+        false,
+        0
+    );
+    // Add defer pattern that matches the conflicting file
+    config2_with_defer.defers = vec![regex::Regex::new("deferred_file\\.txt").unwrap()];
+    
+    let result2_with_defer = stow_packages(&config2_with_defer);
+    assert!(result2_with_defer.is_ok(), "stow_packages should succeed with --defer: {:?}", result2_with_defer.err());
+    
+    let reports2_with_defer = result2_with_defer.unwrap();
+    let defer_report = reports2_with_defer.iter().find(|r| {
+        r.original_action.target_path.file_name().map_or(false, |name| name == "deferred_file.txt")
+    }).expect("Should find report for deferred_file.txt with defer");
+    
+    assert_eq!(defer_report.original_action.action_type, ActionType::Skip, 
+               "Should be Skip with --defer");
+    assert_eq!(defer_report.status, TargetActionReportStatus::Skipped, 
+               "Should be skipped with --defer");
+    
+    // Verify the symlink still points to package1 (unchanged)
+    let current_link_target = fs::read_link(&target_file).unwrap();
+    assert_eq!(current_link_target, original_link_target, 
+               "Symlink should remain unchanged with --defer");
+    assert!(current_link_target.to_string_lossy().contains("package1"), 
+            "Symlink should still point to package1, but points to: {:?}", current_link_target);
+}
+
+#[test]
+fn test_conflict_resolution_pattern_matching() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    
+    let package_dir = stow_dir.join("test_package");
+    fs::create_dir_all(&package_dir).unwrap();
+    
+    // Create multiple files, some matching patterns, some not
+    fs::write(package_dir.join("override_me.txt"), "override content").unwrap();
+    fs::write(package_dir.join("defer_me.txt"), "defer content").unwrap();
+    fs::write(package_dir.join("normal_file.txt"), "normal content").unwrap();
+    
+    // Create existing files in target to cause conflicts
+    fs::write(target_dir.join("override_me.txt"), "existing override").unwrap();
+    fs::write(target_dir.join("defer_me.txt"), "existing defer").unwrap();
+    fs::write(target_dir.join("normal_file.txt"), "existing normal").unwrap();
+    
+    // Configure with specific override and defer patterns
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["test_package".to_string()],
+        false,
+        0
+    );
+    config.overrides = vec![regex::Regex::new("override_.*\\.txt").unwrap()];
+    config.defers = vec![regex::Regex::new("defer_.*\\.txt").unwrap()];
+    
+    let result = stow_packages(&config);
+    assert!(result.is_ok(), "stow_packages should succeed: {:?}", result.err());
+    
+    let reports = result.unwrap();
+    
+    // Check override_me.txt - should be CreateSymlink (overridden)
+    let override_report = reports.iter().find(|r| {
+        r.original_action.target_path.file_name().map_or(false, |name| name == "override_me.txt")
+    }).expect("Should find report for override_me.txt");
+    assert_eq!(override_report.original_action.action_type, ActionType::CreateSymlink, 
+               "override_me.txt should be CreateSymlink due to --override pattern");
+    
+    // Check defer_me.txt - should be Skip (deferred)
+    let defer_report = reports.iter().find(|r| {
+        r.original_action.target_path.file_name().map_or(false, |name| name == "defer_me.txt")
+    }).expect("Should find report for defer_me.txt");
+    assert_eq!(defer_report.original_action.action_type, ActionType::Skip, 
+               "defer_me.txt should be Skip due to --defer pattern");
+    
+    // Check normal_file.txt - should be Conflict (no pattern matches)
+    let normal_report = reports.iter().find(|r| {
+        r.original_action.target_path.file_name().map_or(false, |name| name == "normal_file.txt")
+    }).expect("Should find report for normal_file.txt");
+    assert_eq!(normal_report.original_action.action_type, ActionType::Conflict, 
+               "normal_file.txt should be Conflict (no pattern matches)");
 }

@@ -221,7 +221,7 @@ pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {
     Ok(items)
 }
 
-pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<PathBuf>, RustowError> {
+pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(String, PathBuf)>, RustowError> {
     // 1. Check if link_path is a symlink
     if !is_symlink(link_path) {
         return Ok(None);
@@ -297,10 +297,11 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<PathB
     let mut components = path_relative_to_stow_dir.components();
     
     match components.next() {
-        Some(std::path::Component::Normal(_package_name_osstr)) => {
+        Some(std::path::Component::Normal(package_name_osstr)) => {
+            let package_name = package_name_osstr.to_string_lossy().into_owned();
             // The rest of the components form the item's path relative to the package dir.
             let item_path_in_package = components.as_path().to_path_buf();
-            Ok(Some(item_path_in_package))
+            Ok(Some((package_name, item_path_in_package)))
         }
         _ => {
             // Path relative to stow_dir is empty (target is stow_dir itself)
@@ -1209,8 +1210,9 @@ mod tests {
         let link_path = temp.path().join("link_to_package_dir");
         create_symlink(&link_path, &package_dir).unwrap();
         
+        let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::new(); 
-        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some(expected_item_path));
+        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
     }
 
     #[test]
@@ -1220,8 +1222,9 @@ mod tests {
         let link_path = temp.path().join("link_to_item");
         create_symlink(&link_path, &item_abs_path).unwrap();
         
+        let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::from("item.txt");
-        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some(expected_item_path));
+        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
     }
 
     #[test]
@@ -1238,36 +1241,28 @@ mod tests {
         let link_path = temp.path().join("link_to_nested_item");
         create_symlink(&link_path, &nested_item_abs_path).unwrap();
         
+        let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::from("sub").join(nested_item_name);
-        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some(expected_item_path));
+        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
     }
 
     #[test]
     fn test_is_stow_symlink_relative_link_correctly_resolved() {
         let temp = tempdir().unwrap();
-        let link_location_dir = temp.path().join("link_location"); // e.g., /home/user 
-        fs::create_dir(&link_location_dir).unwrap();
-
-        let stow_dir_abs = temp.path().join("my_stow_dir"); // e.g., /home/user/dotfiles
-        fs::create_dir_all(&stow_dir_abs).unwrap();
-
-        let package_name = "mypkg_rel";
-        let package_dir_abs = stow_dir_abs.join(package_name);
-        fs::create_dir_all(&package_dir_abs).unwrap();
+        let (stow_dir, package_dir, _) = setup_stow_env_for_is_stow_symlink(temp.path());
         
-        let item_name = "item_rel.txt";
-        let item_abs_path = package_dir_abs.join(item_name);
+        let item_name = "item_for_relative_test.txt";
+        let item_abs_path = package_dir.join(item_name);
         File::create(&item_abs_path).unwrap();
-
-        let link_path = link_location_dir.join("link_rel");
-        // Relative from link_location_dir to item_abs_path
-        // Example: link is at /tmp/link_location/link_rel
-        // Target is /tmp/my_stow_dir/mypkg_rel/item_rel.txt
-        // Relative path from link_location_dir would be ../my_stow_dir/mypkg_rel/item_rel.txt
-        let relative_target = PathBuf::from("..").join(stow_dir_abs.file_name().unwrap())
-                                .join(package_name).join(item_name);
         
-        // Create symlink with the relative target path directly
+        let link_parent_dir = temp.path().join("link_parent");
+        fs::create_dir(&link_parent_dir).unwrap();
+        let link_path = link_parent_dir.join("relative_link");
+        
+        let stow_dir_abs = canonicalize_path(&stow_dir).unwrap();
+        let link_parent_abs = canonicalize_path(&link_parent_dir).unwrap();
+        let relative_target = pathdiff::diff_paths(&item_abs_path, &link_parent_abs).unwrap();
+        
         #[cfg(unix)]
         {
             use std::os::unix::fs as unix_fs;
@@ -1296,10 +1291,11 @@ mod tests {
             return;
         }
 
+        let expected_package_name = "mypkg".to_string();
         let expected_item_path_in_package = PathBuf::from(item_name);
         let result = is_stow_symlink(&link_path, &stow_dir_abs);
         assert!(result.is_ok(), "is_stow_symlink failed: {:?}", result.err());
-        assert_eq!(result.unwrap(), Some(expected_item_path_in_package));
+        assert_eq!(result.unwrap(), Some((expected_package_name, expected_item_path_in_package)));
     }
 } 
 
