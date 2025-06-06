@@ -209,7 +209,7 @@ pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {
             RawStowItemType::File
         } else {
             // Should not happen for normal files/dirs/symlinks
-            continue; 
+            continue;
         };
 
         items.push(RawStowItem {
@@ -315,7 +315,7 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(Stri
 
 #[cfg(test)]
 mod tests {
-    use super::*; 
+    use super::*;
     use std::fs::{self, File};
     use tempfile::tempdir;
     use std::collections::HashSet;
@@ -504,7 +504,7 @@ mod tests {
         File::create(&target_file_path).unwrap();
 
         let link_path = dir.path().join("existing_item_is_file");
-        File::create(&link_path).unwrap(); 
+        File::create(&link_path).unwrap();
 
         let result = create_symlink(&link_path, &target_file_path);
         assert!(result.is_err());
@@ -568,7 +568,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let non_existent_target = dir.path().join("non_existent_rl_target");
         let link = dir.path().join("broken_rl_link");
-        create_symlink(&link, &non_existent_target).unwrap(); 
+        create_symlink(&link, &non_existent_target).unwrap();
 
         let result = read_link(&link);
         assert!(result.is_ok(), "read_link for broken link failed: {:?}", result.err());
@@ -669,7 +669,7 @@ mod tests {
             Err(RustowError::Fs(FsError::NotASymlink(p))) => assert_eq!(p, file_path),
             _ => panic!("Expected FsError::NotASymlink, got {:?}", result),
         }
-        assert!(path_exists(&file_path)); 
+        assert!(path_exists(&file_path));
     }
 
     #[test]
@@ -684,7 +684,7 @@ mod tests {
             Err(RustowError::Fs(FsError::NotASymlink(p))) => assert_eq!(p, dir_path),
             _ => panic!("Expected FsError::NotASymlink, got {:?}", result),
         }
-        assert!(path_exists(&dir_path)); 
+        assert!(path_exists(&dir_path));
     }
 
     #[test]
@@ -810,7 +810,7 @@ mod tests {
                 // We used Other, so we check the message or kind if more specific info is needed
                 // For now, checking the error kind is enough if it matches the setup.
                 // However, the custom message "Directory not empty" is more robust to check here.
-                assert_eq!(source.to_string(), "Directory not empty"); 
+                assert_eq!(source.to_string(), "Directory not empty");
             }
             _ => panic!("Expected FsError::DeleteDirectory for not empty, got {:?}", result),
         }
@@ -964,7 +964,7 @@ mod tests {
 
         let target_for_link = base_dir.join("file1.txt");
         let link_path = base_dir.join("link_to_file1");
-        create_symlink(&link_path, &target_for_link).unwrap(); 
+        create_symlink(&link_path, &target_for_link).unwrap();
     }
 
     #[test]
@@ -978,45 +978,45 @@ mod tests {
         items.sort_by_key(|item| item.sort_key());
 
         let mut expected_items = vec![
-            RawStowItem { 
-                absolute_path: package_dir.path().join(".dotfile"), 
-                package_relative_path: PathBuf::from(".dotfile"), 
-                item_type: RawStowItemType::File 
-            },
-            RawStowItem { 
-                absolute_path: package_dir.path().join("dir1"), 
-                package_relative_path: PathBuf::from("dir1"), 
-                item_type: RawStowItemType::Directory 
-            },
-            RawStowItem { 
-                absolute_path: package_dir.path().join("dir1/file2.txt"), 
-                package_relative_path: PathBuf::from("dir1/file2.txt"), 
+            RawStowItem {
+                absolute_path: package_dir.path().join(".dotfile"),
+                package_relative_path: PathBuf::from(".dotfile"),
                 item_type: RawStowItemType::File
             },
-            RawStowItem { 
-                absolute_path: package_dir.path().join("dir1/sub_dir1"), 
-                package_relative_path: PathBuf::from("dir1/sub_dir1"), 
-                item_type: RawStowItemType::Directory 
+            RawStowItem {
+                absolute_path: package_dir.path().join("dir1"),
+                package_relative_path: PathBuf::from("dir1"),
+                item_type: RawStowItemType::Directory
             },
-            RawStowItem { 
-                absolute_path: package_dir.path().join("dir1/sub_dir1/file3.txt"), 
-                package_relative_path: PathBuf::from("dir1/sub_dir1/file3.txt"), 
-                item_type: RawStowItemType::File 
+            RawStowItem {
+                absolute_path: package_dir.path().join("dir1/file2.txt"),
+                package_relative_path: PathBuf::from("dir1/file2.txt"),
+                item_type: RawStowItemType::File
             },
-            RawStowItem { 
-                absolute_path: package_dir.path().join("dir2"), 
-                package_relative_path: PathBuf::from("dir2"), 
-                item_type: RawStowItemType::Directory 
+            RawStowItem {
+                absolute_path: package_dir.path().join("dir1/sub_dir1"),
+                package_relative_path: PathBuf::from("dir1/sub_dir1"),
+                item_type: RawStowItemType::Directory
             },
-            RawStowItem { 
-                absolute_path: package_dir.path().join("file1.txt"), 
-                package_relative_path: PathBuf::from("file1.txt"), 
-                item_type: RawStowItemType::File 
+            RawStowItem {
+                absolute_path: package_dir.path().join("dir1/sub_dir1/file3.txt"),
+                package_relative_path: PathBuf::from("dir1/sub_dir1/file3.txt"),
+                item_type: RawStowItemType::File
             },
-            RawStowItem { 
-                absolute_path: package_dir.path().join("link_to_file1"), 
-                package_relative_path: PathBuf::from("link_to_file1"), 
-                item_type: RawStowItemType::Symlink 
+            RawStowItem {
+                absolute_path: package_dir.path().join("dir2"),
+                package_relative_path: PathBuf::from("dir2"),
+                item_type: RawStowItemType::Directory
+            },
+            RawStowItem {
+                absolute_path: package_dir.path().join("file1.txt"),
+                package_relative_path: PathBuf::from("file1.txt"),
+                item_type: RawStowItemType::File
+            },
+            RawStowItem {
+                absolute_path: package_dir.path().join("link_to_file1"),
+                package_relative_path: PathBuf::from("link_to_file1"),
+                item_type: RawStowItemType::Symlink
             },
         ];
         expected_items.sort_by_key(|item| item.sort_key());
@@ -1108,18 +1108,18 @@ mod tests {
         // The absolute paths in RawStowItem should reflect the actual location on disk.
 
         let expected_items_adjusted_abs_path = vec![
-            RawStowItem { 
+            RawStowItem {
                 absolute_path: target_package_dir.join("some_file_in_target.txt"), // Actual path
                 package_relative_path: PathBuf::from("some_file_in_target.txt"), // Relative to symlink
-                item_type: RawStowItemType::File 
+                item_type: RawStowItemType::File
             },
-            RawStowItem { 
+            RawStowItem {
                 absolute_path: target_package_dir.join("some_subdir_in_target"), // Actual path
                 package_relative_path: PathBuf::from("some_subdir_in_target"), // Relative to symlink
-                item_type: RawStowItemType::Directory 
+                item_type: RawStowItemType::Directory
             },
         ];
-        // We only compare package_relative_path and item_type for this test, 
+        // We only compare package_relative_path and item_type for this test,
         // as absolute_path depends on WalkDir's symlink following behavior which is on by default.
         let items_simplified: Vec<_> = items.iter().map(|i| (&i.package_relative_path, &i.item_type)).collect();
         let expected_simplified: Vec<_> = expected_items_adjusted_abs_path.iter().map(|i| (&i.package_relative_path, &i.item_type)).collect();
@@ -1159,7 +1159,7 @@ mod tests {
         let (stow_dir, _, _) = setup_stow_env_for_is_stow_symlink(temp.path());
         let link_path = temp.path().join("broken_link");
         let non_existent_target = temp.path().join("non_existent_target");
-        create_symlink(&link_path, &non_existent_target).unwrap(); 
+        create_symlink(&link_path, &non_existent_target).unwrap();
         assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), None);
     }
 
@@ -1211,7 +1211,7 @@ mod tests {
         create_symlink(&link_path, &package_dir).unwrap();
 
         let expected_package_name = "mypkg".to_string();
-        let expected_item_path = PathBuf::new(); 
+        let expected_item_path = PathBuf::new();
         assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
     }
 
@@ -1266,22 +1266,22 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs as unix_fs;
-            unix_fs::symlink(&relative_target, &link_path).unwrap_or_else(|e| 
+            unix_fs::symlink(&relative_target, &link_path).unwrap_or_else(|e|
                 panic!("Failed to create symlink for relative test (unix): {:?}, from {:?} to {:?}", e, relative_target, link_path)
             );
         }
         #[cfg(windows)]
         {
             use std::os::windows::fs as windows_fs;
-            // For symlink_file, the target path must exist or be a file. 
+            // For symlink_file, the target path must exist or be a file.
             // The relative path is relative to the symlink itself.
             // We need to be careful here. For this test, let's ensure the function under test can handle
             // a relative path that read_link might return.
             // The challenge is std::fs::windows::symlink_file expects target to exist for file symlinks
-            // if it's not an absolute path in some contexts. 
+            // if it's not an absolute path in some contexts.
             // The most reliable way to test `is_stow_symlink`'s resolution logic is to ensure `read_link` returns a relative path.
             // So, we *must* create it with a relative path string.
-            windows_fs::symlink_file(&relative_target, &link_path).unwrap_or_else(|e| 
+            windows_fs::symlink_file(&relative_target, &link_path).unwrap_or_else(|e|
                 panic!("Failed to create symlink for relative test (windows): {:?}, from {:?} to {:?}", e, relative_target, link_path)
             );
         }
@@ -1297,5 +1297,5 @@ mod tests {
         assert!(result.is_ok(), "is_stow_symlink failed: {:?}", result.err());
         assert_eq!(result.unwrap(), Some((expected_package_name, expected_item_path_in_package)));
     }
-} 
+}
 

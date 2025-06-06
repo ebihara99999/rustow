@@ -47,4 +47,4 @@ mod tests {
         // If we wanted to process segments: (this would require a more complex function)
         // assert_eq!(process_item_name_segmented("dot-config/sub/dot-another", true), ".config/sub/.another");
     }
-} 
+}

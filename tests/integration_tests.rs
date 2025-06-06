@@ -93,24 +93,24 @@ fn test_basic_stow_operation_without_dotfiles() {
     assert!(!actions.is_empty(), "Expected some actions to be planned");
 
     // Verify that dot-bashrc is NOT processed as .bashrc
-    let dot_bashrc_action_exists: bool = actions.iter().any(|report| 
+    let dot_bashrc_action_exists: bool = actions.iter().any(|report|
         report.original_action.target_path.file_name().map_or(false, |name| name == "dot-bashrc")
     );
     assert!(dot_bashrc_action_exists, "Expected \"dot-bashrc\" action when dotfiles disabled");
 
     // Verify that dot-config is NOT processed as .config
-    let dot_config_action_exists: bool = actions.iter().any(|report| 
+    let dot_config_action_exists: bool = actions.iter().any(|report|
         report.original_action.target_path.file_name().map_or(false, |name| name == "dot-config")
     );
     assert!(dot_config_action_exists, "Expected \"dot-config\" action when dotfiles disabled");
 
     // Verify README.md and LICENSE are ignored (not present in actions)
-    let readme_action_exists: bool = actions.iter().any(|report| 
+    let readme_action_exists: bool = actions.iter().any(|report|
         report.original_action.target_path.file_name().map_or(false, |name| name == "README.md")
     );
     assert!(!readme_action_exists, "README.md should be ignored by default");
 
-    let license_action_exists: bool = actions.iter().any(|report| 
+    let license_action_exists: bool = actions.iter().any(|report|
         report.original_action.target_path.file_name().map_or(false, |name| name == "LICENSE")
     );
     assert!(!license_action_exists, "LICENSE should be ignored by default");
@@ -137,19 +137,19 @@ fn test_basic_stow_operation_with_dotfiles() {
     assert!(!actions.is_empty(), "Expected some actions with dotfiles enabled");
 
     // Verify dot-bashrc IS processed as .bashrc
-    let bashrc_action_exists: bool = actions.iter().any(|report| 
+    let bashrc_action_exists: bool = actions.iter().any(|report|
         report.original_action.target_path.file_name().map_or(false, |name| name == ".bashrc")
     );
     assert!(bashrc_action_exists, "Expected \".bashrc\" action when dotfiles enabled");
 
     // Verify dot-config IS processed as .config
-    let config_action_exists: bool = actions.iter().any(|report| 
+    let config_action_exists: bool = actions.iter().any(|report|
         report.original_action.target_path.file_name().map_or(false, |name| name == ".config")
     );
     assert!(config_action_exists, "Expected \".config\" action when dotfiles enabled");
 
     // Verify nested dotfiles like .config/nvim/init.vim are correctly planned
-    let nvim_init_action_exists: bool = actions.iter().any(|report| 
+    let nvim_init_action_exists: bool = actions.iter().any(|report|
         report.original_action.target_path.ends_with(".config/nvim/init.vim")
     );
     assert!(nvim_init_action_exists, "Expected \".config/nvim/init.vim\" action");
@@ -226,11 +226,11 @@ fn test_custom_ignore_patterns() {
 
     let actions_result: Result<Vec<rustow::stow::TargetActionReport>, rustow::error::RustowError> = stow_packages(&config);
     // Add debug printing for actions if the test fails
-    if actions_result.is_err() || 
+    if actions_result.is_err() ||
        (actions_result.is_ok() && (
-           actions_result.as_ref().unwrap().iter().any(|report| report.original_action.target_path.ends_with("test_script")) || 
-           actions_result.as_ref().unwrap().iter().any(|report| report.original_action.target_path.ends_with(".bashrc")) || 
-           actions_result.as_ref().unwrap().iter().any(|report| report.original_action.target_path.ends_with("README.md")) || 
+           actions_result.as_ref().unwrap().iter().any(|report| report.original_action.target_path.ends_with("test_script")) ||
+           actions_result.as_ref().unwrap().iter().any(|report| report.original_action.target_path.ends_with(".bashrc")) ||
+           actions_result.as_ref().unwrap().iter().any(|report| report.original_action.target_path.ends_with("README.md")) ||
            !actions_result.as_ref().unwrap().iter().any(|report| report.original_action.target_path.ends_with(".config/nvim/init.vim"))
        ))
     {
@@ -293,13 +293,13 @@ fn test_multiple_packages_stow() {
     let actions: Vec<rustow::stow::TargetActionReport> = actions_result.unwrap();
 
     // Check for items from both packages (e.g., their respective .bashrc files)
-    let p1_bashrc_exists: bool = actions.iter().any(|report| 
+    let p1_bashrc_exists: bool = actions.iter().any(|report|
         report.original_action.source_item.as_ref().map_or(false, |item| item.source_path.to_string_lossy().contains(package1_name)) &&
         report.original_action.target_path.ends_with(".bashrc")
     );
     assert!(p1_bashrc_exists, "Expected .bashrc from package1");
 
-    let p2_bashrc_exists: bool = actions.iter().any(|report| 
+    let p2_bashrc_exists: bool = actions.iter().any(|report|
         report.original_action.source_item.as_ref().map_or(false, |item| item.source_path.to_string_lossy().contains(package2_name)) &&
         report.original_action.target_path.ends_with(".bashrc")
     );
@@ -531,19 +531,19 @@ fn test_dotfiles_processing_edge_cases() {
     );
     assert_eq!(report_pkg4_nodotprefix_file.original_action.action_type, ActionType::Conflict, "ActionType for package4/nodotprefix should be Conflict");
     let expected_target_pkg4_nodotprefix_file: PathBuf = target_dir.join("nodotprefix");
-    // In case of conflict, the file from package4 might not be created, 
+    // In case of conflict, the file from package4 might not be created,
     // or if an earlier package created something, it might remain.
-    // For this specific test, package4 is processed before package5. 
-    // So, if package4 attempts to create a symlink and package5 attempts a directory, 
-    // one of them will be a conflict. If stow_packages processes them sequentially 
+    // For this specific test, package4 is processed before package5.
+    // So, if package4 attempts to create a symlink and package5 attempts a directory,
+    // one of them will be a conflict. If stow_packages processes them sequentially
     // and the conflict detection is global *after* all plans, then execute_actions sees the Conflict.
     // Let's assume the symlink from package4 *would* have been created if no conflict from package5 existed.
     // However, because of the conflict, its action is marked Conflict, and it should NOT be created by execute_actions.
     // The *other* conflicting item (from package5) will also be marked Conflict.
     // So, the target path should ideally be empty or untouched by these conflicting actions.
-    // However, the current execute_actions creates the *first* non-conflicting item if multiple packages target the same path 
+    // However, the current execute_actions creates the *first* non-conflicting item if multiple packages target the same path
     // before the inter-package conflict marks them all as Conflict. This needs refinement.
-    // For now, we will assert that the final state of the target does not correspond to package4's successful symlink 
+    // For now, we will assert that the final state of the target does not correspond to package4's successful symlink
     // when a conflict with package5 is present and detected.
     // If the conflict is properly handled, neither package4's file symlink nor package5's directory should solely occupy the target.
     // The test output showed package4's symlink IS created, then package5's dir fails.
@@ -551,15 +551,15 @@ fn test_dotfiles_processing_edge_cases() {
     // Let's adjust the expectation: package4 creates its link, then package5's dir creation action is marked as Conflict.
     // No, the new `plan_actions` inter-package conflict should mark BOTH as conflict *before* execution.
 
-    // After proper conflict handling, the target path should not be a symlink *from package4* specifically 
+    // After proper conflict handling, the target path should not be a symlink *from package4* specifically
     // if the conflict with package5 (directory) was identified *before* execution.
     // It's possible the target path remains as it was before any operation from these two packages.
     // For this test, we'll assume if it's a conflict, the symlink from package4 does not get created.
     // This means the assertion `expected_target_pkg4_nodotprefix_file.exists()` might be false.
     // And `is_symlink` would also be false or panic if it doesn't exist.
 
-    // Given the current test failure (package4's symlink IS created), 
-    // the inter-package conflict detection in `plan_actions` might not be effective across packages, 
+    // Given the current test failure (package4's symlink IS created),
+    // the inter-package conflict detection in `plan_actions` might not be effective across packages,
     // or `execute_actions` doesn't respect it fully for the first item.
     // Let's assume the `plan_actions` conflict detection *should* prevent creation.
     assert!(
@@ -605,7 +605,7 @@ fn test_dotfiles_processing_edge_cases() {
         })
     }).expect("Report for package5/nodotprefix/file.txt not found");
 
-    // If the parent directory `nodotprefix` for package5 is a Conflict, 
+    // If the parent directory `nodotprefix` for package5 is a Conflict,
     // then the nested file should also be treated as a Conflict or at least not Success.
     assert_eq!(
         report_pkg5_nested_file.status,
@@ -647,15 +647,15 @@ fn test_relative_path_calculation_basic() {
     for report in actions.iter().filter(|r| r.original_action.link_target_path.is_some()) {
         let link_target: &PathBuf = report.original_action.link_target_path.as_ref().unwrap();
         // A simple check: relative paths should not start with '/' or a drive letter (on Windows)
-        assert!(!link_target.is_absolute(), 
-            "Link target path {:?} for target {:?} should be relative", 
+        assert!(!link_target.is_absolute(),
+            "Link target path {:?} for target {:?} should be relative",
             link_target, report.original_action.target_path);
         // More robust check: ensure it navigates upwards (e.g., starts with "..")
         // This depends on the depth. For a top-level file like 'dot-bashrc' -> '../stow_dir/pkg/dot-bashrc'
         // For 'bin/test_script' -> '../../stow_dir/pkg/bin/test_script'
         // This is a basic sanity check.
-        assert!(link_target.starts_with(".."), 
-            "Link target path {:?} for target {:?} should typically start with '..' to go from target to stow dir item", 
+        assert!(link_target.starts_with(".."),
+            "Link target path {:?} for target {:?} should typically start with '..' to go from target to stow dir item",
             link_target, report.original_action.target_path);
     }
 }
@@ -672,7 +672,7 @@ fn test_config_integration_verbosity_and_simulate() {
         packages: vec![package_name.to_string()],
         simulate: true,
         verbose: 3,
-        delete: false, restow: false, adopt: false, no_folding: false, dotfiles: false, 
+        delete: false, restow: false, adopt: false, no_folding: false, dotfiles: false,
         override_conflicts: vec![], defer_conflicts: vec![],
     };
 
@@ -789,7 +789,7 @@ fn test_plan_actions_basic_creation_and_conflict() {
 fn test_execute_actions_basic_creation() {
     let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
 
-    // --- Scenario 1: Create Directory --- 
+    // --- Scenario 1: Create Directory ---
     let pkg1_name: &str = "pkg_exec_dir";
     let package1_dir: PathBuf = stow_dir.join(pkg1_name);
     fs::create_dir_all(&package1_dir).unwrap();
@@ -805,7 +805,7 @@ fn test_execute_actions_basic_creation() {
 
     // Plan actions
     let planned_actions1_result: Result<Vec<rustow::stow::TargetActionReport>, rustow::error::RustowError> = rustow::stow::stow_packages(&config1); // This now plans AND executes
-                                                                    // We need to separate planning and execution for this test, 
+                                                                    // We need to separate planning and execution for this test,
                                                                     // or adapt stow_packages if it now returns reports.
                                                                     // For now, assuming stow_packages is refactored or we call plan then execute.
                                                                     // Let's assume `stow_packages` now returns reports.
@@ -820,7 +820,7 @@ fn test_execute_actions_basic_creation() {
     assert!(target_dir.join("my_dir").exists(), "Target directory my_dir was not created");
     assert!(target_dir.join("my_dir").is_dir(), "Target my_dir is not a directory");
 
-    // --- Scenario 1.1: Create Directory (Simulate) --- 
+    // --- Scenario 1.1: Create Directory (Simulate) ---
     let pkg1_sim_name: &str = "pkg_exec_dir_sim";
     let package1_sim_dir: PathBuf = stow_dir.join(pkg1_sim_name);
     fs::create_dir_all(&package1_sim_dir).unwrap();
@@ -839,7 +839,7 @@ fn test_execute_actions_basic_creation() {
     assert!(!target_dir.join("my_dir_sim").exists(), "Target directory my_dir_sim should not have been created in simulate mode");
     config1.simulate = false; // Reset for next tests
 
-    // --- Scenario 2: Create Symlink (File) --- 
+    // --- Scenario 2: Create Symlink (File) ---
     let pkg2_name: &str = "pkg_exec_file_link";
     let package2_dir: PathBuf = stow_dir.join(pkg2_name);
     fs::create_dir_all(&package2_dir).unwrap();
@@ -955,11 +955,11 @@ fn test_execute_actions_basic_creation() {
     // For now, Scenario 3 covers parent dir creation implicitly handled by CreateSymlink's logic.
 }
 
-// Add more tests as needed: 
+// Add more tests as needed:
 // - Conflicting files/directories (needs fs_utils to check existence in target for planning)
 // - `--adopt` functionality (needs more involved setup and fs_utils checks)
 // - `--no-folding` (needs directory structures that would normally fold)
-// - Delete and Restow operations (would need to plan Delete actions or sequence of Delete/Create) 
+// - Delete and Restow operations (would need to plan Delete actions or sequence of Delete/Create)
 
 /// Test delete mode functionality
 #[test]
@@ -983,7 +983,7 @@ fn test_delete_mode_basic() {
     // Verify symlinks were created
     assert!(target_dir.join("bin").exists(), "bin directory should exist after stow");
     assert!(target_dir.join("bin/test_script").exists(), "test_script symlink should exist after stow");
-    assert!(fs::symlink_metadata(target_dir.join("bin/test_script")).unwrap().file_type().is_symlink(), 
+    assert!(fs::symlink_metadata(target_dir.join("bin/test_script")).unwrap().file_type().is_symlink(),
             "test_script should be a symlink");
 
     // Now test delete mode
@@ -1002,11 +1002,11 @@ fn test_delete_mode_basic() {
     // This depends on the specific implementation of delete_packages
 
     // Verify reports indicate successful deletion
-    let script_delete_report = delete_reports.iter().find(|r| 
+    let script_delete_report = delete_reports.iter().find(|r|
         r.original_action.target_path.ends_with("test_script")
     );
     assert!(script_delete_report.is_some(), "Should have a delete report for test_script");
-    assert_eq!(script_delete_report.unwrap().status, TargetActionReportStatus::Success, 
+    assert_eq!(script_delete_report.unwrap().status, TargetActionReportStatus::Success,
                "Delete operation should be successful");
 }
 
@@ -1032,7 +1032,7 @@ fn test_delete_mode_with_dotfiles() {
     // Verify dotfiles symlinks were created
     assert!(target_dir.join(".bashrc").exists(), ".bashrc symlink should exist after stow");
     assert!(target_dir.join(".config").exists(), ".config directory should exist after stow");
-    assert!(fs::symlink_metadata(target_dir.join(".bashrc")).unwrap().file_type().is_symlink(), 
+    assert!(fs::symlink_metadata(target_dir.join(".bashrc")).unwrap().file_type().is_symlink(),
             ".bashrc should be a symlink");
 
     // Now test delete mode with dotfiles
@@ -1079,7 +1079,7 @@ fn test_delete_mode_nonexistent_target() {
 
     // All operations should be skipped since targets don't exist
     for report in &delete_reports {
-        assert_eq!(report.status, TargetActionReportStatus::Skipped, 
+        assert_eq!(report.status, TargetActionReportStatus::Skipped,
                    "All delete operations should be skipped when targets don't exist");
     }
 }
@@ -1121,11 +1121,11 @@ fn test_delete_mode_non_stow_symlinks() {
     assert!(target_dir.join("bin/test_script").exists(), "Non-stow symlink should not be deleted");
 
     let delete_reports = delete_result.unwrap();
-    let script_report = delete_reports.iter().find(|r| 
+    let script_report = delete_reports.iter().find(|r|
         r.original_action.target_path.ends_with("test_script")
     );
     assert!(script_report.is_some(), "Should have a report for test_script");
-    assert_eq!(script_report.unwrap().status, TargetActionReportStatus::Skipped, 
+    assert_eq!(script_report.unwrap().status, TargetActionReportStatus::Skipped,
                "Non-stow symlink should be skipped");
 }
 
@@ -1203,7 +1203,7 @@ fn test_restow_mode_basic() {
     // Verify old symlink is removed and new one is created
     assert!(!target_dir.join("bin/test_script").exists(), "Old test_script should be removed after restow");
     assert!(target_dir.join("bin/new_script").exists(), "New new_script should exist after restow");
-    assert!(fs::symlink_metadata(target_dir.join("bin/new_script")).unwrap().file_type().is_symlink(), 
+    assert!(fs::symlink_metadata(target_dir.join("bin/new_script")).unwrap().file_type().is_symlink(),
             "new_script should be a symlink");
 }
 
@@ -1245,7 +1245,7 @@ fn test_restow_mode_with_dotfiles() {
     // Verify old dotfile is removed and new one is created
     assert!(!target_dir.join(".bashrc").exists(), "Old .bashrc should be removed after restow");
     assert!(target_dir.join(".vimrc").exists(), "New .vimrc should exist after restow");
-    assert!(fs::symlink_metadata(target_dir.join(".vimrc")).unwrap().file_type().is_symlink(), 
+    assert!(fs::symlink_metadata(target_dir.join(".vimrc")).unwrap().file_type().is_symlink(),
             ".vimrc should be a symlink");
 }
 
@@ -1297,7 +1297,7 @@ fn test_delete_mode_simulate() {
 
     // Verify reports indicate simulation
     for report in &delete_reports {
-        assert_eq!(report.status, TargetActionReportStatus::Skipped, 
+        assert_eq!(report.status, TargetActionReportStatus::Skipped,
                    "All operations should be skipped in simulate mode");
         if let Some(message) = &report.message {
             assert!(message.contains("SIMULATE"), "Simulate messages should contain 'SIMULATE'");
@@ -1431,7 +1431,7 @@ fn test_conflict_resolution_override_option() {
         r.original_action.target_path.file_name().map_or(false, |name| name == "conflicting_file.txt")
     }).expect("Should find report for conflicting_file.txt");
 
-    assert_eq!(conflict_report.original_action.action_type, ActionType::Conflict, 
+    assert_eq!(conflict_report.original_action.action_type, ActionType::Conflict,
                "Should be marked as conflict without --override");
 
     // Now try with --override option
@@ -1453,14 +1453,14 @@ fn test_conflict_resolution_override_option() {
         r.original_action.target_path.file_name().map_or(false, |name| name == "conflicting_file.txt")
     }).expect("Should find report for conflicting_file.txt with override");
 
-    assert_eq!(override_report.original_action.action_type, ActionType::CreateSymlink, 
+    assert_eq!(override_report.original_action.action_type, ActionType::CreateSymlink,
                "Should be CreateSymlink with --override");
-    assert_eq!(override_report.status, TargetActionReportStatus::Success, 
+    assert_eq!(override_report.status, TargetActionReportStatus::Success,
                "Should succeed with --override");
 
     // Verify the symlink now points to package2
     let link_target = fs::read_link(&target_file).unwrap();
-    assert!(link_target.to_string_lossy().contains("package2"), 
+    assert!(link_target.to_string_lossy().contains("package2"),
             "Symlink should now point to package2, but points to: {:?}", link_target);
 }
 
@@ -1513,16 +1513,16 @@ fn test_conflict_resolution_defer_option() {
         r.original_action.target_path.file_name().map_or(false, |name| name == "deferred_file.txt")
     }).expect("Should find report for deferred_file.txt with defer");
 
-    assert_eq!(defer_report.original_action.action_type, ActionType::Skip, 
+    assert_eq!(defer_report.original_action.action_type, ActionType::Skip,
                "Should be Skip with --defer");
-    assert_eq!(defer_report.status, TargetActionReportStatus::Skipped, 
+    assert_eq!(defer_report.status, TargetActionReportStatus::Skipped,
                "Should be skipped with --defer");
 
     // Verify the symlink still points to package1 (unchanged)
     let current_link_target = fs::read_link(&target_file).unwrap();
-    assert_eq!(current_link_target, original_link_target, 
+    assert_eq!(current_link_target, original_link_target,
                "Symlink should remain unchanged with --defer");
-    assert!(current_link_target.to_string_lossy().contains("package1"), 
+    assert!(current_link_target.to_string_lossy().contains("package1"),
             "Symlink should still point to package1, but points to: {:?}", current_link_target);
 }
 
@@ -1563,20 +1563,20 @@ fn test_conflict_resolution_pattern_matching() {
     let override_report = reports.iter().find(|r| {
         r.original_action.target_path.file_name().map_or(false, |name| name == "override_me.txt")
     }).expect("Should find report for override_me.txt");
-    assert_eq!(override_report.original_action.action_type, ActionType::CreateSymlink, 
+    assert_eq!(override_report.original_action.action_type, ActionType::CreateSymlink,
                "override_me.txt should be CreateSymlink due to --override pattern");
 
     // Check defer_me.txt - should be Skip (deferred)
     let defer_report = reports.iter().find(|r| {
         r.original_action.target_path.file_name().map_or(false, |name| name == "defer_me.txt")
     }).expect("Should find report for defer_me.txt");
-    assert_eq!(defer_report.original_action.action_type, ActionType::Skip, 
+    assert_eq!(defer_report.original_action.action_type, ActionType::Skip,
                "defer_me.txt should be Skip due to --defer pattern");
 
     // Check normal_file.txt - should be Conflict (no pattern matches)
     let normal_report = reports.iter().find(|r| {
         r.original_action.target_path.file_name().map_or(false, |name| name == "normal_file.txt")
     }).expect("Should find report for normal_file.txt");
-    assert_eq!(normal_report.original_action.action_type, ActionType::Conflict, 
+    assert_eq!(normal_report.original_action.action_type, ActionType::Conflict,
                "normal_file.txt should be Conflict (no pattern matches)");
 }

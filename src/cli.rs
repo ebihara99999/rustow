@@ -193,4 +193,4 @@ mod tests {
         let args = Args::parse_from(&["rustow", "-d", "/cmd/stow/path", "mypackage"]);
         assert_eq!(args.dir, Some(PathBuf::from("/cmd/stow/path")));
     }
-} 
+}

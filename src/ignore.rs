@@ -79,7 +79,7 @@ pub fn is_ignored(
                             }
                         }
                     }
-                    _ => {} 
+                    _ => {}
                 }
             }
         }
@@ -89,17 +89,17 @@ pub fn is_ignored(
 
 // Helper function to read patterns from a file, skipping comments and empty lines
 fn read_patterns_from_file(file_path: &Path) -> Result<Vec<Regex>, IgnoreError> {
-    let file: File = File::open(file_path).map_err(|e| IgnoreError::FileIoError { 
-        path: file_path.to_path_buf(), 
-        source: e 
+    let file: File = File::open(file_path).map_err(|e| IgnoreError::FileIoError {
+        path: file_path.to_path_buf(),
+        source: e
     })?;
     let reader: BufReader<File> = BufReader::new(file);
     let mut patterns: Vec<Regex> = Vec::new();
 
     for line_result in reader.lines() {
-        let line: String = line_result.map_err(|e| IgnoreError::FileIoError { 
-            path: file_path.to_path_buf(), 
-            source: e 
+        let line: String = line_result.map_err(|e| IgnoreError::FileIoError {
+            path: file_path.to_path_buf(),
+            source: e
         })?;
         let trimmed_line: &str = line.trim();
 
@@ -411,7 +411,7 @@ mod tests {
                 assert_eq!(pattern, "*[invalid"); // Check that the correct failing pattern is reported
             }
             // Remove or comment out the catch-all for other error types if not expected
-            // Or, if Io errors are possible here (e.g. if file disappears after check), 
+            // Or, if Io errors are possible here (e.g. if file disappears after check),
             // add a specific match arm for `IgnoreError::FileIoError { .. }`
             // For now, let's assume only InvalidPattern is expected here.
             e => panic!("Expected InvalidPattern error, but got {:?}", e),

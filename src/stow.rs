@@ -258,7 +258,7 @@ fn process_item_for_stow(
     package_name: &str
 ) -> Result<Option<TargetAction>, RustowError> {
     let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
-        raw_item.package_relative_path.to_str().unwrap_or(""), 
+        raw_item.package_relative_path.to_str().unwrap_or(""),
         config.dotfiles
     ));
 
@@ -326,81 +326,97 @@ fn plan_stow_action_for_item(
 }
 
 /// Handle conflicts when target path already exists
-fn handle_existing_target_conflict(
+/// Check if a directory contains non-stow managed files
+fn check_directory_for_non_stow_files(
+    target_path_abs: &Path,
+    config: &Config
+) -> Result<bool, RustowError> {
+    if let Ok(entries) = std::fs::read_dir(target_path_abs) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                let entry_path = entry.path();
+                // If there's any file that's not a stow-managed symlink, it's a conflict
+                if !fs_utils::is_symlink(&entry_path) {
+                    return Ok(true);
+                }
+
+                // Check if it's a stow-managed symlink
+                match fs_utils::is_stow_symlink(&entry_path, &config.stow_dir) {
+                    Ok(Some(_)) => {
+                        // It's a stow-managed symlink, continue checking
+                    }
+                    Ok(None) | Err(_) => {
+                        // Not a stow-managed symlink or error checking, treat as conflict
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Handle directory-to-directory conflicts
+fn handle_directory_conflict(
+    target_path_abs: &Path,
+    config: &Config
+) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
+    if check_directory_for_non_stow_files(target_path_abs, config)? {
+        return Ok((ActionType::Conflict,
+                  Some(format!("Directory {:?} contains non-stow managed files", target_path_abs)),
+                  None));
+    }
+    Ok((ActionType::CreateDirectory, None, None))
+}
+
+/// Handle conflicts with existing symlinks
+fn handle_existing_symlink_conflict(
     stow_item: &StowItem,
     target_path_abs: &Path,
     link_target_for_symlink: PathBuf,
     config: &Config
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-
-
-    // Check if target is a directory and we're trying to create a directory
-    if fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
-        // Check if the existing directory contains any non-stow managed files
-        if let Ok(entries) = std::fs::read_dir(target_path_abs) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let entry_path = entry.path();
-                    // If there's any file that's not a stow-managed symlink, it's a conflict
-                    if !fs_utils::is_symlink(&entry_path) {
-                        return Ok((ActionType::Conflict, 
-                                  Some(format!("Directory {:?} contains non-stow managed files", target_path_abs)), 
-                                  None));
-                    }
-
-                                         // Check if it's a stow-managed symlink
-                     match fs_utils::is_stow_symlink(&entry_path, &config.stow_dir) {
-                         Ok(Some(_)) => {
-                             // It's a stow-managed symlink, continue checking
-                         }
-                         Ok(None) | Err(_) => {
-                             // Not a stow-managed symlink or error checking, treat as conflict
-                             return Ok((ActionType::Conflict, 
-                                       Some(format!("Directory {:?} contains non-stow managed files", target_path_abs)), 
-                                       None));
-                         }
-                     }
+    if let Ok(Some((existing_package_name, existing_item_path))) = fs_utils::is_stow_symlink(target_path_abs, &config.stow_dir) {
+        // It's a stow-managed symlink
+        if existing_item_path == stow_item.package_relative_path {
+            // Check if it's the same package
+            if let Some(current_package_name) = config.packages.get(0) {
+                if existing_package_name == *current_package_name {
+                    // Same package and same item, no conflict - already correctly stowed
+                    return Ok((ActionType::Skip,
+                              Some("Target already points to the same source".to_string()),
+                              None));
                 }
             }
-        }
-        return Ok((ActionType::CreateDirectory, None, None));
-    }
-
-    // Check if target is a symlink pointing to the same source (already stowed)
-    if fs_utils::is_symlink(target_path_abs) {
-        if let Ok(Some((existing_package_name, existing_item_path))) = fs_utils::is_stow_symlink(target_path_abs, &config.stow_dir) {
-
-
-            // It's a stow-managed symlink
-            if existing_item_path == stow_item.package_relative_path {
-                // Check if it's the same package
-                if let Some(current_package_name) = config.packages.get(0) {
-                    if existing_package_name == *current_package_name {
-                        // Same package and same item, no conflict - already correctly stowed
-                        return Ok((ActionType::Skip, 
-                                  Some("Target already points to the same source".to_string()), 
-                                  None));
-                    }
-                }
-                // Different package but same item path - this is a conflict that needs resolution
-                return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
-            } else {
-                // Different item path - check conflict resolution options
-                return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
-            }
+            // Different package but same item path - this is a conflict that needs resolution
+            return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
+        } else {
+            // Different item path - check conflict resolution options
+            return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
         }
     }
 
+    // Not a stow-managed symlink, treat as regular file conflict
+    handle_file_type_conflicts(stow_item, target_path_abs, link_target_for_symlink, config)
+}
+
+/// Handle file vs directory type conflicts and pattern matching
+fn handle_file_type_conflicts(
+    stow_item: &StowItem,
+    target_path_abs: &Path,
+    link_target_for_symlink: PathBuf,
+    config: &Config
+) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
     // Check if it's a file vs directory conflict
     if fs_utils::is_directory(target_path_abs) && stow_item.item_type != StowItemType::Directory {
-        return Ok((ActionType::Conflict, 
-                  Some(format!("Cannot create file symlink at {:?}: target is a directory", target_path_abs)), 
+        return Ok((ActionType::Conflict,
+                  Some(format!("Cannot create file symlink at {:?}: target is a directory", target_path_abs)),
                   None));
     }
 
     if !fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
-        return Ok((ActionType::Conflict, 
-                  Some(format!("Cannot create directory at {:?}: target is a file", target_path_abs)), 
+        return Ok((ActionType::Conflict,
+                  Some(format!("Cannot create directory at {:?}: target is a file", target_path_abs)),
                   None));
     }
 
@@ -411,9 +427,29 @@ fn handle_existing_target_conflict(
     }
 
     // No pattern matches, it's a conflict
-    Ok((ActionType::Conflict, 
-        Some(format!("Target path {:?} already exists and is not stow-managed", target_path_abs)), 
+    Ok((ActionType::Conflict,
+        Some(format!("Target path {:?} already exists and is not stow-managed", target_path_abs)),
         None))
+}
+
+fn handle_existing_target_conflict(
+    stow_item: &StowItem,
+    target_path_abs: &Path,
+    link_target_for_symlink: PathBuf,
+    config: &Config
+) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
+
+    // Check if target is a directory and we're trying to create a directory
+    if fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
+        return handle_directory_conflict(target_path_abs, config);
+    }
+
+    // Check if target is a symlink pointing to the same source (already stowed)
+    if fs_utils::is_symlink(target_path_abs) {
+        return handle_existing_symlink_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
+    }
+
+    handle_file_type_conflicts(stow_item, target_path_abs, link_target_for_symlink, config)
 }
 
 /// Handle conflicts between different stow packages
@@ -429,8 +465,8 @@ fn handle_stow_package_conflict(
     }
 
     // No pattern matches, it's a conflict
-    Ok((ActionType::Conflict, 
-        Some(format!("Target path {:?} is managed by another stow package", target_path_abs)), 
+    Ok((ActionType::Conflict,
+        Some(format!("Target path {:?} is managed by another stow package", target_path_abs)),
         None))
 }
 
@@ -470,8 +506,8 @@ enum ParentConflictType {
 
 /// Find parent conflicts for an action
 fn find_parent_conflict(
-    action: &TargetAction, 
-    all_actions: &[TargetAction], 
+    action: &TargetAction,
+    all_actions: &[TargetAction],
     config: &Config
 ) -> Option<ParentConflictInfo> {
     let mut parent_path_opt = action.target_path.parent();
@@ -900,9 +936,9 @@ fn plan_restow_delete_actions(package_name: &str, config: &Config) -> Result<Vec
 
 /// Recursively collect all stow-managed symlinks in target_dir that point to the specified package
 fn collect_stow_symlinks_for_package(
-    target_dir: &Path, 
-    stow_dir: &Path, 
-    package_name: &str, 
+    target_dir: &Path,
+    stow_dir: &Path,
+    package_name: &str,
     actions: &mut Vec<TargetAction>
 ) -> Result<(), RustowError> {
     if !fs_utils::path_exists(target_dir) {
@@ -1102,7 +1138,7 @@ fn process_item_for_deletion(
     current_ignore_patterns: &IgnorePatterns
 ) -> Result<Option<TargetAction>, RustowError> {
     let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
-        raw_item.package_relative_path.to_str().unwrap_or(""), 
+        raw_item.package_relative_path.to_str().unwrap_or(""),
         config.dotfiles
     ));
 
@@ -1231,4 +1267,194 @@ fn create_skip_action_for_missing_target(
         action_type: ActionType::Skip,
         conflict_details: Some("Target does not exist, nothing to delete".to_string()),
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+    use crate::config::{Config, StowMode};
+    use std::path::PathBuf;
+
+    fn create_test_config(target_dir: &Path, stow_dir: &Path) -> Config {
+        Config {
+            target_dir: target_dir.to_path_buf(),
+            stow_dir: stow_dir.to_path_buf(),
+            packages: vec!["test_package".to_string()],
+            mode: StowMode::Stow,
+            adopt: false,
+            no_folding: false,
+            dotfiles: false,
+            overrides: vec![],
+            defers: vec![],
+            simulate: false,
+            verbosity: 0,
+            home_dir: PathBuf::from("/tmp"),
+        }
+    }
+
+    #[test]
+    fn test_check_directory_for_non_stow_files_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_dir = target_dir.join("test_dir");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let result = check_directory_for_non_stow_files(&test_dir, &config).unwrap();
+        assert!(!result, "Empty directory should not contain non-stow files");
+    }
+
+    #[test]
+    fn test_check_directory_for_non_stow_files_with_regular_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_dir = target_dir.join("test_dir");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        // Create a regular file in the directory
+        fs::write(test_dir.join("regular_file.txt"), "content").unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let result = check_directory_for_non_stow_files(&test_dir, &config).unwrap();
+        assert!(result, "Directory with regular file should contain non-stow files");
+    }
+
+    #[test]
+    fn test_handle_directory_conflict_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_dir = target_dir.join("test_dir");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let result = handle_directory_conflict(&test_dir, &config).unwrap();
+        assert_eq!(result.0, ActionType::CreateDirectory);
+        assert!(result.1.is_none());
+        assert!(result.2.is_none());
+    }
+
+    #[test]
+    fn test_handle_directory_conflict_with_non_stow_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_dir = target_dir.join("test_dir");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        // Create a regular file in the directory
+        fs::write(test_dir.join("regular_file.txt"), "content").unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let result = handle_directory_conflict(&test_dir, &config).unwrap();
+        assert_eq!(result.0, ActionType::Conflict);
+        assert!(result.1.is_some());
+        assert!(result.1.unwrap().contains("contains non-stow managed files"));
+        assert!(result.2.is_none());
+    }
+
+    #[test]
+    fn test_handle_file_type_conflicts_file_vs_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_dir = target_dir.join("test_dir");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        // Create a StowItem representing a file
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let link_target = PathBuf::from("../stow/test_package/test_file.txt");
+
+        // Test: trying to create file symlink where directory exists
+        let result = handle_file_type_conflicts(&stow_item, &test_dir, link_target, &config).unwrap();
+        assert_eq!(result.0, ActionType::Conflict);
+        assert!(result.1.is_some());
+        assert!(result.1.unwrap().contains("Cannot create file symlink"));
+    }
+
+    #[test]
+    fn test_handle_file_type_conflicts_directory_vs_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&test_file, "content").unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        // Create a StowItem representing a directory
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_dir"),
+            source_path: stow_dir.join("test_package").join("test_dir"),
+            item_type: StowItemType::Directory,
+            target_name_after_dotfiles_processing: PathBuf::from("test_dir"),
+        };
+
+        let link_target = PathBuf::from("../stow/test_package/test_dir");
+
+        // Test: trying to create directory where file exists
+        let result = handle_file_type_conflicts(&stow_item, &test_file, link_target, &config).unwrap();
+        assert_eq!(result.0, ActionType::Conflict);
+        assert!(result.1.is_some());
+        assert!(result.1.unwrap().contains("Cannot create directory"));
+    }
+
+    #[test]
+    fn test_handle_file_type_conflicts_no_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&test_file, "content").unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        // Create a StowItem representing a file (same type as existing)
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let link_target = PathBuf::from("../stow/test_package/test_file.txt");
+
+        // Test: file vs file should result in conflict (not stow-managed)
+        let result = handle_file_type_conflicts(&stow_item, &test_file, link_target, &config).unwrap();
+        assert_eq!(result.0, ActionType::Conflict);
+        assert!(result.1.is_some());
+        assert!(result.1.unwrap().contains("already exists and is not stow-managed"));
+    }
+}

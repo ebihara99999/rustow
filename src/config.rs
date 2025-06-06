@@ -82,7 +82,7 @@ impl Config {
             }
         })?;
 
-        let home_dir: PathBuf = dirs::home_dir().ok_or_else(|| 
+        let home_dir: PathBuf = dirs::home_dir().ok_or_else(||
             RustowError::Config(ConfigError::InvalidStowDir(
                 "Failed to determine home directory for loading global ignore file".to_string()
             ))
@@ -147,7 +147,7 @@ mod tests {
 
         let temp_stow_dir_name = "actual_stow_dir_for_test";
         let temp_stow_dir = temp_stow_parent.path().join(temp_stow_dir_name);
-        fs::create_dir_all(&temp_stow_dir).unwrap(); 
+        fs::create_dir_all(&temp_stow_dir).unwrap();
         env::set_current_dir(&temp_stow_dir).unwrap();
 
         unsafe { env::remove_var("STOW_DIR"); }
@@ -161,12 +161,12 @@ mod tests {
         assert_eq!(config.mode, StowMode::Stow);
 
         let expected_stow_dir = fs_utils::canonicalize_path(&temp_stow_dir).unwrap();
-        let expected_target_dir = fs_utils::canonicalize_path(temp_stow_parent.path()).unwrap(); 
+        let expected_target_dir = fs_utils::canonicalize_path(temp_stow_parent.path()).unwrap();
 
         assert_eq!(config.stow_dir, expected_stow_dir);
         assert_eq!(config.target_dir, expected_target_dir);
 
-        env::set_current_dir(current_dir_original).unwrap(); 
+        env::set_current_dir(current_dir_original).unwrap();
     }
 
     #[test]
@@ -194,7 +194,7 @@ mod tests {
         }
         // Need to be in a directory that is not the env_stow_dir for default target to make sense, or provide target explicitly
         let current_dir_original = env::current_dir().unwrap();
-        let another_dir = temp_base.path().join("another_place"); 
+        let another_dir = temp_base.path().join("another_place");
         fs::create_dir_all(&another_dir).unwrap();
         env::set_current_dir(&another_dir).unwrap();
 
@@ -217,7 +217,7 @@ mod tests {
         let args = Args::parse_from(&[
             "rustow",
             "-t", specified_target_dir.to_str().unwrap(),
-            "-d", dummy_stow_dir.to_str().unwrap(), 
+            "-d", dummy_stow_dir.to_str().unwrap(),
             "pkg",
         ]);
         let config = Config::from_args(args).unwrap();
@@ -356,4 +356,4 @@ mod tests {
             e => panic!("Unexpected error type: {:?}", e),
         }
     }
-} 
+}

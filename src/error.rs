@@ -285,4 +285,4 @@ mod tests {
         assert_eq!(RustowError::InvalidPattern("pat1".to_string()), RustowError::InvalidPattern("pat1".to_string()));
         assert_ne!(RustowError::InvalidPattern("pat1".to_string()), RustowError::InvalidPattern("pat2".to_string()));
     }
-} 
+}

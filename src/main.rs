@@ -17,11 +17,11 @@ fn main() {
     // if all_args.len() == 1 && all_args[0].contains("rustow") {
     //     eprintln!("stderr: Attempting to parse arguments for main binary execution context...");
     // }
-    // let raw_cli_args: Vec<String> = std::env::args().collect(); 
+    // let raw_cli_args: Vec<String> = std::env::args().collect();
     // eprintln!("stderr: Raw CLI args (non-test execution): {:?}", raw_cli_args);
 
     let args = Args::parse();
-    // eprintln!("stderr: Successfully parsed args in main: {:?}", args.clone()); 
+    // eprintln!("stderr: Successfully parsed args in main: {:?}", args.clone());
 
     if let Err(e) = rustow::run(args) {
         eprintln!("Error: {}", e);
