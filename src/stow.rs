@@ -964,6 +964,13 @@ where
     Ok(all_actions)
 }
 
+/// Apply conflict resolution to planned actions
+fn apply_conflict_resolution(actions: &mut Vec<TargetAction>, config: &Config) {
+    let conflict_resolver = ConflictResolver::new(config);
+    conflict_resolver.resolve_inter_package_conflicts(actions);
+    conflict_resolver.propagate_conflicts_to_children(actions);
+}
+
 pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
     if config.packages.is_empty() {
         return Ok(Vec::new());
@@ -972,9 +979,7 @@ pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowE
     let mut all_planned_actions = collect_package_actions(config, plan_actions)?;
 
     // Resolve conflicts using the dedicated conflict resolver
-    let conflict_resolver = ConflictResolver::new(config);
-    conflict_resolver.resolve_inter_package_conflicts(&mut all_planned_actions);
-    conflict_resolver.propagate_conflicts_to_children(&mut all_planned_actions);
+    apply_conflict_resolution(&mut all_planned_actions, config);
 
     execute_actions(&all_planned_actions, config)
 }
@@ -2496,6 +2501,81 @@ mod tests {
         let mut actions: Vec<TargetAction> = vec![];
         sort_deletion_actions(&mut actions);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_apply_conflict_resolution_no_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let mut actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/file1"),
+                link_target_path: Some(PathBuf::from("../stow/package/file1")),
+                action_type: ActionType::CreateSymlink,
+                conflict_details: None,
+            },
+        ];
+
+        apply_conflict_resolution(&mut actions, &config);
+
+        // Should not change anything when there are no conflicts
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0].action_type, ActionType::CreateSymlink));
+        assert!(actions[0].conflict_details.is_none());
+    }
+
+    #[test]
+    fn test_apply_conflict_resolution_empty_actions() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let mut actions: Vec<TargetAction> = vec![];
+
+        apply_conflict_resolution(&mut actions, &config);
+
+        // Should handle empty action list gracefully
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_apply_conflict_resolution_with_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let target_path = PathBuf::from("/tmp/conflict_file");
+        let mut actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: target_path.clone(),
+                link_target_path: Some(PathBuf::from("../stow/package1/file")),
+                action_type: ActionType::CreateSymlink,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: target_path.clone(),
+                link_target_path: Some(PathBuf::from("../stow/package2/file")),
+                action_type: ActionType::CreateSymlink,
+                conflict_details: None,
+            },
+        ];
+
+        apply_conflict_resolution(&mut actions, &config);
+
+        // Should detect and mark conflicts
+        assert_eq!(actions.len(), 2);
+        let conflict_count = actions.iter()
+            .filter(|action| matches!(action.action_type, ActionType::Conflict))
+            .count();
+        assert!(conflict_count > 0, "Expected at least one conflict action");
     }
 }
 
