@@ -1026,7 +1026,16 @@ fn plan_restow_delete_actions(package_name: &str, config: &Config) -> Result<Vec
     Ok(actions)
 }
 
-/// Recursively collect all stow-managed symlinks in target_dir that point to the specified package
+/// Read directory entries safely with error handling
+fn read_directory_entries(target_dir: &Path) -> Result<std::fs::ReadDir, RustowError> {
+    std::fs::read_dir(target_dir).map_err(|_| {
+        RustowError::Stow(StowError::InvalidPackageStructure(
+            format!("Cannot read directory: {:?}", target_dir)
+        ))
+    })
+}
+
+/// Collect stow-managed symlinks from a target directory for deletion
 fn collect_stow_symlinks_for_package(
     target_dir: &Path,
     stow_dir: &Path,
@@ -1037,12 +1046,7 @@ fn collect_stow_symlinks_for_package(
         return Ok(());
     }
 
-    let entries = std::fs::read_dir(target_dir).map_err(|_| {
-        // Convert to a more specific error if needed, but for now just skip
-        RustowError::Stow(StowError::InvalidPackageStructure(
-            format!("Cannot read directory: {:?}", target_dir)
-        ))
-    })?;
+    let entries = read_directory_entries(target_dir)?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -2198,5 +2202,51 @@ mod tests {
         assert_eq!(result.0, ActionType::Skip);
         assert!(result.1.is_some());
         assert!(result.1.unwrap().contains("belongs to different package item"));
+    }
+
+    #[test]
+    fn test_read_directory_entries_valid_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_dir = temp_dir.path().join("test_dir");
+        fs::create_dir_all(&test_dir).unwrap();
+
+        // Create some files in the directory
+        fs::write(test_dir.join("file1.txt"), "content1").unwrap();
+        fs::write(test_dir.join("file2.txt"), "content2").unwrap();
+
+        let result = read_directory_entries(&test_dir);
+        assert!(result.is_ok());
+
+        let entries: Vec<_> = result.unwrap().collect();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_read_directory_entries_nonexistent_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let nonexistent_dir = temp_dir.path().join("nonexistent");
+
+        let result = read_directory_entries(&nonexistent_dir);
+        assert!(result.is_err());
+
+        if let Err(RustowError::Stow(StowError::InvalidPackageStructure(msg))) = result {
+            assert!(msg.contains("Cannot read directory"));
+            assert!(msg.contains("nonexistent"));
+        } else {
+            panic!("Expected InvalidPackageStructure error");
+        }
+    }
+
+    #[test]
+    fn test_read_directory_entries_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let empty_dir = temp_dir.path().join("empty_dir");
+        fs::create_dir_all(&empty_dir).unwrap();
+
+        let result = read_directory_entries(&empty_dir);
+        assert!(result.is_ok());
+
+        let entries: Vec<_> = result.unwrap().collect();
+        assert_eq!(entries.len(), 0);
     }
 }
