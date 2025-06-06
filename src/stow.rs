@@ -785,33 +785,58 @@ fn execute_delete_symlink_action(action: &TargetAction) -> TargetActionReport {
     }
 }
 
-/// Execute a delete directory action
-fn execute_delete_directory_action(action: &TargetAction) -> TargetActionReport {
-    // Check if directory exists first
+/// Check if directory exists for deletion
+fn check_directory_exists_for_deletion(action: &TargetAction) -> Option<TargetActionReport> {
     if !fs_utils::path_exists(&action.target_path) {
-        return TargetActionReport {
+        return Some(TargetActionReport {
             original_action: action.clone(),
             status: TargetActionReportStatus::Skipped,
             message: Some(format!("Directory {:?} does not exist, skipping deletion", action.target_path)),
-        };
+        });
+    }
+    None
+}
+
+/// Validate directory is empty before deletion
+fn validate_directory_empty_for_deletion(action: &TargetAction) -> Result<bool, TargetActionReport> {
+    match is_directory_empty(&action.target_path) {
+        Ok(is_empty) => Ok(is_empty),
+        Err(e) => Err(TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(e.to_string()),
+            message: Some(format!("Failed to check if directory {:?} is empty: {}", action.target_path, e)),
+        })
+    }
+}
+
+/// Perform the actual directory deletion
+fn perform_directory_deletion(action: &TargetAction) -> TargetActionReport {
+    match fs_utils::delete_empty_dir(&action.target_path) {
+        Ok(_) => TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Success,
+            message: Some(format!("Successfully deleted empty directory {:?}", action.target_path)),
+        },
+        Err(e) => TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(e.to_string()),
+            message: Some(format!("Failed to delete directory {:?}: {}", action.target_path, e)),
+        }
+    }
+}
+
+/// Execute a delete directory action
+fn execute_delete_directory_action(action: &TargetAction) -> TargetActionReport {
+    // Check if directory exists first
+    if let Some(skip_report) = check_directory_exists_for_deletion(action) {
+        return skip_report;
     }
 
     // Check if directory is empty before attempting deletion
-    match is_directory_empty(&action.target_path) {
+    match validate_directory_empty_for_deletion(action) {
         Ok(true) => {
             // Directory is empty, proceed with deletion
-            match fs_utils::delete_empty_dir(&action.target_path) {
-                Ok(_) => TargetActionReport {
-                    original_action: action.clone(),
-                    status: TargetActionReportStatus::Success,
-                    message: Some(format!("Successfully deleted empty directory {:?}", action.target_path)),
-                },
-                Err(e) => TargetActionReport {
-                    original_action: action.clone(),
-                    status: TargetActionReportStatus::Failure(e.to_string()),
-                    message: Some(format!("Failed to delete directory {:?}: {}", action.target_path, e)),
-                }
-            }
+            perform_directory_deletion(action)
         },
         Ok(false) => {
             // Directory is not empty, skip deletion
@@ -821,13 +846,9 @@ fn execute_delete_directory_action(action: &TargetAction) -> TargetActionReport 
                 message: Some(format!("Skipped deleting directory {:?}: not empty", action.target_path)),
             }
         },
-        Err(e) => {
+        Err(error_report) => {
             // Error checking if directory is empty
-            TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Failure(e.to_string()),
-                message: Some(format!("Failed to check if directory {:?} is empty: {}", action.target_path, e)),
-            }
+            error_report
         }
     }
 }
@@ -1577,5 +1598,113 @@ mod tests {
         assert_eq!(result.status, TargetActionReportStatus::Success);
         assert!(target_file.exists(), "Symlink should be created");
         assert!(fs_utils::is_symlink(&target_file), "Target should be a symlink");
+    }
+
+    #[test]
+    fn test_check_directory_exists_for_deletion_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let missing_dir = target_dir.join("missing_dir");
+
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: missing_dir,
+            link_target_path: None,
+            action_type: ActionType::DeleteDirectory,
+            conflict_details: None,
+        };
+
+        let result = check_directory_exists_for_deletion(&action);
+        assert!(result.is_some(), "Should return skip report for missing directory");
+
+        let skip_report = result.unwrap();
+        assert_eq!(skip_report.status, TargetActionReportStatus::Skipped);
+        assert!(skip_report.message.unwrap().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_check_directory_exists_for_deletion_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let existing_dir = target_dir.join("existing_dir");
+
+        fs::create_dir_all(&existing_dir).unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: existing_dir,
+            link_target_path: None,
+            action_type: ActionType::DeleteDirectory,
+            conflict_details: None,
+        };
+
+        let result = check_directory_exists_for_deletion(&action);
+        assert!(result.is_none(), "Should return None for existing directory");
+    }
+
+    #[test]
+    fn test_validate_directory_empty_for_deletion_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let empty_dir = target_dir.join("empty_dir");
+
+        fs::create_dir_all(&empty_dir).unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: empty_dir,
+            link_target_path: None,
+            action_type: ActionType::DeleteDirectory,
+            conflict_details: None,
+        };
+
+        let result = validate_directory_empty_for_deletion(&action);
+        assert!(result.is_ok(), "Should succeed for empty directory");
+        assert_eq!(result.unwrap(), true, "Should return true for empty directory");
+    }
+
+    #[test]
+    fn test_validate_directory_empty_for_deletion_not_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let non_empty_dir = target_dir.join("non_empty_dir");
+
+        fs::create_dir_all(&non_empty_dir).unwrap();
+        fs::write(non_empty_dir.join("file.txt"), "content").unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: non_empty_dir,
+            link_target_path: None,
+            action_type: ActionType::DeleteDirectory,
+            conflict_details: None,
+        };
+
+        let result = validate_directory_empty_for_deletion(&action);
+        assert!(result.is_ok(), "Should succeed for non-empty directory check");
+        assert_eq!(result.unwrap(), false, "Should return false for non-empty directory");
+    }
+
+    #[test]
+    fn test_perform_directory_deletion_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let empty_dir = target_dir.join("empty_dir");
+
+        fs::create_dir_all(&empty_dir).unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: empty_dir.clone(),
+            link_target_path: None,
+            action_type: ActionType::DeleteDirectory,
+            conflict_details: None,
+        };
+
+        let result = perform_directory_deletion(&action);
+        assert_eq!(result.status, TargetActionReportStatus::Success);
+        assert!(!empty_dir.exists(), "Directory should be deleted");
     }
 }
