@@ -1121,6 +1121,15 @@ fn resolve_symlink_target(symlink_path: &Path, link_target: &Path) -> PathBuf {
     }
 }
 
+/// Check if target is under package path using manual normalization
+fn is_target_under_package_path_manual(
+    resolved_target: &Path,
+    canonical_package_path: &Path
+) -> bool {
+    let normalized_target = normalize_path_components(resolved_target);
+    normalized_target.starts_with(canonical_package_path)
+}
+
 /// Determine if a symlink should be deleted based on its target
 fn should_delete_symlink(
     resolved_target: &Path,
@@ -1132,8 +1141,7 @@ fn should_delete_symlink(
     }
 
     // For broken symlinks, normalize the path manually
-    let normalized_target = normalize_path_components(resolved_target);
-    Ok(normalized_target.starts_with(canonical_package_path))
+    Ok(is_target_under_package_path_manual(resolved_target, canonical_package_path))
 }
 
 /// Normalize path by resolving .. and . components manually
@@ -2348,6 +2356,33 @@ mod tests {
 
         let result = is_non_stow_entry(&symlink_file, &stow_dir);
         assert!(result); // Non-stow symlink should be considered non-stow
+    }
+
+    #[test]
+    fn test_is_target_under_package_path_manual_under_package() {
+        let package_path = Path::new("/home/user/stow/mypackage");
+        let target_path = Path::new("/home/user/stow/mypackage/bin/script");
+
+        let result = is_target_under_package_path_manual(target_path, package_path);
+        assert!(result); // Target under package path should return true
+    }
+
+    #[test]
+    fn test_is_target_under_package_path_manual_outside_package() {
+        let package_path = Path::new("/home/user/stow/mypackage");
+        let target_path = Path::new("/home/user/stow/otherpackage/bin/script");
+
+        let result = is_target_under_package_path_manual(target_path, package_path);
+        assert!(!result); // Target outside package path should return false
+    }
+
+    #[test]
+    fn test_is_target_under_package_path_manual_with_parent_dirs() {
+        let package_path = Path::new("/home/user/stow/mypackage");
+        let target_path = Path::new("/home/user/stow/mypackage/subdir/../bin/script");
+
+        let result = is_target_under_package_path_manual(target_path, package_path);
+        assert!(result); // Target with .. components should be normalized correctly
     }
 }
 
