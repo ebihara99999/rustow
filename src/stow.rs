@@ -1309,10 +1309,10 @@ fn plan_deletion_for_existing_target(
     })
 }
 
-/// Determine the appropriate action for deleting a file or symlink
-fn determine_file_deletion_action(
-    stow_item: &StowItem,
+/// Validate if a target is a stow-managed symlink for deletion
+fn validate_target_for_deletion(
     target_path_abs: &Path,
+    stow_item: &StowItem,
     config: &Config
 ) -> Result<(ActionType, Option<String>), RustowError> {
     if !fs_utils::is_symlink(target_path_abs) {
@@ -1345,6 +1345,15 @@ fn determine_file_deletion_action(
             Some(format!("Error checking symlink at {:?}", target_path_abs))
         )),
     }
+}
+
+/// Determine the appropriate action for deleting a file or symlink
+fn determine_file_deletion_action(
+    stow_item: &StowItem,
+    target_path_abs: &Path,
+    config: &Config
+) -> Result<(ActionType, Option<String>), RustowError> {
+    validate_target_for_deletion(target_path_abs, stow_item, config)
 }
 
 /// Create a skip action for a missing target
@@ -2090,6 +2099,8 @@ mod tests {
         fs::create_dir_all(&stow_dir).unwrap();
         fs::write(&test_file, "content").unwrap();
 
+        let config = create_test_config(&target_dir, &stow_dir);
+
         // Create a StowItem representing a file
         let stow_item = StowItem {
             package_relative_path: PathBuf::from("test_file.txt"),
@@ -2098,8 +2109,94 @@ mod tests {
             target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
         };
 
-        // Test: file vs file - no type conflict
         let result = check_file_directory_type_conflicts(&stow_item, &test_file);
-        assert!(result.is_none());
+        assert!(result.is_none(), "File-to-file should not conflict");
+    }
+
+    #[test]
+    fn test_validate_target_for_deletion_not_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&test_file, "content").unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let result = validate_target_for_deletion(&test_file, &stow_item, &config).unwrap();
+        assert_eq!(result.0, ActionType::Skip);
+        assert!(result.1.is_some());
+        assert!(result.1.unwrap().contains("exists but is not a symlink"));
+    }
+
+    #[test]
+    fn test_validate_target_for_deletion_valid_stow_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let package_dir = stow_dir.join("test_package");
+        let source_file = package_dir.join("test_file.txt");
+        let target_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(&source_file, "content").unwrap();
+
+        // Create a symlink from target to source
+        fs_utils::create_symlink(&target_file, &source_file).unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: source_file,
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let result = validate_target_for_deletion(&target_file, &stow_item, &config).unwrap();
+        assert_eq!(result.0, ActionType::DeleteSymlink);
+        assert!(result.1.is_none());
+    }
+
+    #[test]
+    fn test_validate_target_for_deletion_wrong_package_item() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let package_dir = stow_dir.join("test_package");
+        let source_file = package_dir.join("different_file.txt");
+        let target_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(&source_file, "content").unwrap();
+
+        // Create a symlink from target to a different source file
+        fs_utils::create_symlink(&target_file, &source_file).unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: package_dir.join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let result = validate_target_for_deletion(&target_file, &stow_item, &config).unwrap();
+        assert_eq!(result.0, ActionType::Skip);
+        assert!(result.1.is_some());
+        assert!(result.1.unwrap().contains("belongs to different package item"));
     }
 }
