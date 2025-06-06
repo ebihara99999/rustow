@@ -661,13 +661,12 @@ fn execute_create_directory_action(action: &TargetAction) -> TargetActionReport 
     }
 }
 
-/// Execute a create symlink action
-fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
-    // Ensure parent directory exists
+/// Ensure parent directory exists for symlink creation
+fn ensure_parent_directory_exists(action: &TargetAction) -> Option<TargetActionReport> {
     if let Some(parent_dir) = action.target_path.parent() {
         if !fs_utils::path_exists(parent_dir) {
             if let Err(e) = fs_utils::create_dir_all(parent_dir) {
-                return TargetActionReport {
+                return Some(TargetActionReport {
                     original_action: action.clone(),
                     status: TargetActionReportStatus::Failure(format!(
                         "Failed to create parent directory {:?} for symlink: {}",
@@ -677,62 +676,85 @@ fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
                         "Failed to create parent directory {:?} for symlink {:?}: {}",
                         parent_dir, action.target_path, e
                     )),
-                };
+                });
             }
         }
+    }
+    None
+}
+
+/// Remove existing target if it exists (for override behavior)
+fn remove_existing_target(action: &TargetAction) -> Option<TargetActionReport> {
+    if fs_utils::path_exists(&action.target_path) {
+        if fs_utils::is_symlink(&action.target_path) {
+            if let Err(e) = fs_utils::delete_symlink(&action.target_path) {
+                return Some(TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Failure(format!(
+                        "Failed to remove existing symlink before override: {}",
+                        e
+                    )),
+                    message: Some(format!(
+                        "Failed to remove existing symlink {:?} before creating new one: {}",
+                        action.target_path, e
+                    )),
+                });
+            }
+        } else {
+            // Target exists but is not a symlink - this should have been caught in planning
+            return Some(TargetActionReport {
+                original_action: action.clone(),
+                status: TargetActionReportStatus::Failure(
+                    "Target exists and is not a symlink - cannot override".to_string(),
+                ),
+                message: Some(format!(
+                    "Target {:?} exists and is not a symlink - cannot override",
+                    action.target_path
+                )),
+            });
+        }
+    }
+    None
+}
+
+/// Create the actual symlink
+fn create_symlink_with_target(action: &TargetAction, link_target: &Path) -> TargetActionReport {
+    match fs_utils::create_symlink(&action.target_path, link_target) {
+        Ok(_) => TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Success,
+            message: Some(format!(
+                "Successfully created symlink {:?} -> {:?}",
+                action.target_path, link_target
+            )),
+        },
+        Err(e) => TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(e.to_string()),
+            message: Some(format!(
+                "Failed to create symlink {:?} -> {:?}: {}",
+                action.target_path, link_target, e
+            )),
+        },
+    }
+}
+
+/// Execute a create symlink action
+fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
+    // Ensure parent directory exists
+    if let Some(error_report) = ensure_parent_directory_exists(action) {
+        return error_report;
     }
 
     match &action.link_target_path {
         Some(link_target) => {
-            // If target already exists, remove it first (for override behavior)
-            if fs_utils::path_exists(&action.target_path) {
-                if fs_utils::is_symlink(&action.target_path) {
-                    if let Err(e) = fs_utils::delete_symlink(&action.target_path) {
-                        return TargetActionReport {
-                            original_action: action.clone(),
-                            status: TargetActionReportStatus::Failure(format!(
-                                "Failed to remove existing symlink before override: {}",
-                                e
-                            )),
-                            message: Some(format!(
-                                "Failed to remove existing symlink {:?} before creating new one: {}",
-                                action.target_path, e
-                            )),
-                        };
-                    }
-                } else {
-                    // Target exists but is not a symlink - this should have been caught in planning
-                    return TargetActionReport {
-                        original_action: action.clone(),
-                        status: TargetActionReportStatus::Failure(
-                            "Target exists and is not a symlink - cannot override".to_string(),
-                        ),
-                        message: Some(format!(
-                            "Target {:?} exists and is not a symlink - cannot override",
-                            action.target_path
-                        )),
-                    };
-                }
+            // Remove existing target if needed
+            if let Some(error_report) = remove_existing_target(action) {
+                return error_report;
             }
 
-            match fs_utils::create_symlink(&action.target_path, link_target) {
-                Ok(_) => TargetActionReport {
-                    original_action: action.clone(),
-                    status: TargetActionReportStatus::Success,
-                    message: Some(format!(
-                        "Successfully created symlink {:?} -> {:?}",
-                        action.target_path, link_target
-                    )),
-                },
-                Err(e) => TargetActionReport {
-                    original_action: action.clone(),
-                    status: TargetActionReportStatus::Failure(e.to_string()),
-                    message: Some(format!(
-                        "Failed to create symlink {:?} -> {:?}: {}",
-                        action.target_path, link_target, e
-                    )),
-                },
-            }
+            // Create the symlink
+            create_symlink_with_target(action, link_target)
         }
         None => TargetActionReport {
             original_action: action.clone(),
@@ -1456,5 +1478,104 @@ mod tests {
         assert_eq!(result.0, ActionType::Conflict);
         assert!(result.1.is_some());
         assert!(result.1.unwrap().contains("already exists and is not stow-managed"));
+    }
+
+    #[test]
+    fn test_ensure_parent_directory_exists_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let target_file = target_dir.join("subdir").join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: target_file,
+            link_target_path: Some(PathBuf::from("../stow/test_package/test_file.txt")),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let result = ensure_parent_directory_exists(&action);
+        assert!(result.is_none(), "Should succeed in creating parent directory");
+        assert!(target_dir.join("subdir").exists(), "Parent directory should be created");
+    }
+
+    #[test]
+    fn test_remove_existing_target_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let target_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        // Create an existing symlink
+        fs_utils::create_symlink(&target_file, &PathBuf::from("../stow/old_package/test_file.txt")).unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: target_file.clone(),
+            link_target_path: Some(PathBuf::from("../stow/test_package/test_file.txt")),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let result = remove_existing_target(&action);
+        assert!(result.is_none(), "Should succeed in removing existing symlink");
+        assert!(!target_file.exists(), "Existing symlink should be removed");
+    }
+
+    #[test]
+    fn test_remove_existing_target_non_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let target_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(&target_file, "content").unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: target_file,
+            link_target_path: Some(PathBuf::from("../stow/test_package/test_file.txt")),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let result = remove_existing_target(&action);
+        assert!(result.is_some(), "Should fail when target is not a symlink");
+
+        let error_report = result.unwrap();
+        assert!(matches!(error_report.status, TargetActionReportStatus::Failure(_)));
+        assert!(error_report.message.unwrap().contains("cannot override"));
+    }
+
+    #[test]
+    fn test_create_symlink_with_target_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let target_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir.join("test_package")).unwrap();
+        fs::write(stow_dir.join("test_package").join("test_file.txt"), "content").unwrap();
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: target_file.clone(),
+            link_target_path: Some(PathBuf::from("../stow/test_package/test_file.txt")),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let link_target = PathBuf::from("../stow/test_package/test_file.txt");
+        let result = create_symlink_with_target(&action, &link_target);
+
+        assert_eq!(result.status, TargetActionReportStatus::Success);
+        assert!(target_file.exists(), "Symlink should be created");
+        assert!(fs_utils::is_symlink(&target_file), "Target should be a symlink");
     }
 }
