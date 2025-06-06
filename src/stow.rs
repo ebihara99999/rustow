@@ -509,8 +509,11 @@ fn handle_stow_package_conflict(
 }
 
 /// Refine actions by checking for parent path conflicts
-fn refine_actions_for_parent_conflicts(actions: &mut [TargetAction], config: &Config) {
-    // Collect conflict information first to avoid borrowing issues
+/// Collect parent conflict information for all actions
+fn collect_parent_conflict_info(
+    actions: &[TargetAction],
+    config: &Config
+) -> Vec<(usize, ParentConflictInfo)> {
     let mut conflicts_to_apply = Vec::new();
 
     for (i, action) in actions.iter().enumerate() {
@@ -522,6 +525,13 @@ fn refine_actions_for_parent_conflicts(actions: &mut [TargetAction], config: &Co
             conflicts_to_apply.push((i, conflict_info));
         }
     }
+
+    conflicts_to_apply
+}
+
+fn refine_actions_for_parent_conflicts(actions: &mut [TargetAction], config: &Config) {
+    // Collect conflict information first to avoid borrowing issues
+    let conflicts_to_apply = collect_parent_conflict_info(actions, config);
 
     // Apply conflicts
     for (index, conflict_info) in conflicts_to_apply {
@@ -2701,6 +2711,75 @@ mod tests {
         // With current ignore patterns implementation, item should still be processed
         // This test mainly verifies the function doesn't crash with ignore patterns
         assert_eq!(actions.len(), 1);
+    }
+
+    #[test]
+    fn test_collect_parent_conflict_info_no_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: target_dir.join("simple_file.txt"),
+                link_target_path: Some(PathBuf::from("../stow/package/simple_file.txt")),
+                action_type: ActionType::CreateSymlink,
+                conflict_details: None,
+            }
+        ];
+
+        let conflicts = collect_parent_conflict_info(&actions, &config);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_collect_parent_conflict_info_skip_existing_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: target_dir.join("conflicted_file.txt"),
+                link_target_path: None,
+                action_type: ActionType::Conflict,
+                conflict_details: Some("Already in conflict".to_string()),
+            }
+        ];
+
+        let conflicts = collect_parent_conflict_info(&actions, &config);
+        assert!(conflicts.is_empty()); // Should skip actions already in conflict
+    }
+
+    #[test]
+    fn test_collect_parent_conflict_info_with_parent_file_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        // Create a file where a directory parent is expected
+        let parent_file = target_dir.join("parent_file");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(&parent_file, "content").unwrap();
+
+        let actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: parent_file.join("child_file.txt"),
+                link_target_path: Some(PathBuf::from("../stow/package/child_file.txt")),
+                action_type: ActionType::CreateSymlink,
+                conflict_details: None,
+            }
+        ];
+
+        let conflicts = collect_parent_conflict_info(&actions, &config);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].0, 0); // First action has conflict
     }
 }
 
