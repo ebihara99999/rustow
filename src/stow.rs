@@ -1227,12 +1227,12 @@ fn create_delete_directory_action(target_path: PathBuf) -> TargetAction {
     }
 }
 
-/// Plan actions for deleting (unstowing) a package
-fn plan_delete_actions(package_name: &str, config: &Config, current_ignore_patterns: &IgnorePatterns) -> Result<Vec<TargetAction>, RustowError> {
-    let package_path = config.stow_dir.join(package_name);
-    validate_package_path(&package_path, package_name)?;
-
-    let raw_items = load_package_items(&package_path, package_name)?;
+/// Process all raw items to create deletion actions
+fn process_deletion_items(
+    raw_items: Vec<fs_utils::RawStowItem>,
+    config: &Config,
+    current_ignore_patterns: &IgnorePatterns
+) -> Result<Vec<TargetAction>, RustowError> {
     let mut actions = Vec::new();
 
     for raw_item in raw_items {
@@ -1242,6 +1242,15 @@ fn plan_delete_actions(package_name: &str, config: &Config, current_ignore_patte
     }
 
     Ok(actions)
+}
+
+/// Plan actions for deleting (unstowing) a package
+fn plan_delete_actions(package_name: &str, config: &Config, current_ignore_patterns: &IgnorePatterns) -> Result<Vec<TargetAction>, RustowError> {
+    let package_path = config.stow_dir.join(package_name);
+    validate_package_path(&package_path, package_name)?;
+
+    let raw_items = load_package_items(&package_path, package_name)?;
+    process_deletion_items(raw_items, config, current_ignore_patterns)
 }
 
 /// Validate that the package path exists and is a directory
@@ -2624,6 +2633,74 @@ mod tests {
         let reports = result.unwrap();
         // Should return some reports (empty since no symlinks to delete)
         assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn test_process_deletion_items_empty_list() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+        
+        // Load ignore patterns for testing
+        let ignore_patterns = load_ignore_patterns_for_package("test_package", &config).unwrap();
+
+        let raw_items = vec![];
+        let result = process_deletion_items(raw_items, &config, &ignore_patterns);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_process_deletion_items_with_valid_item() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+        
+        // Load ignore patterns for testing
+        let ignore_patterns = load_ignore_patterns_for_package("test_package", &config).unwrap();
+
+        let raw_items = vec![
+            fs_utils::RawStowItem {
+                package_relative_path: PathBuf::from("test_file.txt"),
+                absolute_path: stow_dir.join("package").join("test_file.txt"),
+                item_type: fs_utils::RawStowItemType::File,
+            }
+        ];
+
+        let result = process_deletion_items(raw_items, &config, &ignore_patterns);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_type, ActionType::Skip); // Target doesn't exist
+    }
+
+    #[test]
+    fn test_process_deletion_items_with_ignored_item() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
+        
+        // Load ignore patterns for testing
+        let ignore_patterns = load_ignore_patterns_for_package("test_package", &config).unwrap();
+        
+        let raw_items = vec![
+            fs_utils::RawStowItem {
+                package_relative_path: PathBuf::from("ignored_file.txt"),
+                absolute_path: stow_dir.join("package").join("ignored_file.txt"),
+                item_type: fs_utils::RawStowItemType::File,
+            }
+        ];
+
+        let result = process_deletion_items(raw_items, &config, &ignore_patterns);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        // With current ignore patterns implementation, item should still be processed
+        // This test mainly verifies the function doesn't crash with ignore patterns
+        assert_eq!(actions.len(), 1);
     }
 }
 
