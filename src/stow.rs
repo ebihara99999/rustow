@@ -806,17 +806,27 @@ fn create_symlink_with_target(action: &TargetAction, link_target: &Path) -> Targ
     }
 }
 
-/// Execute a create symlink action
-fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
+/// Prepare for symlink creation by ensuring prerequisites are met
+fn prepare_symlink_creation(action: &TargetAction) -> Option<TargetActionReport> {
     // Ensure parent directory exists
     if let Some(error_report) = ensure_parent_directory_exists(action) {
-        return error_report;
+        return Some(error_report);
     }
 
+    // Remove existing target if needed
+    if let Some(error_report) = remove_existing_target(action) {
+        return Some(error_report);
+    }
+
+    None // No preparation errors, ready to create symlink
+}
+
+/// Execute a create symlink action
+fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
     match &action.link_target_path {
         Some(link_target) => {
-            // Remove existing target if needed
-            if let Some(error_report) = remove_existing_target(action) {
+            // Prepare for symlink creation
+            if let Some(error_report) = prepare_symlink_creation(action) {
                 return error_report;
             }
 
@@ -2757,29 +2767,141 @@ mod tests {
 
     #[test]
     fn test_collect_parent_conflict_info_with_parent_file_conflict() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
         let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
         let config = create_test_config(&target_dir, &stow_dir);
 
-        // Create a file where a directory parent is expected
-        let parent_file = target_dir.join("parent_file");
+        // Create a file where a parent directory should be
         std::fs::create_dir_all(&target_dir).unwrap();
-        std::fs::write(&parent_file, "content").unwrap();
+        std::fs::write(target_dir.join("parent"), "file content").unwrap();
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("file.txt"),
+            source_path: stow_dir.join("package").join("file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("file.txt"),
+        };
 
         let actions = vec![
             TargetAction {
-                source_item: None,
-                target_path: parent_file.join("child_file.txt"),
-                link_target_path: Some(PathBuf::from("../stow/package/child_file.txt")),
+                source_item: Some(stow_item),
+                target_path: target_dir.join("parent").join("child").join("file.txt"),
+                link_target_path: Some(PathBuf::from("../../../stow/package/file.txt")),
                 action_type: ActionType::CreateSymlink,
                 conflict_details: None,
-            }
+            },
         ];
 
-        let conflicts = collect_parent_conflict_info(&actions, &config);
-        assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].0, 0); // First action has conflict
+        let result = collect_parent_conflict_info(&actions, &config);
+
+        assert_eq!(result.len(), 1);
+        let (index, conflict_info) = &result[0];
+        assert_eq!(*index, 0);
+        assert!(matches!(conflict_info.conflict_type, ParentConflictType::ParentIsFile));
+        assert_eq!(conflict_info.parent_path, target_dir.join("parent"));
+    }
+
+    #[test]
+    fn test_prepare_symlink_creation_success() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let link_target = PathBuf::from("../stow/package/file.txt");
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("file.txt"),
+            source_path: stow_dir.join("package").join("file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("file.txt"),
+        };
+
+        let action = TargetAction {
+            source_item: Some(stow_item),
+            target_path: target_dir.join("subdir").join("file.txt"),
+            link_target_path: Some(link_target),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        // Should succeed - parent directories don't exist but will be created
+        let result = prepare_symlink_creation(&action);
+        assert!(result.is_none(), "Expected success, but got error: {:?}", result);
+
+        // Verify parent directory was created
+        assert!(fs_utils::path_exists(&target_dir.join("subdir")));
+    }
+
+    #[test]
+    fn test_prepare_symlink_creation_with_existing_symlink() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir_all(&stow_dir.join("package")).unwrap();
+        std::fs::write(stow_dir.join("package").join("file.txt"), "content").unwrap();
+
+        // Create existing symlink
+        let existing_target = stow_dir.join("old_package").join("file.txt");
+        std::fs::create_dir_all(existing_target.parent().unwrap()).unwrap();
+        std::fs::write(&existing_target, "old content").unwrap();
+        fs_utils::create_symlink(&target_dir.join("file.txt"), &existing_target).unwrap();
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("file.txt"),
+            source_path: stow_dir.join("package").join("file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("file.txt"),
+        };
+
+        let action = TargetAction {
+            source_item: Some(stow_item),
+            target_path: target_dir.join("file.txt"),
+            link_target_path: Some(PathBuf::from("../stow/package/file.txt")),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        // Should succeed - existing symlink will be removed
+        let result = prepare_symlink_creation(&action);
+        assert!(result.is_none(), "Expected success, but got error: {:?}", result);
+
+        // Verify old symlink was removed
+        assert!(!fs_utils::path_exists(&target_dir.join("file.txt")));
+    }
+
+    #[test]
+    fn test_prepare_symlink_creation_with_existing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("file.txt"), "existing content").unwrap();
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("file.txt"),
+            source_path: stow_dir.join("package").join("file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("file.txt"),
+        };
+
+        let action = TargetAction {
+            source_item: Some(stow_item),
+            target_path: target_dir.join("file.txt"),
+            link_target_path: Some(PathBuf::from("../stow/package/file.txt")),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        // Should fail - cannot override regular file
+        let result = prepare_symlink_creation(&action);
+        assert!(result.is_some(), "Expected failure for existing regular file");
+
+        let report = result.unwrap();
+        assert!(matches!(report.status, TargetActionReportStatus::Failure(_)));
+        assert!(report.message.unwrap().contains("cannot override"));
     }
 }
 
