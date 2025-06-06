@@ -520,6 +520,30 @@ enum ParentConflictType {
     ParentIsConflictTarget,
 }
 
+/// Check if a specific parent path has conflicts
+fn check_parent_path_conflicts(
+    parent_path: &Path,
+    all_actions: &[TargetAction]
+) -> Option<ParentConflictInfo> {
+    // Check if parent path is a file (conflicts with directory requirement)
+    if fs_utils::path_exists(parent_path) && !fs_utils::is_directory(parent_path) {
+        return Some(ParentConflictInfo {
+            conflict_type: ParentConflictType::ParentIsFile,
+            parent_path: parent_path.to_path_buf(),
+        });
+    }
+
+    // Check if parent path is target of another conflicting action
+    if is_parent_target_of_conflict(parent_path, all_actions) {
+        return Some(ParentConflictInfo {
+            conflict_type: ParentConflictType::ParentIsConflictTarget,
+            parent_path: parent_path.to_path_buf(),
+        });
+    }
+
+    None
+}
+
 /// Find parent conflicts for an action
 fn find_parent_conflict(
     action: &TargetAction,
@@ -533,20 +557,8 @@ fn find_parent_conflict(
             break;
         }
 
-        // Check if parent path is a file (conflicts with directory requirement)
-        if fs_utils::path_exists(parent_path) && !fs_utils::is_directory(parent_path) {
-            return Some(ParentConflictInfo {
-                conflict_type: ParentConflictType::ParentIsFile,
-                parent_path: parent_path.to_path_buf(),
-            });
-        }
-
-        // Check if parent path is target of another conflicting action
-        if is_parent_target_of_conflict(parent_path, all_actions) {
-            return Some(ParentConflictInfo {
-                conflict_type: ParentConflictType::ParentIsConflictTarget,
-                parent_path: parent_path.to_path_buf(),
-            });
+        if let Some(conflict_info) = check_parent_path_conflicts(parent_path, all_actions) {
+            return Some(conflict_info);
         }
 
         parent_path_opt = parent_path.parent();
@@ -1816,5 +1828,67 @@ mod tests {
         );
 
         assert!(!result);
+    }
+
+    #[test]
+    fn test_check_parent_path_conflicts_file_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let parent_file = target_dir.join("parent_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(&parent_file, "content").unwrap();
+
+        let result = check_parent_path_conflicts(&parent_file, &[]);
+
+        assert!(result.is_some());
+        let conflict_info = result.unwrap();
+        assert!(matches!(conflict_info.conflict_type, ParentConflictType::ParentIsFile));
+        assert_eq!(conflict_info.parent_path, parent_file);
+    }
+
+    #[test]
+    fn test_check_parent_path_conflicts_conflict_target() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let parent_dir = target_dir.join("parent_dir");
+
+        fs::create_dir_all(&parent_dir).unwrap();
+
+        let conflicting_action = TargetAction {
+            source_item: None,
+            target_path: parent_dir.clone(),
+            link_target_path: None,
+            action_type: ActionType::Conflict,
+            conflict_details: Some("Test conflict".to_string()),
+        };
+
+        let result = check_parent_path_conflicts(&parent_dir, &[conflicting_action]);
+
+        assert!(result.is_some());
+        let conflict_info = result.unwrap();
+        assert!(matches!(conflict_info.conflict_type, ParentConflictType::ParentIsConflictTarget));
+        assert_eq!(conflict_info.parent_path, parent_dir);
+    }
+
+    #[test]
+    fn test_check_parent_path_conflicts_no_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let parent_dir = target_dir.join("parent_dir");
+
+        fs::create_dir_all(&parent_dir).unwrap();
+
+        let non_conflicting_action = TargetAction {
+            source_item: None,
+            target_path: target_dir.join("other_path"),
+            link_target_path: None,
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let result = check_parent_path_conflicts(&parent_dir, &[non_conflicting_action]);
+
+        assert!(result.is_none());
     }
 }
