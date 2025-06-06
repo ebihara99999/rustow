@@ -1069,7 +1069,16 @@ fn collect_stow_symlinks_for_package(
     Ok(())
 }
 
-/// Process a symlink to determine if it should be deleted during restow
+/// Prepare canonical package path for symlink deletion check
+fn prepare_canonical_package_path(
+    stow_dir: &Path,
+    package_name: &str
+) -> Result<PathBuf, RustowError> {
+    let package_path = stow_dir.join(package_name);
+    fs_utils::canonicalize_path(&package_path)
+}
+
+/// Process a symlink for potential deletion
 fn process_symlink_for_deletion(
     symlink_path: &Path,
     stow_dir: &Path,
@@ -1083,8 +1092,7 @@ fn process_symlink_for_deletion(
     })?;
 
     let resolved_target = resolve_symlink_target(symlink_path, &link_target);
-    let package_path = stow_dir.join(package_name);
-    let canonical_package_path = fs_utils::canonicalize_path(&package_path)?;
+    let canonical_package_path = prepare_canonical_package_path(stow_dir, package_name)?;
 
     if should_delete_symlink(&resolved_target, &canonical_package_path)? {
         actions.push(create_delete_symlink_action(symlink_path.to_path_buf()));
@@ -2383,6 +2391,40 @@ mod tests {
 
         let result = is_target_under_package_path_manual(target_path, package_path);
         assert!(result); // Target with .. components should be normalized correctly
+    }
+
+    #[test]
+    fn test_prepare_canonical_package_path_valid_package() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        let package_dir = stow_dir.join("test_package");
+
+        fs::create_dir_all(&package_dir).unwrap();
+
+        let result = prepare_canonical_package_path(&stow_dir, "test_package");
+        assert!(result.is_ok());
+        let canonical_path = result.unwrap();
+        assert!(canonical_path.ends_with("test_package"));
+    }
+
+    #[test]
+    fn test_prepare_canonical_package_path_nonexistent_package() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let result = prepare_canonical_package_path(&stow_dir, "nonexistent_package");
+        assert!(result.is_err()); // Should fail for nonexistent package
+    }
+
+    #[test]
+    fn test_prepare_canonical_package_path_nonexistent_stow_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("nonexistent_stow");
+
+        let result = prepare_canonical_package_path(&stow_dir, "test_package");
+        assert!(result.is_err()); // Should fail for nonexistent stow directory
     }
 }
 
