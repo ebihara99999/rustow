@@ -567,12 +567,12 @@ fn find_parent_conflict(
     None
 }
 
-/// Apply conflict information to an action
-fn apply_conflict_to_action(action: &mut TargetAction, conflict_info: ParentConflictInfo) {
-    action.action_type = ActionType::Conflict;
-    action.link_target_path = None;
-
-    action.conflict_details = Some(match conflict_info.conflict_type {
+/// Generate conflict message based on conflict type and action
+fn generate_conflict_message(
+    conflict_info: &ParentConflictInfo,
+    action: &TargetAction
+) -> String {
+    match conflict_info.conflict_type {
         ParentConflictType::ParentIsFile => {
             let item_name = action.source_item
                 .as_ref()
@@ -590,7 +590,14 @@ fn apply_conflict_to_action(action: &mut TargetAction, conflict_info: ParentConf
                 conflict_info.parent_path
             )
         }
-    });
+    }
+}
+
+/// Apply conflict information to an action
+fn apply_conflict_to_action(action: &mut TargetAction, conflict_info: ParentConflictInfo) {
+    action.action_type = ActionType::Conflict;
+    action.link_target_path = None;
+    action.conflict_details = Some(generate_conflict_message(&conflict_info, action));
 }
 
 /// Check if parent path is the target of another conflicting action
@@ -1890,5 +1897,89 @@ mod tests {
         let result = check_parent_path_conflicts(&parent_dir, &[non_conflicting_action]);
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_generate_conflict_message_parent_is_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let parent_file = target_dir.join("parent_file.txt");
+
+        let conflict_info = ParentConflictInfo {
+            conflict_type: ParentConflictType::ParentIsFile,
+            parent_path: parent_file.clone(),
+        };
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let action = TargetAction {
+            source_item: Some(stow_item),
+            target_path: target_dir.join("test_file.txt"),
+            link_target_path: None,
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let message = generate_conflict_message(&conflict_info, &action);
+
+        assert!(message.contains("is a file"));
+        assert!(message.contains("test_file.txt"));
+        assert!(message.contains("needs it to be a directory"));
+    }
+
+    #[test]
+    fn test_generate_conflict_message_parent_is_conflict_target() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let parent_dir = target_dir.join("parent_dir");
+
+        let conflict_info = ParentConflictInfo {
+            conflict_type: ParentConflictType::ParentIsConflictTarget,
+            parent_path: parent_dir.clone(),
+        };
+
+        let action = TargetAction {
+            source_item: None,
+            target_path: target_dir.join("test_file.txt"),
+            link_target_path: None,
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let message = generate_conflict_message(&conflict_info, &action);
+
+        assert!(message.contains("is part of a conflicting item tree"));
+        assert!(message.contains(&format!("{:?}", parent_dir)));
+    }
+
+    #[test]
+    fn test_generate_conflict_message_unknown_source() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let parent_file = target_dir.join("parent_file.txt");
+
+        let conflict_info = ParentConflictInfo {
+            conflict_type: ParentConflictType::ParentIsFile,
+            parent_path: parent_file.clone(),
+        };
+
+        let action = TargetAction {
+            source_item: None, // No source item
+            target_path: target_dir.join("test_file.txt"),
+            link_target_path: None,
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let message = generate_conflict_message(&conflict_info, &action);
+
+        assert!(message.contains("UnknownSource"));
+        assert!(message.contains("is a file"));
     }
 }
