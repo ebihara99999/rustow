@@ -192,7 +192,7 @@ pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {
             path: e.path().unwrap_or(package_path).to_path_buf(), // Use package_path if entry path is not available
             source: e.into_io_error().unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "walkdir error")),
         })?;
-        
+
         let absolute_path: PathBuf = entry.path().to_path_buf(); // 型を明示
         let package_relative_path: PathBuf = absolute_path.strip_prefix(package_path) // 型を明示
             .map_err(|_| RustowError::Stow(crate::error::StowError::InvalidPackageStructure(
@@ -254,7 +254,7 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(Stri
 
     // 4. Resolve the link's destination to an absolute, canonical path
     let link_parent_dir: &Path = link_path.parent().unwrap_or_else(|| Path::new("")); // 型を明示
-    
+
     let potentially_non_canonical_target_abs_path = if target_dest_path_from_link.is_absolute() {
         target_dest_path_from_link
     } else {
@@ -295,7 +295,7 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(Stri
 
     // 7. Extract package name and item path within package
     let mut components = path_relative_to_stow_dir.components();
-    
+
     match components.next() {
         Some(std::path::Component::Normal(package_name_osstr)) => {
             let package_name = package_name_osstr.to_string_lossy().into_owned();
@@ -355,7 +355,7 @@ mod tests {
         std::os::unix::fs::symlink(&target_dir_path, &symlink_path).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&target_dir_path, &symlink_path).unwrap(); // Use symlink_dir for directories on Windows
-        
+
         // path.is_dir() follows symlinks by default.
         assert!(is_directory(&symlink_path));
     }
@@ -370,7 +370,7 @@ mod tests {
         std::os::unix::fs::symlink(&target_file_path, &symlink_path).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(&target_file_path, &symlink_path).unwrap();
-        
+
         assert!(!is_directory(&symlink_path));
     }
 
@@ -486,23 +486,23 @@ mod tests {
 
         let result = create_symlink(&link_path, &non_existing_target_path);
         assert!(result.is_ok(), "create_symlink to non-existing target failed: {:?}", result.err());
-        
+
         // Instead of asserting link_path.exists(), which might be problematic for broken symlinks on some platforms/setups,
         // we assert that it is a symlink and that read_link works as expected.
         // If create_symlink was successful, the link was created.
         assert!(is_symlink(&link_path), "Path should be a symlink after creation, even if broken.");
-        
+
         let read_target_result = fs::read_link(&link_path);
         assert!(read_target_result.is_ok(), "Failed to read link even if it is broken: {:?}", read_target_result.err());
         assert_eq!(read_target_result.unwrap(), non_existing_target_path);
     }
-    
+
     #[test]
     fn test_create_symlink_link_path_already_exists_as_file() {
         let dir = tempdir().unwrap();
         let target_file_path = dir.path().join("target_for_conflict.txt");
         File::create(&target_file_path).unwrap();
-        
+
         let link_path = dir.path().join("existing_item_is_file");
         File::create(&link_path).unwrap(); 
 
@@ -522,7 +522,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let target_file_path = dir.path().join("target_for_conflict_dir.txt");
         File::create(&target_file_path).unwrap();
-        
+
         let link_path = dir.path().join("existing_item_is_dir");
         fs::create_dir(&link_path).unwrap();
 
@@ -607,7 +607,7 @@ mod tests {
     fn test_read_link_path_does_not_exist() {
         let dir = tempdir().unwrap();
         let non_existent_path = dir.path().join("i_do_not_exist_rl");
-        
+
         let result = read_link(&non_existent_path);
         assert!(result.is_err());
         match result {
@@ -691,7 +691,7 @@ mod tests {
     fn test_delete_symlink_path_does_not_exist() {
         let dir = tempdir().unwrap();
         let non_existent_path = dir.path().join("i_do_not_exist_del");
-        
+
         let result = delete_symlink(&non_existent_path);
         assert!(result.is_err());
         match result {
@@ -877,7 +877,7 @@ mod tests {
 
         let sub_dir_path = dir.path().join(sub_dir_name);
         fs::create_dir(&sub_dir_path).unwrap();
-        
+
         let other_sub_dir_path = dir.path().join(other_sub_dir_name);
         fs::create_dir(&other_sub_dir_path).unwrap();
         let file_in_other_sub_dir_path = other_sub_dir_path.join(file_name);
@@ -961,7 +961,7 @@ mod tests {
         File::create(base_dir.join("dir1/sub_dir1/file3.txt")).unwrap();
         fs::create_dir(base_dir.join("dir2")).unwrap(); // Empty dir
         File::create(base_dir.join(".dotfile")).unwrap();
-        
+
         let target_for_link = base_dir.join("file1.txt");
         let link_path = base_dir.join("link_to_file1");
         create_symlink(&link_path, &target_for_link).unwrap(); 
@@ -1022,7 +1022,7 @@ mod tests {
         expected_items.sort_by_key(|item| item.sort_key());
 
         assert_eq!(items.len(), expected_items.len(), "Mismatch in number of items. Got: {:?}, Expected: {:?}", items, expected_items);
-        
+
         // Using HashSet for comparison because WalkDir doesn't guarantee order across all platforms for all items,
         // even though we sort by relative path. The absolute paths might subtly differ in intermediate steps
         // or due to symlink resolutions if not careful, but relative paths should be consistent.
@@ -1081,7 +1081,7 @@ mod tests {
         assert!(result.is_ok(), "walk_package_dir for symlinked package dir failed: {:?}", result.err());
         let mut items = result.unwrap();
         items.sort_by_key(|item| item.sort_key());
-        
+
         let mut expected_items = vec![
             RawStowItem {
                 // Absolute paths will be inside the symlink path initially from WalkDir if it resolves it,
@@ -1098,7 +1098,7 @@ mod tests {
             },
         ];
         expected_items.sort_by_key(|item| item.sort_key());
-        
+
         // For symlinked package dirs, WalkDir resolves the symlink before walking.
         // So, the absolute_path of items will be relative to the *target_package_dir*.
         // The strip_prefix logic in walk_package_dir should correctly use the original symlink_to_package_path
@@ -1132,15 +1132,15 @@ mod tests {
     fn setup_stow_env_for_is_stow_symlink(base_temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let stow_dir = base_temp_dir.join("stow_dir_is_stow");
         fs::create_dir_all(&stow_dir).unwrap();
-        
+
         let package_name = "mypkg";
         let package_dir = stow_dir.join(package_name);
         fs::create_dir_all(&package_dir).unwrap();
-        
+
         let item_name = "item.txt";
         let item_path_abs = package_dir.join(item_name);
         File::create(&item_path_abs).unwrap();
-        
+
         (stow_dir, package_dir, item_path_abs)
     }
 
@@ -1170,7 +1170,7 @@ mod tests {
         File::create(&link_target_dummy).unwrap();
         let link_path = temp.path().join("any_link");
         create_symlink(&link_path, &link_target_dummy).unwrap();
-        
+
         let non_existent_stow_dir = temp.path().join("non_existent_stow");
         let result = is_stow_symlink(&link_path, &non_existent_stow_dir);
         assert!(result.is_err());
@@ -1184,13 +1184,13 @@ mod tests {
     fn test_is_stow_symlink_target_outside_stow_dir() {
         let temp = tempdir().unwrap();
         let (stow_dir, _, _) = setup_stow_env_for_is_stow_symlink(temp.path());
-        
+
         let outside_target = temp.path().join("outside_file.txt");
         File::create(&outside_target).unwrap();
-        
+
         let link_path = temp.path().join("link_to_outside"); // Place link outside stow_dir for clarity
         create_symlink(&link_path, &outside_target).unwrap();
-        
+
         assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), None);
     }
 
@@ -1209,7 +1209,7 @@ mod tests {
         let (stow_dir, package_dir, _) = setup_stow_env_for_is_stow_symlink(temp.path());
         let link_path = temp.path().join("link_to_package_dir");
         create_symlink(&link_path, &package_dir).unwrap();
-        
+
         let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::new(); 
         assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
@@ -1221,7 +1221,7 @@ mod tests {
         let (stow_dir, _, item_abs_path) = setup_stow_env_for_is_stow_symlink(temp.path());
         let link_path = temp.path().join("link_to_item");
         create_symlink(&link_path, &item_abs_path).unwrap();
-        
+
         let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::from("item.txt");
         assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
@@ -1231,16 +1231,16 @@ mod tests {
     fn test_is_stow_symlink_target_is_nested_item() {
         let temp = tempdir().unwrap();
         let (stow_dir, package_dir, _) = setup_stow_env_for_is_stow_symlink(temp.path());
-        
+
         let sub_dir = package_dir.join("sub");
         fs::create_dir(&sub_dir).unwrap();
         let nested_item_name = "nested_item.txt";
         let nested_item_abs_path = sub_dir.join(nested_item_name);
         File::create(&nested_item_abs_path).unwrap();
-        
+
         let link_path = temp.path().join("link_to_nested_item");
         create_symlink(&link_path, &nested_item_abs_path).unwrap();
-        
+
         let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::from("sub").join(nested_item_name);
         assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
@@ -1250,19 +1250,19 @@ mod tests {
     fn test_is_stow_symlink_relative_link_correctly_resolved() {
         let temp = tempdir().unwrap();
         let (stow_dir, package_dir, _) = setup_stow_env_for_is_stow_symlink(temp.path());
-        
+
         let item_name = "item_for_relative_test.txt";
         let item_abs_path = package_dir.join(item_name);
         File::create(&item_abs_path).unwrap();
-        
+
         let link_parent_dir = temp.path().join("link_parent");
         fs::create_dir(&link_parent_dir).unwrap();
         let link_path = link_parent_dir.join("relative_link");
-        
+
         let stow_dir_abs = canonicalize_path(&stow_dir).unwrap();
         let link_parent_abs = canonicalize_path(&link_parent_dir).unwrap();
         let relative_target = pathdiff::diff_paths(&item_abs_path, &link_parent_abs).unwrap();
-        
+
         #[cfg(unix)]
         {
             use std::os::unix::fs as unix_fs;

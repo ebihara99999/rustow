@@ -130,7 +130,7 @@ impl Config {
 mod tests {
     use super::*;
     use crate::cli::Args;
-    
+
     use clap::Parser;
     use std::fs;
     use tempfile::tempdir;
@@ -159,13 +159,13 @@ mod tests {
 
         assert_eq!(config.packages, vec!["testpkg"]);
         assert_eq!(config.mode, StowMode::Stow);
-        
+
         let expected_stow_dir = fs_utils::canonicalize_path(&temp_stow_dir).unwrap();
         let expected_target_dir = fs_utils::canonicalize_path(temp_stow_parent.path()).unwrap(); 
-        
+
         assert_eq!(config.stow_dir, expected_stow_dir);
         assert_eq!(config.target_dir, expected_target_dir);
-        
+
         env::set_current_dir(current_dir_original).unwrap(); 
     }
 
@@ -178,7 +178,7 @@ mod tests {
         unsafe { env::remove_var("STOW_DIR"); }
         let args = Args::parse_from(&["rustow", "-d", specified_stow_dir.to_str().unwrap(), "pkg"]);
         let config = Config::from_args(args).unwrap();
-        
+
         assert_eq!(config.stow_dir, fs_utils::canonicalize_path(&specified_stow_dir).unwrap());
     }
 
@@ -312,7 +312,7 @@ mod tests {
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_regex_fail_ov"); fs::create_dir_all(&stow_dir).unwrap();
         let target_dir = temp_base.path().join("t_regex_fail_ov"); fs::create_dir_all(&target_dir).unwrap();
-        
+
         let invalid_pattern = "*invalid[";
         let args = Args::parse_from(&[
             "rustow",
@@ -337,7 +337,7 @@ mod tests {
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_regex_fail_def"); fs::create_dir_all(&stow_dir).unwrap();
         let target_dir = temp_base.path().join("t_regex_fail_def"); fs::create_dir_all(&target_dir).unwrap();
-        
+
         let invalid_pattern = "(unclosed";
         let args = Args::parse_from(&[
             "rustow",

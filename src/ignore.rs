@@ -54,7 +54,7 @@ pub fn is_ignored(
                             // and the item is a top-level item (e.g. item_package_relative_path is "/.git" and name_str is ".git"),
                             // then it was already caught by the direct item_basename check above. So we don't return true here for that case.
                             // We want to return true if a *parent* directory component matches.
-                            
+
                             // Check if the current component `name_str` is a genuine parent part of the path,
                             // not just the item itself if it's at the root of the relative path.
                             // Example: item_package_relative_path = "/.git", item_basename = ".git", name_str = ".git"
@@ -65,11 +65,11 @@ pub fn is_ignored(
                             // Example: item_package_relative_path = "/.git/config", item_basename = "config", name_str = ".git"
                             // Here, `name_str == item_basename` is false.
                             // So, it returns true, which is correct (parent .git matched).
-                            
+
                             // Example: item_package_relative_path = "/foo/.git/config", item_basename = "config", name_str = ".git"
                             // Here, `name_str == item_basename` is false.
                             // So, it returns true, correct.
-                            
+
                             let is_top_level_item_match: bool =
                                 item_package_relative_path.strip_prefix("/")
                                     .map_or(false, |p| p == Path::new(name_str));
@@ -368,7 +368,7 @@ mod tests {
 
         teardown_load_test_dir(&base_dir);
     }
-    
+
     #[test]
     fn test_load_ignore_patterns_local_overrides_global() {
         let base_dir = setup_load_test_dir("load_local_over_global");
@@ -387,7 +387,7 @@ mod tests {
         let patterns = IgnorePatterns::load(&stow_dir, Some(package_name), &home_dir).unwrap();
         assert_eq!(patterns.patterns.len(), 1);
         assert_eq!(patterns.patterns[0].as_str(), "local_rule");
-        
+
         teardown_load_test_dir(&base_dir);
     }
 

@@ -18,13 +18,13 @@ pub fn run(args: Args) -> Result<(), RustowError> {
     match Config::from_args(args) {
         Ok(config) => {
             // eprintln!("stderr: Successfully constructed config in lib::run: {:?}", config);
-            
+
             let _reports = match config.mode {
                 StowMode::Stow => stow_packages(&config)?,
                 StowMode::Delete => delete_packages(&config)?,
                 StowMode::Restow => restow_packages(&config)?,
             };
-            
+
             // TODO: Process reports for logging/output
             Ok(())
         }
