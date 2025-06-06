@@ -369,6 +369,29 @@ fn handle_directory_conflict(
     Ok((ActionType::CreateDirectory, None, None))
 }
 
+/// Validate if symlink is stow-managed and extract package info
+fn validate_stow_symlink(
+    target_path_abs: &Path,
+    stow_dir: &Path
+) -> Result<Option<(String, PathBuf)>, RustowError> {
+    fs_utils::is_stow_symlink(target_path_abs, stow_dir)
+}
+
+/// Check if symlink points to the same package and item
+fn is_same_package_and_item(
+    existing_package_name: &str,
+    existing_item_path: &Path,
+    stow_item: &StowItem,
+    config: &Config
+) -> bool {
+    if existing_item_path == stow_item.package_relative_path {
+        if let Some(current_package_name) = config.packages.get(0) {
+            return existing_package_name == *current_package_name;
+        }
+    }
+    false
+}
+
 /// Handle conflicts with existing symlinks
 fn handle_existing_symlink_conflict(
     stow_item: &StowItem,
@@ -376,22 +399,15 @@ fn handle_existing_symlink_conflict(
     link_target_for_symlink: PathBuf,
     config: &Config
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-    if let Ok(Some((existing_package_name, existing_item_path))) = fs_utils::is_stow_symlink(target_path_abs, &config.stow_dir) {
+    if let Some((existing_package_name, existing_item_path)) = validate_stow_symlink(target_path_abs, &config.stow_dir)? {
         // It's a stow-managed symlink
-        if existing_item_path == stow_item.package_relative_path {
-            // Check if it's the same package
-            if let Some(current_package_name) = config.packages.get(0) {
-                if existing_package_name == *current_package_name {
-                    // Same package and same item, no conflict - already correctly stowed
-                    return Ok((ActionType::Skip,
-                              Some("Target already points to the same source".to_string()),
-                              None));
-                }
-            }
-            // Different package but same item path - this is a conflict that needs resolution
-            return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
+        if is_same_package_and_item(&existing_package_name, &existing_item_path, stow_item, config) {
+            // Same package and same item, no conflict - already correctly stowed
+            return Ok((ActionType::Skip,
+                      Some("Target already points to the same source".to_string()),
+                      None));
         } else {
-            // Different item path - check conflict resolution options
+            // Different package or item path - check conflict resolution options
             return handle_stow_package_conflict(stow_item, target_path_abs, link_target_for_symlink, config);
         }
     }
@@ -1706,5 +1722,99 @@ mod tests {
         let result = perform_directory_deletion(&action);
         assert_eq!(result.status, TargetActionReportStatus::Success);
         assert!(!empty_dir.exists(), "Directory should be deleted");
+    }
+
+    #[test]
+    fn test_validate_stow_symlink_valid() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir.join("test_package")).unwrap();
+        fs::write(stow_dir.join("test_package").join("test_file.txt"), "content").unwrap();
+
+        // Create a symlink from target to stow
+        let link_target = PathBuf::from("../stow/test_package/test_file.txt");
+        fs_utils::create_symlink(&test_file, &link_target).unwrap();
+
+        let result = validate_stow_symlink(&test_file, &stow_dir).unwrap();
+
+        assert!(result.is_some());
+        let (package_name, item_path) = result.unwrap();
+        assert_eq!(package_name, "test_package");
+        assert_eq!(item_path, PathBuf::from("test_file.txt"));
+    }
+
+    #[test]
+    fn test_validate_stow_symlink_not_stow_managed() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        // Create a symlink to somewhere else
+        let link_target = PathBuf::from("../other/file.txt");
+        fs_utils::create_symlink(&test_file, &link_target).unwrap();
+
+        let result = validate_stow_symlink(&test_file, &stow_dir).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_is_same_package_and_item_true() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+
+        let mut config = create_test_config(&target_dir, &stow_dir);
+        config.packages = vec!["test_package".to_string()];
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let result = is_same_package_and_item(
+            "test_package",
+            &PathBuf::from("test_file.txt"),
+            &stow_item,
+            &config
+        );
+
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_same_package_and_item_different_package() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+
+        let mut config = create_test_config(&target_dir, &stow_dir);
+        config.packages = vec!["test_package".to_string()];
+
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        let result = is_same_package_and_item(
+            "other_package",
+            &PathBuf::from("test_file.txt"),
+            &stow_item,
+            &config
+        );
+
+        assert!(!result);
     }
 }
