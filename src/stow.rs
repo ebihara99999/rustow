@@ -416,24 +416,38 @@ fn handle_existing_symlink_conflict(
     handle_file_type_conflicts(stow_item, target_path_abs, link_target_for_symlink, config)
 }
 
-/// Handle file vs directory type conflicts and pattern matching
+/// Check for file vs directory type conflicts
+fn check_file_directory_type_conflicts(
+    stow_item: &StowItem,
+    target_path_abs: &Path
+) -> Option<(ActionType, String)> {
+    // Check if it's a file vs directory conflict
+    if fs_utils::is_directory(target_path_abs) && stow_item.item_type != StowItemType::Directory {
+        return Some((
+            ActionType::Conflict,
+            format!("Cannot create file symlink at {:?}: target is a directory", target_path_abs)
+        ));
+    }
+
+    if !fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
+        return Some((
+            ActionType::Conflict,
+            format!("Cannot create directory at {:?}: target is a file", target_path_abs)
+        ));
+    }
+
+    None
+}
+
 fn handle_file_type_conflicts(
     stow_item: &StowItem,
     target_path_abs: &Path,
     link_target_for_symlink: PathBuf,
     config: &Config
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-    // Check if it's a file vs directory conflict
-    if fs_utils::is_directory(target_path_abs) && stow_item.item_type != StowItemType::Directory {
-        return Ok((ActionType::Conflict,
-                  Some(format!("Cannot create file symlink at {:?}: target is a directory", target_path_abs)),
-                  None));
-    }
-
-    if !fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
-        return Ok((ActionType::Conflict,
-                  Some(format!("Cannot create directory at {:?}: target is a file", target_path_abs)),
-                  None));
+    // Check for file vs directory type conflicts first
+    if let Some((action_type, message)) = check_file_directory_type_conflicts(stow_item, target_path_abs) {
+        return Ok((action_type, Some(message), None));
     }
 
     // Check override/defer patterns for non-stow managed files
@@ -1981,5 +1995,111 @@ mod tests {
 
         assert!(message.contains("UnknownSource"));
         assert!(message.contains("is a file"));
+    }
+
+    #[test]
+    fn test_generate_conflict_message_with_no_source_item() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let conflict_info = ParentConflictInfo {
+            conflict_type: ParentConflictType::ParentIsFile,
+            parent_path: target_dir.join("parent"),
+        };
+
+        let action = TargetAction {
+            source_item: None, // No source item
+            target_path: target_dir.join("test_file.txt"),
+            link_target_path: None,
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        };
+
+        let message = generate_conflict_message(&conflict_info, &action);
+        assert!(message.contains("UnknownSource"));
+        assert!(message.contains("is a file"));
+    }
+
+    #[test]
+    fn test_check_file_directory_type_conflicts_file_vs_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_dir = target_dir.join("test_dir");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        // Create a StowItem representing a file
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        // Test: trying to create file symlink where directory exists
+        let result = check_file_directory_type_conflicts(&stow_item, &test_dir);
+        assert!(result.is_some());
+        let (action_type, message) = result.unwrap();
+        assert_eq!(action_type, ActionType::Conflict);
+        assert!(message.contains("Cannot create file symlink"));
+        assert!(message.contains("target is a directory"));
+    }
+
+    #[test]
+    fn test_check_file_directory_type_conflicts_directory_vs_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&test_file, "content").unwrap();
+
+        // Create a StowItem representing a directory
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_dir"),
+            source_path: stow_dir.join("test_package").join("test_dir"),
+            item_type: StowItemType::Directory,
+            target_name_after_dotfiles_processing: PathBuf::from("test_dir"),
+        };
+
+        // Test: trying to create directory where file exists
+        let result = check_file_directory_type_conflicts(&stow_item, &test_file);
+        assert!(result.is_some());
+        let (action_type, message) = result.unwrap();
+        assert_eq!(action_type, ActionType::Conflict);
+        assert!(message.contains("Cannot create directory"));
+        assert!(message.contains("target is a file"));
+    }
+
+    #[test]
+    fn test_check_file_directory_type_conflicts_no_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_file = target_dir.join("test_file.txt");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&test_file, "content").unwrap();
+
+        // Create a StowItem representing a file
+        let stow_item = StowItem {
+            package_relative_path: PathBuf::from("test_file.txt"),
+            source_path: stow_dir.join("test_package").join("test_file.txt"),
+            item_type: StowItemType::File,
+            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
+        };
+
+        // Test: file vs file - no type conflict
+        let result = check_file_directory_type_conflicts(&stow_item, &test_file);
+        assert!(result.is_none());
     }
 }
