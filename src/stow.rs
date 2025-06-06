@@ -335,25 +335,33 @@ fn check_directory_for_non_stow_files(
         for entry in entries {
             if let Ok(entry) = entry {
                 let entry_path = entry.path();
-                // If there's any file that's not a stow-managed symlink, it's a conflict
-                if !fs_utils::is_symlink(&entry_path) {
+                if is_non_stow_entry(&entry_path, &config.stow_dir) {
                     return Ok(true);
-                }
-
-                // Check if it's a stow-managed symlink
-                match fs_utils::is_stow_symlink(&entry_path, &config.stow_dir) {
-                    Ok(Some(_)) => {
-                        // It's a stow-managed symlink, continue checking
-                    }
-                    Ok(None) | Err(_) => {
-                        // Not a stow-managed symlink or error checking, treat as conflict
-                        return Ok(true);
-                    }
                 }
             }
         }
     }
     Ok(false)
+}
+
+/// Check if a directory entry represents a non-stow managed file
+fn is_non_stow_entry(entry_path: &Path, stow_dir: &Path) -> bool {
+    // If there's any file that's not a stow-managed symlink, it's a conflict
+    if !fs_utils::is_symlink(entry_path) {
+        return true;
+    }
+
+    // Check if it's a stow-managed symlink
+    match fs_utils::is_stow_symlink(entry_path, stow_dir) {
+        Ok(Some(_)) => {
+            // It's a stow-managed symlink, not a conflict
+            false
+        }
+        Ok(None) | Err(_) => {
+            // Not a stow-managed symlink or error checking, treat as conflict
+            true
+        }
+    }
 }
 
 /// Handle directory-to-directory conflicts
@@ -2284,4 +2292,62 @@ mod tests {
         assert_eq!(fullpath, PathBuf::from("/test_directory"));
         assert_eq!(basename, "test_directory");
     }
+
+    #[test]
+    fn test_prepare_ignore_check_paths_nested_directory() {
+        let path = Path::new("config/nvim");
+        let (fullpath, basename) = prepare_ignore_check_paths(path);
+        
+        assert_eq!(fullpath, PathBuf::from("/config/nvim"));
+        assert_eq!(basename, "nvim");
+    }
+
+    #[test]
+    fn test_is_non_stow_entry_regular_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        let regular_file = temp_dir.path().join("regular_file.txt");
+
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&regular_file, "content").unwrap();
+
+        let result = is_non_stow_entry(&regular_file, &stow_dir);
+        assert!(result); // Regular file should be considered non-stow
+    }
+
+    #[test]
+    fn test_is_non_stow_entry_stow_managed_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        let package_dir = stow_dir.join("test_package");
+        let source_file = package_dir.join("test_file.txt");
+        let target_file = temp_dir.path().join("test_file.txt");
+
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(&source_file, "content").unwrap();
+
+        // Create a symlink from target to source
+        fs_utils::create_symlink(&target_file, &source_file).unwrap();
+
+        let result = is_non_stow_entry(&target_file, &stow_dir);
+        assert!(!result); // Stow-managed symlink should not be considered non-stow
+    }
+
+    #[test]
+    fn test_is_non_stow_entry_non_stow_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        let external_file = temp_dir.path().join("external.txt");
+        let symlink_file = temp_dir.path().join("symlink_file.txt");
+
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&external_file, "content").unwrap();
+
+        // Create a symlink pointing outside stow directory
+        fs_utils::create_symlink(&symlink_file, &external_file).unwrap();
+
+        let result = is_non_stow_entry(&symlink_file, &stow_dir);
+        assert!(result); // Non-stow symlink should be considered non-stow
+    }
 }
+
