@@ -1255,17 +1255,25 @@ fn process_item_for_deletion(
     Ok(Some(action))
 }
 
-/// Check if an item should be ignored based on ignore patterns
-fn should_ignore_item(
-    processed_target_relative_path: &Path,
-    current_ignore_patterns: &IgnorePatterns
-) -> bool {
+/// Prepare paths for ignore pattern checking
+fn prepare_ignore_check_paths(processed_target_relative_path: &Path) -> (PathBuf, String) {
     let path_for_ignore_check_fullpath = PathBuf::from("/").join(processed_target_relative_path);
     let basename_for_ignore_check = processed_target_relative_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+
+    (path_for_ignore_check_fullpath, basename_for_ignore_check)
+}
+
+/// Check if an item should be ignored based on ignore patterns
+fn should_ignore_item(
+    processed_target_relative_path: &Path,
+    current_ignore_patterns: &IgnorePatterns
+) -> bool {
+    let (path_for_ignore_check_fullpath, basename_for_ignore_check) = 
+        prepare_ignore_check_paths(processed_target_relative_path);
 
     ignore::is_ignored(&path_for_ignore_check_fullpath, &basename_for_ignore_check, current_ignore_patterns)
 }
@@ -2240,13 +2248,40 @@ mod tests {
     #[test]
     fn test_read_directory_entries_empty_directory() {
         let temp_dir = TempDir::new().unwrap();
-        let empty_dir = temp_dir.path().join("empty_dir");
-        fs::create_dir_all(&empty_dir).unwrap();
+        let valid_dir = temp_dir.path().join("empty_dir");
+        fs::create_dir_all(&valid_dir).unwrap();
 
-        let result = read_directory_entries(&empty_dir);
+        let result = read_directory_entries(&valid_dir);
         assert!(result.is_ok());
-
+        
         let entries: Vec<_> = result.unwrap().collect();
         assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn test_prepare_ignore_check_paths_simple_file() {
+        let path = Path::new("test_file.txt");
+        let (fullpath, basename) = prepare_ignore_check_paths(path);
+        
+        assert_eq!(fullpath, PathBuf::from("/test_file.txt"));
+        assert_eq!(basename, "test_file.txt");
+    }
+
+    #[test]
+    fn test_prepare_ignore_check_paths_nested_path() {
+        let path = Path::new("dir1/dir2/test_file.txt");
+        let (fullpath, basename) = prepare_ignore_check_paths(path);
+        
+        assert_eq!(fullpath, PathBuf::from("/dir1/dir2/test_file.txt"));
+        assert_eq!(basename, "test_file.txt");
+    }
+
+    #[test]
+    fn test_prepare_ignore_check_paths_directory() {
+        let path = Path::new("test_directory");
+        let (fullpath, basename) = prepare_ignore_check_paths(path);
+        
+        assert_eq!(fullpath, PathBuf::from("/test_directory"));
+        assert_eq!(basename, "test_directory");
     }
 }
