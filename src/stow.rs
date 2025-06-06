@@ -7,7 +7,177 @@ use crate::fs_utils::{self};
 use crate::dotfiles;
 use std::path::{Path, PathBuf};
 use crate::ignore::{self, IgnorePatterns};
-use std::collections::HashMap;
+
+// Define modules inline for now
+mod conflict_resolver {
+    use crate::config::Config;
+    use crate::stow::{TargetAction, ActionType};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Handles conflict detection and resolution between packages
+    pub struct ConflictResolver<'a> {
+        config: &'a Config,
+    }
+
+    impl<'a> ConflictResolver<'a> {
+        pub fn new(config: &'a Config) -> Self {
+            Self { config }
+        }
+
+        /// Detect and resolve inter-package conflicts
+        pub fn resolve_inter_package_conflicts(&self, actions: &mut [TargetAction]) {
+            let target_map = self.build_target_map(actions);
+            self.mark_conflicting_actions(actions, target_map);
+        }
+
+        /// Propagate conflicts to child items
+        pub fn propagate_conflicts_to_children(&self, actions: &mut [TargetAction]) {
+            let parent_conflicts = self.collect_parent_conflicts(actions);
+            let child_updates = self.find_child_conflicts(actions, &parent_conflicts);
+            self.apply_child_conflict_updates(actions, child_updates);
+        }
+
+        fn build_target_map(&self, actions: &[TargetAction]) -> HashMap<PathBuf, Vec<usize>> {
+            let mut target_map: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+
+            for (index, action) in actions.iter().enumerate() {
+                if action.action_type != ActionType::Conflict {
+                    target_map.entry(action.target_path.clone()).or_default().push(index);
+                }
+            }
+
+            target_map
+        }
+
+        fn mark_conflicting_actions(&self, actions: &mut [TargetAction], target_map: HashMap<PathBuf, Vec<usize>>) {
+            for (_target_path, action_indices) in target_map {
+                if action_indices.len() > 1 {
+                    for index in action_indices {
+                        self.mark_action_as_conflict(&mut actions[index]);
+                    }
+                }
+            }
+        }
+
+        fn mark_action_as_conflict(&self, action: &mut TargetAction) {
+            action.action_type = ActionType::Conflict;
+            if action.conflict_details.is_none() {
+                let sources_involved = action.source_item.as_ref()
+                    .map(|si| si.source_path.display().to_string())
+                    .unwrap_or_else(|| "Unknown source".to_string());
+                action.conflict_details = Some(format!(
+                    "Inter-package conflict: Multiple packages attempt to manage target path {:?}. Source: {}.",
+                    action.target_path,
+                    sources_involved
+                ));
+            }
+            action.link_target_path = None;
+        }
+
+        fn collect_parent_conflicts(&self, actions: &[TargetAction]) -> std::collections::HashSet<PathBuf> {
+            actions.iter()
+                .filter(|action| action.action_type == ActionType::Conflict)
+                .map(|action| action.target_path.clone())
+                .collect()
+        }
+
+        fn find_child_conflicts(&self, actions: &[TargetAction], parent_conflicts: &std::collections::HashSet<PathBuf>) -> Vec<(usize, String)> {
+            let mut child_conflict_updates = Vec::new();
+
+            for (i, action) in actions.iter().enumerate() {
+                if action.action_type == ActionType::Conflict {
+                    continue;
+                }
+
+                if let Some(parent_target_path) = action.target_path.parent() {
+                    if parent_conflicts.contains(parent_target_path) {
+                        let conflict_message = format!(
+                            "Parent path {:?} is in conflict, so child item {:?} is also a conflict.",
+                            parent_target_path,
+                            action.source_item.as_ref()
+                                .map(|si| si.target_name_after_dotfiles_processing.clone())
+                                .unwrap_or_else(|| PathBuf::from("UnknownSource"))
+                        );
+                        child_conflict_updates.push((i, conflict_message));
+                    }
+                }
+            }
+
+            child_conflict_updates
+        }
+
+        fn apply_child_conflict_updates(&self, actions: &mut [TargetAction], child_updates: Vec<(usize, String)>) {
+            for (index_to_update, conflict_message) in child_updates {
+                let action_to_update = &mut actions[index_to_update];
+                if action_to_update.action_type != ActionType::Conflict {
+                    action_to_update.action_type = ActionType::Conflict;
+                    action_to_update.conflict_details = Some(conflict_message);
+                    action_to_update.link_target_path = None;
+                }
+            }
+        }
+    }
+}
+
+mod pattern_matcher {
+    use crate::config::Config;
+    use crate::stow::ActionType;
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    /// Handles pattern matching for override and defer options
+    pub struct PatternMatcher<'a> {
+        config: &'a Config,
+    }
+
+    impl<'a> PatternMatcher<'a> {
+        pub fn new(config: &'a Config) -> Self {
+            Self { config }
+        }
+
+        /// Check patterns and return appropriate action type and message
+        pub fn check_patterns(&self, target_path_abs: &Path, link_target: PathBuf) -> Option<(ActionType, String, Option<PathBuf>)> {
+            let target_relative_path = match target_path_abs.strip_prefix(&self.config.target_dir) {
+                Ok(path) => path,
+                Err(_) => return None,
+            };
+
+            let target_path_str = target_relative_path.to_string_lossy();
+
+            // Check defer patterns first (defer takes precedence over override)
+            if let Some(defer_pattern) = self.find_matching_defer_pattern(&target_path_str) {
+                return Some((
+                    ActionType::Skip,
+                    format!("Deferred due to pattern match: {}", defer_pattern.as_str()),
+                    None
+                ));
+            }
+
+            // Check override patterns
+            if let Some(override_pattern) = self.find_matching_override_pattern(&target_path_str) {
+                return Some((
+                    ActionType::CreateSymlink,
+                    format!("Overriding existing file due to pattern match: {}", override_pattern.as_str()),
+                    Some(link_target)
+                ));
+            }
+
+            None
+        }
+
+        fn find_matching_defer_pattern(&self, target_path_str: &str) -> Option<&regex::Regex> {
+            self.config.defers.iter().find(|pattern| pattern.is_match(target_path_str))
+        }
+
+        fn find_matching_override_pattern(&self, target_path_str: &str) -> Option<&regex::Regex> {
+            self.config.overrides.iter().find(|pattern| pattern.is_match(target_path_str))
+        }
+    }
+}
+
+use conflict_resolver::ConflictResolver;
+use pattern_matcher::PatternMatcher;
 
 // --- Action Planning Enums and Structs ---
 
@@ -63,7 +233,7 @@ pub struct StowItem {
 fn plan_actions(package_name: &str, config: &Config, current_ignore_patterns: &IgnorePatterns) -> Result<Vec<TargetAction>, RustowError> {
     let package_path = config.stow_dir.join(package_name);
     validate_package_path(&package_path, package_name)?;
-    
+
     let raw_items = load_package_items(&package_path, package_name)?;
     let mut actions = Vec::new();
 
@@ -91,7 +261,7 @@ fn process_item_for_stow(
         raw_item.package_relative_path.to_str().unwrap_or(""), 
         config.dotfiles
     ));
-    
+
     // Check if item should be ignored
     if should_ignore_item(&processed_target_relative_path, current_ignore_patterns) {
         return Ok(None);
@@ -99,10 +269,10 @@ fn process_item_for_stow(
 
     let target_path_abs = config.target_dir.join(&processed_target_relative_path);
     let stow_item = create_stow_item_from_raw(raw_item, processed_target_relative_path);
-    
+
     let link_target_for_symlink = calculate_link_target(&stow_item, &target_path_abs, config, package_name);
     let action = plan_stow_action_for_item(&stow_item, &target_path_abs, link_target_for_symlink, config)?;
-    
+
     Ok(Some(action))
 }
 
@@ -116,7 +286,7 @@ fn calculate_link_target(
     let relative_to_target_parent = target_path_abs
         .parent()
         .unwrap_or(&config.target_dir);
-    
+
     pathdiff::diff_paths(&stow_item.source_path, relative_to_target_parent)
         .unwrap_or_else(|| {
             PathBuf::from("..")
@@ -163,7 +333,7 @@ fn handle_existing_target_conflict(
     config: &Config
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
 
-    
+
     // Check if target is a directory and we're trying to create a directory
     if fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
         // Check if the existing directory contains any non-stow managed files
@@ -177,7 +347,7 @@ fn handle_existing_target_conflict(
                                   Some(format!("Directory {:?} contains non-stow managed files", target_path_abs)), 
                                   None));
                     }
-                    
+
                                          // Check if it's a stow-managed symlink
                      match fs_utils::is_stow_symlink(&entry_path, &config.stow_dir) {
                          Ok(Some(_)) => {
@@ -195,12 +365,12 @@ fn handle_existing_target_conflict(
         }
         return Ok((ActionType::CreateDirectory, None, None));
     }
-    
+
     // Check if target is a symlink pointing to the same source (already stowed)
     if fs_utils::is_symlink(target_path_abs) {
         if let Ok(Some((existing_package_name, existing_item_path))) = fs_utils::is_stow_symlink(target_path_abs, &config.stow_dir) {
 
-            
+
             // It's a stow-managed symlink
             if existing_item_path == stow_item.package_relative_path {
                 // Check if it's the same package
@@ -220,46 +390,26 @@ fn handle_existing_target_conflict(
             }
         }
     }
-    
+
     // Check if it's a file vs directory conflict
     if fs_utils::is_directory(target_path_abs) && stow_item.item_type != StowItemType::Directory {
         return Ok((ActionType::Conflict, 
                   Some(format!("Cannot create file symlink at {:?}: target is a directory", target_path_abs)), 
                   None));
     }
-    
+
     if !fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
         return Ok((ActionType::Conflict, 
                   Some(format!("Cannot create directory at {:?}: target is a file", target_path_abs)), 
                   None));
     }
-    
-    // Default conflict for non-stow managed files - but check override/defer patterns first
-    let target_relative_path = target_path_abs.strip_prefix(&config.target_dir)
-        .map_err(|_| RustowError::Stow(crate::error::StowError::InvalidPackageStructure(
-            format!("Target path {:?} is not within target directory {:?}", target_path_abs, config.target_dir)
-        )))?;
-    
-    let target_path_str = target_relative_path.to_string_lossy();
-    
-    // Check defer patterns first (defer takes precedence over override)
-    for defer_pattern in &config.defers {
-        if defer_pattern.is_match(&target_path_str) {
-            return Ok((ActionType::Skip, 
-                      Some(format!("Deferred due to pattern match: {}", defer_pattern.as_str())), 
-                      None));
-        }
+
+    // Check override/defer patterns for non-stow managed files
+    let pattern_matcher = PatternMatcher::new(config);
+    if let Some((action_type, message, link_target)) = pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink) {
+        return Ok((action_type, Some(message), link_target));
     }
-    
-    // Check override patterns
-    for override_pattern in &config.overrides {
-        if override_pattern.is_match(&target_path_str) {
-            return Ok((ActionType::CreateSymlink, 
-                      Some(format!("Overriding existing file due to pattern match: {}", override_pattern.as_str())), 
-                      Some(link_target_for_symlink)));
-        }
-    }
-    
+
     // No pattern matches, it's a conflict
     Ok((ActionType::Conflict, 
         Some(format!("Target path {:?} already exists and is not stow-managed", target_path_abs)), 
@@ -273,32 +423,11 @@ fn handle_stow_package_conflict(
     link_target_for_symlink: PathBuf,
     config: &Config
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-    // Get the target path relative to the target directory for pattern matching
-    let target_relative_path = target_path_abs.strip_prefix(&config.target_dir)
-        .map_err(|_| RustowError::Stow(crate::error::StowError::InvalidPackageStructure(
-            format!("Target path {:?} is not within target directory {:?}", target_path_abs, config.target_dir)
-        )))?;
-    
-    let target_path_str = target_relative_path.to_string_lossy();
-    
-    // Check defer patterns first (defer takes precedence over override)
-    for defer_pattern in &config.defers {
-        if defer_pattern.is_match(&target_path_str) {
-            return Ok((ActionType::Skip, 
-                      Some(format!("Deferred due to pattern match: {}", defer_pattern.as_str())), 
-                      None));
-        }
+    let pattern_matcher = PatternMatcher::new(config);
+    if let Some((action_type, message, link_target)) = pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink) {
+        return Ok((action_type, Some(message), link_target));
     }
-    
-    // Check override patterns
-    for override_pattern in &config.overrides {
-        if override_pattern.is_match(&target_path_str) {
-            return Ok((ActionType::CreateSymlink, 
-                      Some(format!("Overriding existing symlink due to pattern match: {}", override_pattern.as_str())), 
-                      Some(link_target_for_symlink)));
-        }
-    }
-    
+
     // No pattern matches, it's a conflict
     Ok((ActionType::Conflict, 
         Some(format!("Target path {:?} is managed by another stow package", target_path_abs)), 
@@ -309,7 +438,7 @@ fn handle_stow_package_conflict(
 fn refine_actions_for_parent_conflicts(actions: &mut [TargetAction], config: &Config) {
     // Collect conflict information first to avoid borrowing issues
     let mut conflicts_to_apply = Vec::new();
-    
+
     for (i, action) in actions.iter().enumerate() {
         if action.action_type == ActionType::Conflict {
             continue; // Skip actions that are already conflicts
@@ -319,7 +448,7 @@ fn refine_actions_for_parent_conflicts(actions: &mut [TargetAction], config: &Co
             conflicts_to_apply.push((i, conflict_info));
         }
     }
-    
+
     // Apply conflicts
     for (index, conflict_info) in conflicts_to_apply {
         apply_conflict_to_action(&mut actions[index], conflict_info);
@@ -367,10 +496,10 @@ fn find_parent_conflict(
                 parent_path: parent_path.to_path_buf(),
             });
         }
-        
+
         parent_path_opt = parent_path.parent();
     }
-    
+
     None
 }
 
@@ -378,14 +507,14 @@ fn find_parent_conflict(
 fn apply_conflict_to_action(action: &mut TargetAction, conflict_info: ParentConflictInfo) {
     action.action_type = ActionType::Conflict;
     action.link_target_path = None;
-    
+
     action.conflict_details = Some(match conflict_info.conflict_type {
         ParentConflictType::ParentIsFile => {
             let item_name = action.source_item
                 .as_ref()
                 .map(|si| si.target_name_after_dotfiles_processing.clone())
                 .unwrap_or_else(|| PathBuf::from("UnknownSource"));
-            
+
             format!(
                 "Parent path {:?} is a file, but current item {:?} needs it to be a directory (or part of one).",
                 conflict_info.parent_path, item_name
@@ -446,7 +575,7 @@ fn execute_simulate_action(action: &TargetAction) -> TargetActionReport {
         action.source_item.as_ref().map_or_else(|| PathBuf::from("N/A"), |si| si.source_path.clone()),
         action.link_target_path.as_ref().map_or_else(|| PathBuf::from("N/A"), |p| p.clone())
     );
-    
+
     TargetActionReport {
         original_action: action.clone(),
         status: TargetActionReportStatus::Skipped,
@@ -663,170 +792,71 @@ fn create_unimplemented_action_report(action: &TargetAction) -> TargetActionRepo
     }
 }
 
-pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
-    let mut all_planned_actions: Vec<TargetAction> = Vec::new();
+/// Load ignore patterns for a package, with error handling
+fn load_ignore_patterns_for_package(
+    package_name: &str,
+    config: &Config
+) -> Result<IgnorePatterns, RustowError> {
+    IgnorePatterns::load(&config.stow_dir, Some(package_name), &config.home_dir)
+        .map_err(|e| {
+            RustowError::Ignore(crate::error::IgnoreError::LoadPatternsError(
+                format!("Failed to load ignore patterns for package '{}': {:?}", package_name, e)
+            ))
+        })
+}
 
+/// Process all packages and collect their actions
+fn collect_package_actions<F>(
+    config: &Config,
+    action_planner: F
+) -> Result<Vec<TargetAction>, RustowError>
+where
+    F: Fn(&str, &Config, &IgnorePatterns) -> Result<Vec<TargetAction>, RustowError>,
+{
     if config.packages.is_empty() {
-        // If there are no packages, return an empty list of reports directly.
         return Ok(Vec::new());
     }
 
+    let mut all_actions = Vec::new();
+
     for package_name in &config.packages {
-        // Load ignore patterns for the current package
-        let current_ignore_patterns: IgnorePatterns = match IgnorePatterns::load(
-            &config.stow_dir,
-            Some(package_name),
-            &config.home_dir, // Assuming home_dir is part of Config for global ignores
-        ) {
-            Ok(patterns) => patterns,
-            Err(e) => {
-                // Handle IgnoreError specifically if it's not already a RustowError
-                // For example, by wrapping it.
-                // Here, we assume IgnoreError can be converted or is a variant of RustowError
-                // If IgnoreError::LoadPatternsError or InvalidPattern is the type from ignore.rs,
-                // we need to map it to RustowError::Ignore.
-                // The current IgnoreError enum in ignore.rs is already well-defined.
-                return Err(RustowError::Ignore(crate::error::IgnoreError::LoadPatternsError(
-                    format!("Failed to load ignore patterns for package '{}': {:?}", package_name, e)
-                )));
-            }
-        };
-
-        match plan_actions(package_name, config, &current_ignore_patterns) { // Pass loaded patterns
-            Ok(package_actions) => all_planned_actions.extend(package_actions),
-            Err(e) => return Err(e), 
-        }
+        let ignore_patterns = load_ignore_patterns_for_package(package_name, config)?;
+        let package_actions = action_planner(package_name, config, &ignore_patterns)?;
+        all_actions.extend(package_actions);
     }
 
-    // --- START: Inter-package conflict detection (Moved to stow_packages) ---
-    let mut final_actions: Vec<TargetAction> = all_planned_actions; // Work on a mutable copy or the original if appropriate
-    let mut target_map: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    Ok(all_actions)
+}
 
-    for (index, action) in final_actions.iter().enumerate() {
-        if action.action_type != ActionType::Conflict { // Only consider non-conflicting actions for new conflicts
-            target_map.entry(action.target_path.clone()).or_default().push(index);
-        }
+pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
+    if config.packages.is_empty() {
+        return Ok(Vec::new());
     }
 
-    for (_target_path, action_indices) in target_map {
-        if action_indices.len() > 1 {
-            for index in action_indices {
-                let conflicting_action: &mut TargetAction = &mut final_actions[index];
-                conflicting_action.action_type = ActionType::Conflict;
-                if conflicting_action.conflict_details.is_none() {
-                    let sources_involved: String = conflicting_action.source_item.as_ref()
-                        .map(|si| si.source_path.display().to_string())
-                        .unwrap_or_else(|| "Unknown source".to_string());
-                    conflicting_action.conflict_details = Some(format!(
-                        "Inter-package conflict: Multiple packages attempt to manage target path {:?}. Source: {}.",
-                        conflicting_action.target_path,
-                        sources_involved
-                    ));
-                }
-                // if config.verbosity > 0 {
-                //     println!(
-                //         "    INTER-PACKAGE CONFLICT (stow_packages): Target path {:?} is targeted by multiple packages. Action for source '{}' marked as Conflict. Details: {:?}",
-                //         conflicting_action.target_path,
-                //         conflicting_action.source_item.as_ref().map(|si| si.source_path.display().to_string()).unwrap_or_else(|| "N/A".to_string()),
-                //         conflicting_action.conflict_details
-                //     );
-                // }
-                conflicting_action.link_target_path = None;
-            }
-        }
-    }
-    // --- END: Inter-package conflict detection ---
+    let mut all_planned_actions = collect_package_actions(config, plan_actions)?;
 
-    // --- START: Propagate conflicts to child items ---
-    // (1) 収集フェーズ: どのアイテムが親の衝突の影響を受けるか特定する
-    let mut child_conflict_updates: Vec<(usize, String)> = Vec::new(); // (index, conflict_message)
+    // Resolve conflicts using the dedicated conflict resolver
+    let conflict_resolver = ConflictResolver::new(config);
+    conflict_resolver.resolve_inter_package_conflicts(&mut all_planned_actions);
+    conflict_resolver.propagate_conflicts_to_children(&mut all_planned_actions);
 
-    // 最初に、直接的な衝突（stow_packagesの最初のループで設定されたもの）を把握
-    let parent_conflicts: std::collections::HashSet<PathBuf> = final_actions.iter()
-        .filter(|action| action.action_type == ActionType::Conflict)
-        .map(|action| action.target_path.clone())
-        .collect();
-
-    // 次に、子が親の衝突の影響を受けるかチェックする
-    // このループでは final_actions を変更しない
-    for (i, action) in final_actions.iter().enumerate() {
-        if action.action_type == ActionType::Conflict {
-            continue; // すでに直接的な衝突があるものはスキップ
-        }
-
-        if let Some(parent_target_path) = action.target_path.parent() {
-            // action.target_path の親が parent_conflicts に含まれていたら、
-            // この action も衝突とみなす
-            if parent_conflicts.contains(parent_target_path) {
-                let conflict_message: String = format!(
-                    "Parent path {:?} is in conflict, so child item {:?} is also a conflict.",
-                    parent_target_path,
-                    action.source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource"))
-                );
-                child_conflict_updates.push((i, conflict_message));
-            }
-        }
-    }
-
-    // (2) 更新フェーズ: 収集した情報に基づいて final_actions を更新
-    for (index_to_update, conflict_message) in child_conflict_updates {
-        let action_to_update: &mut TargetAction = &mut final_actions[index_to_update];
-        if action_to_update.action_type != ActionType::Conflict { // まだ衝突マークされていなければ更新
-            action_to_update.action_type = ActionType::Conflict;
-            action_to_update.conflict_details = Some(conflict_message.clone());
-            action_to_update.link_target_path = None;
-
-            // if config.verbosity > 1 {
-            //     println!(
-            //         "    PROPAGATED CONFLICT (stow_packages): Item {:?} at {:?} marked as Conflict. Reason: {}",
-            //         action_to_update.source_item.as_ref().map(|si| si.target_name_after_dotfiles_processing.clone()).unwrap_or_else(|| PathBuf::from("UnknownSource")),
-            //         action_to_update.target_path,
-            //         conflict_message
-            //     );
-            // }
-        }
-    }
-    // --- END: Propagate conflicts to child items ---
-
-    execute_actions(&final_actions, config)
+    execute_actions(&all_planned_actions, config)
 }
 
 /// Delete (unstow) packages from the target directory
 pub fn delete_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
-    let mut all_planned_actions: Vec<TargetAction> = Vec::new();
-
     if config.packages.is_empty() {
         return Ok(Vec::new());
     }
 
-    for package_name in &config.packages {
-        // Load ignore patterns for the current package
-        let current_ignore_patterns: IgnorePatterns = match IgnorePatterns::load(
-            &config.stow_dir,
-            Some(package_name),
-            &config.home_dir,
-        ) {
-            Ok(patterns) => patterns,
-            Err(e) => {
-                return Err(RustowError::Ignore(crate::error::IgnoreError::LoadPatternsError(
-                    format!("Failed to load ignore patterns for package '{}': {:?}", package_name, e)
-                )));
-            }
-        };
-
-        match plan_delete_actions(package_name, config, &current_ignore_patterns) {
-            Ok(package_actions) => all_planned_actions.extend(package_actions),
-            Err(e) => return Err(e),
-        }
-    }
-
+    let all_planned_actions = collect_package_actions(config, plan_delete_actions)?;
     execute_actions(&all_planned_actions, config)
 }
 
 /// Restow packages (delete then stow)
 pub fn restow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
     let mut all_reports = Vec::new();
-    
+
     // For restow, we need to delete all existing stow-managed symlinks for the packages
     // regardless of what's currently in the package directory
     for package_name in &config.packages {
@@ -834,11 +864,11 @@ pub fn restow_packages(config: &Config) -> Result<Vec<TargetActionReport>, Rusto
         let delete_reports = execute_actions(&delete_actions, config)?;
         all_reports.extend(delete_reports);
     }
-    
+
     // Then stow them again based on current package contents
     let stow_reports = stow_packages(config)?;
     all_reports.extend(stow_reports);
-    
+
     Ok(all_reports)
 }
 
@@ -854,7 +884,7 @@ fn plan_restow_delete_actions(package_name: &str, config: &Config) -> Result<Vec
 
     // Walk through the target directory and find all stow-managed symlinks that point to this package
     collect_stow_symlinks_for_package(&config.target_dir, &config.stow_dir, package_name, &mut actions)?;
-    
+
     // Sort actions so that symlink deletions come before directory deletions
     // This ensures that directories are only deleted after their contents are removed
     actions.sort_by(|a, b| {
@@ -864,7 +894,7 @@ fn plan_restow_delete_actions(package_name: &str, config: &Config) -> Result<Vec
             _ => std::cmp::Ordering::Equal,
         }
     });
-    
+
     Ok(actions)
 }
 
@@ -888,7 +918,7 @@ fn collect_stow_symlinks_for_package(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        
+
         if fs_utils::is_symlink(&path) {
             process_symlink_for_deletion(&path, stow_dir, package_name, actions)?;
         } else if fs_utils::is_directory(&path) {
@@ -911,15 +941,15 @@ fn process_symlink_for_deletion(
             format!("Failed to read symlink: {:?}", symlink_path)
         ))
     })?;
-    
+
     let resolved_target = resolve_symlink_target(symlink_path, &link_target);
     let package_path = stow_dir.join(package_name);
     let canonical_package_path = fs_utils::canonicalize_path(&package_path)?;
-    
+
     if should_delete_symlink(&resolved_target, &canonical_package_path)? {
         actions.push(create_delete_symlink_action(symlink_path.to_path_buf()));
     }
-    
+
     Ok(())
 }
 
@@ -932,10 +962,10 @@ fn process_directory_for_deletion(
 ) -> Result<(), RustowError> {
     // Recursively process subdirectories first
     collect_stow_symlinks_for_package(dir_path, stow_dir, package_name, actions)?;
-    
+
     // Always mark directory for potential deletion - the execution phase will check if it's empty
     actions.push(create_delete_directory_action(dir_path.to_path_buf()));
-    
+
     Ok(())
 }
 
@@ -960,7 +990,7 @@ fn should_delete_symlink(
     if let Ok(canonical_target) = fs_utils::canonicalize_path(resolved_target) {
         return Ok(canonical_target.starts_with(canonical_package_path));
     }
-    
+
     // For broken symlinks, normalize the path manually
     let normalized_target = normalize_path_components(resolved_target);
     Ok(normalized_target.starts_with(canonical_package_path))
@@ -969,7 +999,7 @@ fn should_delete_symlink(
 /// Normalize path by resolving .. and . components manually
 fn normalize_path_components(path: &Path) -> PathBuf {
     let mut normalized_components = Vec::new();
-    
+
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
@@ -983,7 +1013,7 @@ fn normalize_path_components(path: &Path) -> PathBuf {
             }
         }
     }
-    
+
     normalized_components.iter().collect()
 }
 
@@ -994,7 +1024,7 @@ fn is_directory_empty(dir_path: &Path) -> Result<bool, RustowError> {
             format!("Cannot read directory: {:?}", dir_path)
         ))
     })?;
-    
+
     Ok(entries.count() == 0)
 }
 
@@ -1024,7 +1054,7 @@ fn create_delete_directory_action(target_path: PathBuf) -> TargetAction {
 fn plan_delete_actions(package_name: &str, config: &Config, current_ignore_patterns: &IgnorePatterns) -> Result<Vec<TargetAction>, RustowError> {
     let package_path = config.stow_dir.join(package_name);
     validate_package_path(&package_path, package_name)?;
-    
+
     let raw_items = load_package_items(&package_path, package_name)?;
     let mut actions = Vec::new();
 
@@ -1042,7 +1072,7 @@ fn validate_package_path(package_path: &Path, package_name: &str) -> Result<(), 
     if !fs_utils::path_exists(package_path) {
         return Err(StowError::PackageNotFound(package_name.to_string()).into());
     }
-    
+
     if !fs_utils::is_directory(package_path) {
         return Err(StowError::InvalidPackageStructure(format!(
             "Package '{}' is not a directory at {:?}",
@@ -1050,7 +1080,7 @@ fn validate_package_path(package_path: &Path, package_name: &str) -> Result<(), 
             package_path
         )).into());
     }
-    
+
     Ok(())
 }
 
@@ -1075,21 +1105,21 @@ fn process_item_for_deletion(
         raw_item.package_relative_path.to_str().unwrap_or(""), 
         config.dotfiles
     ));
-    
+
     // Check if item should be ignored
     if should_ignore_item(&processed_target_relative_path, current_ignore_patterns) {
         return Ok(None);
     }
-    
+
     let target_path_abs = config.target_dir.join(&processed_target_relative_path);
     let stow_item = create_stow_item_from_raw(raw_item, processed_target_relative_path);
-    
+
     let action = if fs_utils::path_exists(&target_path_abs) {
         plan_deletion_for_existing_target(&stow_item, &target_path_abs, config)?
     } else {
         create_skip_action_for_missing_target(stow_item, target_path_abs)
     };
-    
+
     Ok(Some(action))
 }
 
