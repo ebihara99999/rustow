@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 
 use rustow::cli::Args;
 use rustow::config::{Config, StowMode};
-use rustow::stow::{stow_packages, ActionType, TargetActionReportStatus, StowItemType};
+use rustow::stow::{stow_packages, delete_packages, restow_packages, ActionType, TargetActionReportStatus, StowItemType};
 use tempfile::{tempdir, TempDir};
 
 lazy_static::lazy_static! {
@@ -956,3 +956,427 @@ fn test_execute_actions_basic_creation() {
 // - `--adopt` functionality (needs more involved setup and fs_utils checks)
 // - `--no-folding` (needs directory structures that would normally fold)
 // - Delete and Restow operations (would need to plan Delete actions or sequence of Delete/Create) 
+
+/// Test delete mode functionality
+#[test]
+fn test_delete_mode_basic() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_delete_pkg";
+    create_test_package(&stow_dir, package_name);
+
+    // First, stow the package to create symlinks
+    let stow_config: Config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0
+    );
+
+    let stow_result = stow_packages(&stow_config);
+    assert!(stow_result.is_ok(), "Initial stow failed: {:?}", stow_result.err());
+
+    // Verify symlinks were created
+    assert!(target_dir.join("bin").exists(), "bin directory should exist after stow");
+    assert!(target_dir.join("bin/test_script").exists(), "test_script symlink should exist after stow");
+    assert!(fs::symlink_metadata(target_dir.join("bin/test_script")).unwrap().file_type().is_symlink(), 
+            "test_script should be a symlink");
+
+    // Now test delete mode
+    let mut delete_config = stow_config.clone();
+    delete_config.mode = StowMode::Delete;
+
+    let delete_result = delete_packages(&delete_config);
+    assert!(delete_result.is_ok(), "Delete operation failed: {:?}", delete_result.err());
+    let delete_reports = delete_result.unwrap();
+
+    // Verify symlinks were removed
+    assert!(!target_dir.join("bin/test_script").exists(), "test_script symlink should be removed after delete");
+    
+    // Check that directories are cleaned up if empty
+    // Note: The bin directory might still exist if it's not empty or if our implementation doesn't clean it up
+    // This depends on the specific implementation of delete_packages
+    
+    // Verify reports indicate successful deletion
+    let script_delete_report = delete_reports.iter().find(|r| 
+        r.original_action.target_path.ends_with("test_script")
+    );
+    assert!(script_delete_report.is_some(), "Should have a delete report for test_script");
+    assert_eq!(script_delete_report.unwrap().status, TargetActionReportStatus::Success, 
+               "Delete operation should be successful");
+}
+
+/// Test delete mode with dotfiles
+#[test]
+fn test_delete_mode_with_dotfiles() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_delete_dotfiles_pkg";
+    create_test_package(&stow_dir, package_name);
+
+    // First, stow the package with dotfiles enabled
+    let stow_config: Config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        true, // dotfiles enabled
+        0
+    );
+
+    let stow_result = stow_packages(&stow_config);
+    assert!(stow_result.is_ok(), "Initial stow with dotfiles failed: {:?}", stow_result.err());
+
+    // Verify dotfiles symlinks were created
+    assert!(target_dir.join(".bashrc").exists(), ".bashrc symlink should exist after stow");
+    assert!(target_dir.join(".config").exists(), ".config directory should exist after stow");
+    assert!(fs::symlink_metadata(target_dir.join(".bashrc")).unwrap().file_type().is_symlink(), 
+            ".bashrc should be a symlink");
+
+    // Now test delete mode with dotfiles
+    let mut delete_config = stow_config.clone();
+    delete_config.mode = StowMode::Delete;
+
+    let delete_result = delete_packages(&delete_config);
+    assert!(delete_result.is_ok(), "Delete operation with dotfiles failed: {:?}", delete_result.err());
+
+    // Verify dotfiles symlinks were removed
+    assert!(!target_dir.join(".bashrc").exists(), ".bashrc symlink should be removed after delete");
+    
+    // Note: .config directory structure handling depends on implementation
+    // It might remain if it contains other files or if our delete logic doesn't handle nested structures
+}
+
+/// Test delete mode when target doesn't exist (should skip gracefully)
+#[test]
+fn test_delete_mode_nonexistent_target() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_delete_nonexistent_pkg";
+    create_test_package(&stow_dir, package_name);
+
+    // Don't stow first - try to delete when nothing is stowed
+    let delete_config: Config = Config {
+        stow_dir,
+        target_dir,
+        packages: vec![package_name.to_string()],
+        mode: StowMode::Delete,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        overrides: Vec::new(),
+        defers: Vec::new(),
+        simulate: false,
+        verbosity: 0,
+        home_dir: std::env::temp_dir(),
+    };
+
+    let delete_result = delete_packages(&delete_config);
+    assert!(delete_result.is_ok(), "Delete operation should succeed even when targets don't exist: {:?}", delete_result.err());
+    
+    let delete_reports = delete_result.unwrap();
+    
+    // All operations should be skipped since targets don't exist
+    for report in &delete_reports {
+        assert_eq!(report.status, TargetActionReportStatus::Skipped, 
+                   "All delete operations should be skipped when targets don't exist");
+    }
+}
+
+/// Test delete mode with non-stow symlinks (should skip them)
+#[test]
+fn test_delete_mode_non_stow_symlinks() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_delete_non_stow_pkg";
+    create_test_package(&stow_dir, package_name);
+
+    // Create a non-stow symlink in the target directory
+    let external_file = _temp_dir.path().join("external_file.txt");
+    fs::write(&external_file, "external content").unwrap();
+    
+    fs::create_dir_all(target_dir.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&external_file, target_dir.join("bin/test_script")).unwrap();
+
+    // Now try to delete - should skip the non-stow symlink
+    let delete_config: Config = Config {
+        stow_dir,
+        target_dir: target_dir.clone(),
+        packages: vec![package_name.to_string()],
+        mode: StowMode::Delete,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        overrides: Vec::new(),
+        defers: Vec::new(),
+        simulate: false,
+        verbosity: 0,
+        home_dir: std::env::temp_dir(),
+    };
+
+    let delete_result = delete_packages(&delete_config);
+    assert!(delete_result.is_ok(), "Delete operation should succeed with non-stow symlinks: {:?}", delete_result.err());
+    
+    // The non-stow symlink should still exist
+    assert!(target_dir.join("bin/test_script").exists(), "Non-stow symlink should not be deleted");
+    
+    let delete_reports = delete_result.unwrap();
+    let script_report = delete_reports.iter().find(|r| 
+        r.original_action.target_path.ends_with("test_script")
+    );
+    assert!(script_report.is_some(), "Should have a report for test_script");
+    assert_eq!(script_report.unwrap().status, TargetActionReportStatus::Skipped, 
+               "Non-stow symlink should be skipped");
+}
+
+/// Test restow mode functionality
+#[test]
+fn test_restow_mode_basic() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_restow_pkg";
+    let package_dir = create_test_package(&stow_dir, package_name);
+
+    // First, stow the package
+    let stow_config: Config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0
+    );
+
+    let stow_result = stow_packages(&stow_config);
+    assert!(stow_result.is_ok(), "Initial stow failed: {:?}", stow_result.err());
+
+    // Verify initial symlinks
+    assert!(target_dir.join("bin/test_script").exists(), "test_script should exist after initial stow");
+
+    // Modify the package (add a new file)
+    fs::write(package_dir.join("bin/new_script"), "#!/bin/bash\necho New").unwrap();
+
+    // Remove an old file to test cleanup
+    fs::remove_file(package_dir.join("bin/test_script")).unwrap();
+
+    // Debug: Check package directory contents after modification
+    println!("Files in package_dir/bin after modification:");
+    if let Ok(entries) = fs::read_dir(package_dir.join("bin")) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                println!("  {:?}", entry.path());
+            }
+        }
+    }
+
+    // Now test restow mode
+    let mut restow_config = stow_config.clone();
+    restow_config.mode = StowMode::Restow;
+    restow_config.verbosity = 2; // Enable debug output
+
+    let restow_result = restow_packages(&restow_config);
+    assert!(restow_result.is_ok(), "Restow operation failed: {:?}", restow_result.err());
+    
+    // Debug: Print restow reports
+    let restow_reports = restow_result.unwrap();
+    println!("Restow reports:");
+    for (i, report) in restow_reports.iter().enumerate() {
+        println!("  Report {}: {:?}", i, report);
+    }
+
+    // Debug: Check what files exist in target directory
+    println!("Files in target_dir after restow:");
+    if let Ok(entries) = fs::read_dir(&target_dir) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                println!("  {:?}", entry.path());
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(target_dir.join("bin")) {
+        println!("Files in target_dir/bin after restow:");
+        for entry in entries {
+            if let Ok(entry) = entry {
+                println!("  {:?}", entry.path());
+            }
+        }
+    }
+
+    // Verify old symlink is removed and new one is created
+    assert!(!target_dir.join("bin/test_script").exists(), "Old test_script should be removed after restow");
+    assert!(target_dir.join("bin/new_script").exists(), "New new_script should exist after restow");
+    assert!(fs::symlink_metadata(target_dir.join("bin/new_script")).unwrap().file_type().is_symlink(), 
+            "new_script should be a symlink");
+}
+
+/// Test restow mode with dotfiles
+#[test]
+fn test_restow_mode_with_dotfiles() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_restow_dotfiles_pkg";
+    let package_dir = create_test_package(&stow_dir, package_name);
+
+    // First, stow with dotfiles
+    let stow_config: Config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        true, // dotfiles enabled
+        0
+    );
+
+    let stow_result = stow_packages(&stow_config);
+    assert!(stow_result.is_ok(), "Initial stow with dotfiles failed: {:?}", stow_result.err());
+
+    // Verify initial dotfiles
+    assert!(target_dir.join(".bashrc").exists(), ".bashrc should exist after initial stow");
+
+    // Modify the package (add a new dotfile)
+    fs::write(package_dir.join("dot-vimrc"), "\" Test vimrc").unwrap();
+
+    // Remove an old dotfile
+    fs::remove_file(package_dir.join("dot-bashrc")).unwrap();
+
+    // Now test restow mode with dotfiles
+    let mut restow_config = stow_config.clone();
+    restow_config.mode = StowMode::Restow;
+
+    let restow_result = restow_packages(&restow_config);
+    assert!(restow_result.is_ok(), "Restow operation with dotfiles failed: {:?}", restow_result.err());
+
+    // Verify old dotfile is removed and new one is created
+    assert!(!target_dir.join(".bashrc").exists(), "Old .bashrc should be removed after restow");
+    assert!(target_dir.join(".vimrc").exists(), "New .vimrc should exist after restow");
+    assert!(fs::symlink_metadata(target_dir.join(".vimrc")).unwrap().file_type().is_symlink(), 
+            ".vimrc should be a symlink");
+}
+
+/// Test simulate mode with delete operations
+#[test]
+fn test_delete_mode_simulate() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_delete_simulate_pkg";
+    create_test_package(&stow_dir, package_name);
+
+    // First, stow the package
+    let stow_config: Config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0
+    );
+
+    let stow_result = stow_packages(&stow_config);
+    assert!(stow_result.is_ok(), "Initial stow failed: {:?}", stow_result.err());
+
+    // Verify symlinks exist
+    assert!(target_dir.join("bin/test_script").exists(), "test_script should exist before simulate delete");
+
+    // Test delete in simulate mode
+    let delete_config: Config = Config {
+        stow_dir,
+        target_dir: target_dir.clone(),
+        packages: vec![package_name.to_string()],
+        mode: StowMode::Delete,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        overrides: Vec::new(),
+        defers: Vec::new(),
+        simulate: true, // Simulate mode
+        verbosity: 0,
+        home_dir: std::env::temp_dir(),
+    };
+
+    let delete_result = delete_packages(&delete_config);
+    assert!(delete_result.is_ok(), "Simulate delete operation failed: {:?}", delete_result.err());
+    
+    let delete_reports = delete_result.unwrap();
+    
+    // Verify symlinks still exist (not actually deleted)
+    assert!(target_dir.join("bin/test_script").exists(), "test_script should still exist after simulate delete");
+    
+    // Verify reports indicate simulation
+    for report in &delete_reports {
+        assert_eq!(report.status, TargetActionReportStatus::Skipped, 
+                   "All operations should be skipped in simulate mode");
+        if let Some(message) = &report.message {
+            assert!(message.contains("SIMULATE"), "Simulate messages should contain 'SIMULATE'");
+        }
+    }
+}
+
+/// Test end-to-end CLI integration with different modes
+#[test]
+fn test_cli_integration_modes() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "test_cli_pkg";
+    create_test_package(&stow_dir, package_name);
+
+    // Test stow mode via CLI args
+    let stow_args = Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        delete: false,
+        restow: false,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        simulate: false,
+        verbose: 0,
+        packages: vec![package_name.to_string()],
+    };
+
+    let stow_config = Config::from_args(stow_args).unwrap();
+    assert_eq!(stow_config.mode, StowMode::Stow, "Mode should be Stow");
+    
+    let stow_result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        delete: false,
+        restow: false,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        simulate: false,
+        verbose: 0,
+        packages: vec![package_name.to_string()],
+    });
+    assert!(stow_result.is_ok(), "CLI stow operation failed: {:?}", stow_result.err());
+    assert!(target_dir.join("bin/test_script").exists(), "Symlink should be created via CLI");
+
+    // Test delete mode via CLI args
+    let delete_result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        delete: true, // Delete mode
+        restow: false,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        simulate: false,
+        verbose: 0,
+        packages: vec![package_name.to_string()],
+    });
+    assert!(delete_result.is_ok(), "CLI delete operation failed: {:?}", delete_result.err());
+    assert!(!target_dir.join("bin/test_script").exists(), "Symlink should be removed via CLI delete");
+
+    // Test restow mode via CLI args
+    let restow_result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        delete: false,
+        restow: true, // Restow mode
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        simulate: false,
+        verbose: 0,
+        packages: vec![package_name.to_string()],
+    });
+    assert!(restow_result.is_ok(), "CLI restow operation failed: {:?}", restow_result.err());
+    assert!(target_dir.join("bin/test_script").exists(), "Symlink should be recreated via CLI restow");
+}
