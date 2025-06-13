@@ -78,7 +78,7 @@ pub fn is_ignored(
 
                             let is_top_level_item_match: bool = item_package_relative_path
                                 .strip_prefix("/")
-                                .map_or(false, |p| p == Path::new(name_str));
+                                .is_ok_and(|p| p == Path::new(name_str));
 
                             if !(name_str == item_basename && is_top_level_item_match) {
                                 return true;

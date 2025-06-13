@@ -168,7 +168,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn basic_args_for_config_test(package_name: &str) -> Args {
-        Args::parse_from(&["rustow", package_name])
+        Args::parse_from(["rustow", package_name])
     }
 
     #[test]
@@ -216,7 +216,7 @@ mod tests {
         unsafe {
             env::remove_var("STOW_DIR");
         }
-        let args = Args::parse_from(&["rustow", "-d", specified_stow_dir.to_str().unwrap(), "pkg"]);
+        let args = Args::parse_from(["rustow", "-d", specified_stow_dir.to_str().unwrap(), "pkg"]);
         let config = Config::from_args(args).unwrap();
 
         assert_eq!(
@@ -246,7 +246,7 @@ mod tests {
         env::set_current_dir(&another_dir).unwrap();
 
         // Create args that will use STOW_DIR environment variable
-        let args = Args::parse_from(&["rustow", "pkg_env"]);
+        let args = Args::parse_from(["rustow", "pkg_env"]);
         let config = Config::from_args(args).unwrap();
 
         // Restore environment and directory
@@ -272,7 +272,7 @@ mod tests {
         let dummy_stow_dir = temp_base.path().join("dummy_stow_for_target_test");
         fs::create_dir_all(&dummy_stow_dir).unwrap();
 
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-t",
             specified_target_dir.to_str().unwrap(),
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn test_stow_dir_canonicalization_failure() {
         let non_existent_stow_dir = PathBuf::from("/path/that/definitely/does/not/exist/stow");
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-d",
             non_existent_stow_dir.to_str().unwrap(),
@@ -313,7 +313,7 @@ mod tests {
         fs::create_dir_all(&valid_stow_dir).unwrap();
         let non_existent_target_dir = PathBuf::from("/path/that/equally/does/not/exist/target");
 
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-d",
             valid_stow_dir.to_str().unwrap(),
@@ -338,7 +338,7 @@ mod tests {
         fs::create_dir_all(&dummy_stow).unwrap();
         let dummy_target = temp_base.path().join("t");
         fs::create_dir_all(&dummy_target).unwrap();
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-D",
             "-d",
@@ -358,7 +358,7 @@ mod tests {
         fs::create_dir_all(&dummy_stow).unwrap();
         let dummy_target = temp_base.path().join("t_res");
         fs::create_dir_all(&dummy_target).unwrap();
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-R",
             "-d",
@@ -379,7 +379,7 @@ mod tests {
         let target_dir = temp_base.path().join("t_regex");
         fs::create_dir_all(&target_dir).unwrap();
 
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-d",
             stow_dir.to_str().unwrap(),
@@ -414,7 +414,7 @@ mod tests {
         fs::create_dir_all(&target_dir).unwrap();
 
         let invalid_pattern = "*invalid[";
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-d",
             stow_dir.to_str().unwrap(),
@@ -443,7 +443,7 @@ mod tests {
         fs::create_dir_all(&target_dir).unwrap();
 
         let invalid_pattern = "(unclosed";
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-d",
             stow_dir.to_str().unwrap(),
@@ -471,7 +471,7 @@ mod tests {
         let dummy_target = temp_base.path().join("t_explicit");
         fs::create_dir_all(&dummy_target).unwrap();
 
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-S",
             "-d",
@@ -493,7 +493,7 @@ mod tests {
         let target_dir = temp_base.path().join("t_ignore");
         fs::create_dir_all(&target_dir).unwrap();
 
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-d",
             stow_dir.to_str().unwrap(),
@@ -527,7 +527,7 @@ mod tests {
         fs::create_dir_all(&target_dir).unwrap();
 
         let invalid_pattern = "*invalid_ignore[";
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-d",
             stow_dir.to_str().unwrap(),
@@ -555,7 +555,7 @@ mod tests {
         let target_dir = temp_base.path().join("t_combined");
         fs::create_dir_all(&target_dir).unwrap();
 
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-S",
             "--ignore=\\.git",
