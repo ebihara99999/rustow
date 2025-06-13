@@ -68,23 +68,30 @@ mod tests {
 
     // Helper function to ensure STOW_DIR is cleared before and after tests that use it.
     // This is to prevent interference between tests when run in parallel.
-    struct StowDirEnvGuard;
+    struct StowDirEnvGuard {
+        original_value: Option<String>,
+    }
 
     impl StowDirEnvGuard {
         fn new() -> Self {
+            // Save original value if it exists
+            let original_value = std::env::var("STOW_DIR").ok();
+            // Clear the environment variable
             unsafe {
-                // Clear before the test in case it was set by a previous one
                 std::env::remove_var("STOW_DIR");
             }
-            StowDirEnvGuard
+            StowDirEnvGuard { original_value }
         }
     }
 
     impl Drop for StowDirEnvGuard {
         fn drop(&mut self) {
+            // Restore original value if it existed, otherwise ensure it's cleared
             unsafe {
-                // Clear after the test to avoid affecting subsequent tests
-                std::env::remove_var("STOW_DIR");
+                match &self.original_value {
+                    Some(value) => std::env::set_var("STOW_DIR", value),
+                    None => std::env::remove_var("STOW_DIR"),
+                }
             }
         }
     }

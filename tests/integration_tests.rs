@@ -1325,6 +1325,7 @@ fn test_cli_integration_modes() {
     let stow_args = Args {
         target: Some(target_dir.clone()),
         dir: Some(stow_dir.clone()),
+        stow: false,
         delete: false,
         restow: false,
         adopt: false,
@@ -1332,6 +1333,7 @@ fn test_cli_integration_modes() {
         dotfiles: false,
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -1343,6 +1345,7 @@ fn test_cli_integration_modes() {
     let stow_result = rustow::run(Args {
         target: Some(target_dir.clone()),
         dir: Some(stow_dir.clone()),
+        stow: false,
         delete: false,
         restow: false,
         adopt: false,
@@ -1350,6 +1353,7 @@ fn test_cli_integration_modes() {
         dotfiles: false,
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -1361,6 +1365,7 @@ fn test_cli_integration_modes() {
     let delete_result = rustow::run(Args {
         target: Some(target_dir.clone()),
         dir: Some(stow_dir.clone()),
+        stow: false,
         delete: true, // Delete mode
         restow: false,
         adopt: false,
@@ -1368,6 +1373,7 @@ fn test_cli_integration_modes() {
         dotfiles: false,
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -1379,6 +1385,7 @@ fn test_cli_integration_modes() {
     let restow_result = rustow::run(Args {
         target: Some(target_dir.clone()),
         dir: Some(stow_dir.clone()),
+        stow: false,
         delete: false,
         restow: true, // Restow mode
         adopt: false,
@@ -1386,6 +1393,7 @@ fn test_cli_integration_modes() {
         dotfiles: false,
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
