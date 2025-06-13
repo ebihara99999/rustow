@@ -18,11 +18,13 @@ pub struct Config {
     pub stow_dir: PathBuf,
     pub packages: Vec<String>,
     pub mode: StowMode,
+    pub stow: bool,
     pub adopt: bool,
     pub no_folding: bool,
     pub dotfiles: bool,
     pub overrides: Vec<Regex>,
     pub defers: Vec<Regex>,
+    pub ignore_patterns: Vec<Regex>,
     pub simulate: bool,
     pub verbosity: u8,
     pub home_dir: PathBuf,
@@ -109,16 +111,29 @@ impl Config {
             }
         }
 
+        // Compile ignore patterns
+        let mut ignore_patterns_compiled: Vec<Regex> = Vec::new();
+        for pattern_str in &args.ignore_patterns {
+            match Regex::new(pattern_str) {
+                Ok(re) => ignore_patterns_compiled.push(re),
+                Err(e) => return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
+                    format!("Invalid --ignore pattern '{}': {}", pattern_str, e)
+                ))),
+            }
+        }
+
         Ok(Self {
             target_dir,
             stow_dir,
             packages: args.packages.clone(),
             mode,
+            stow: args.stow,
             adopt: args.adopt,
             no_folding: args.no_folding,
             dotfiles: args.dotfiles,
             overrides: overrides_compiled,
             defers: defers_compiled,
+            ignore_patterns: ignore_patterns_compiled,
             simulate: args.simulate,
             verbosity: args.verbose,
             home_dir,
@@ -355,5 +370,113 @@ mod tests {
             }
             e => panic!("Unexpected error type: {:?}", e),
         }
+    }
+
+    #[test]
+    fn test_stow_mode_explicit_stow() {
+        let temp_base = tempdir().unwrap();
+        let dummy_stow = temp_base.path().join("s_explicit"); 
+        fs::create_dir_all(&dummy_stow).unwrap();
+        let dummy_target = temp_base.path().join("t_explicit"); 
+        fs::create_dir_all(&dummy_target).unwrap();
+        
+        let args = Args::parse_from(&[
+            "rustow", 
+            "-S", 
+            "-d", dummy_stow.to_str().unwrap(), 
+            "-t", dummy_target.to_str().unwrap(), 
+            "pkg_stow"
+        ]);
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.mode, StowMode::Stow);
+        assert!(config.stow);
+    }
+
+    #[test]
+    fn test_ignore_patterns_compilation_success() {
+        let temp_base = tempdir().unwrap();
+        let stow_dir = temp_base.path().join("s_ignore"); 
+        fs::create_dir_all(&stow_dir).unwrap();
+        let target_dir = temp_base.path().join("t_ignore"); 
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let args = Args::parse_from(&[
+            "rustow",
+            "-d", stow_dir.to_str().unwrap(),
+            "-t", target_dir.to_str().unwrap(),
+            "--ignore=\\.git",
+            "--ignore=.*~$",
+            "--ignore=node_modules",
+            "pkg_ignore"
+        ]);
+        let config_result = Config::from_args(args);
+        assert!(config_result.is_ok(), "Ignore patterns compilation failed: {:?}", config_result.err());
+        let config = config_result.unwrap();
+
+        assert_eq!(config.ignore_patterns.len(), 3);
+        assert_eq!(config.ignore_patterns[0].as_str(), "\\.git");
+        assert_eq!(config.ignore_patterns[1].as_str(), ".*~$");
+        assert_eq!(config.ignore_patterns[2].as_str(), "node_modules");
+    }
+
+    #[test]
+    fn test_ignore_patterns_compilation_failure() {
+        let temp_base = tempdir().unwrap();
+        let stow_dir = temp_base.path().join("s_ignore_fail"); 
+        fs::create_dir_all(&stow_dir).unwrap();
+        let target_dir = temp_base.path().join("t_ignore_fail"); 
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let invalid_pattern = "*invalid_ignore[";
+        let args = Args::parse_from(&[
+            "rustow",
+            "-d", stow_dir.to_str().unwrap(),
+            "-t", target_dir.to_str().unwrap(),
+            &format!("--ignore={}", invalid_pattern),
+            "pkg_ignore_fail"
+        ]);
+        let config_result = Config::from_args(args);
+        assert!(config_result.is_err());
+        match config_result.err().unwrap() {
+            RustowError::Config(ConfigError::InvalidRegexPattern(msg)) => {
+                assert!(msg.contains("Invalid --ignore pattern"));
+                assert!(msg.contains(invalid_pattern));
+            }
+            e => panic!("Unexpected error type: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_stow_with_ignore_and_other_options() {
+        let temp_base = tempdir().unwrap();
+        let stow_dir = temp_base.path().join("s_combined"); 
+        fs::create_dir_all(&stow_dir).unwrap();
+        let target_dir = temp_base.path().join("t_combined"); 
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let args = Args::parse_from(&[
+            "rustow",
+            "-S",
+            "--ignore=\\.git",
+            "--ignore=temp",
+            "--override=foo",
+            "--defer=bar",
+            "--dotfiles",
+            "--adopt",
+            "-v",
+            "-d", stow_dir.to_str().unwrap(),
+            "-t", target_dir.to_str().unwrap(),
+            "pkg_combined"
+        ]);
+        let config = Config::from_args(args).unwrap();
+        
+        assert!(config.stow);
+        assert_eq!(config.mode, StowMode::Stow);
+        assert_eq!(config.ignore_patterns.len(), 2);
+        assert_eq!(config.overrides.len(), 1);
+        assert_eq!(config.defers.len(), 1);
+        assert!(config.dotfiles);
+        assert!(config.adopt);
+        assert_eq!(config.verbosity, 1);
     }
 }

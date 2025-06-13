@@ -13,6 +13,10 @@ pub struct Args { // Ensure this is pub
     #[clap(short, long, value_parser, env = "STOW_DIR")]
     pub dir: Option<PathBuf>,
 
+    /// Stow the specified packages (default action)
+    #[clap(short = 'S', long)]
+    pub stow: bool,
+
     /// Delete specified packages from the target
     #[clap(short = 'D', long)]
     pub delete: bool,
@@ -40,6 +44,10 @@ pub struct Args { // Ensure this is pub
     /// Defer stowing files that would conflict with existing symlinks from other packages that match the regex
     #[clap(long = "defer", value_parser)]
     pub defer_conflicts: Vec<String>,
+
+    /// Ignore files matching the specified regex pattern
+    #[clap(long = "ignore", value_parser)]
+    pub ignore_patterns: Vec<String>,
 
     /// Simulate execution, do not make any changes
     #[clap(short = 'n', long, alias = "no")]
@@ -86,18 +94,21 @@ mod tests {
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear
         let args = Args::parse_from(&["rustow", "mypackage"]);
         assert_eq!(args.packages, vec!["mypackage"]);
+        assert!(!args.stow); // explicitly set to false by default
         assert!(!args.delete);
         assert!(!args.restow);
         assert_eq!(args.verbose, 0);
         assert!(!args.simulate);
         assert!(args.target.is_none());
         assert!(args.dir.is_none());
+        assert!(args.ignore_patterns.is_empty());
     }
 
     #[test]
     fn test_delete_option() {
         let args = Args::parse_from(&["rustow", "-D", "mypackage"]);
         assert!(args.delete);
+        assert!(!args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 
@@ -105,6 +116,7 @@ mod tests {
     fn test_restow_option() {
         let args = Args::parse_from(&["rustow", "-R", "mypackage"]);
         assert!(args.restow);
+        assert!(!args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 
@@ -192,5 +204,53 @@ mod tests {
         }
         let args = Args::parse_from(&["rustow", "-d", "/cmd/stow/path", "mypackage"]);
         assert_eq!(args.dir, Some(PathBuf::from("/cmd/stow/path")));
+    }
+
+    #[test]
+    fn test_stow_option_short() {
+        let args = Args::parse_from(&["rustow", "-S", "mypackage"]);
+        assert!(args.stow);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_stow_option_long() {
+        let args = Args::parse_from(&["rustow", "--stow", "mypackage"]);
+        assert!(args.stow);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_ignore_option_single() {
+        let args = Args::parse_from(&["rustow", "--ignore=\\.git", "mypackage"]);
+        assert_eq!(args.ignore_patterns, vec!["\\.git"]);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_ignore_option_multiple() {
+        let args = Args::parse_from(&[
+            "rustow", 
+            "--ignore=\\.git", 
+            "--ignore=.*~", 
+            "--ignore=node_modules",
+            "mypackage"
+        ]);
+        assert_eq!(args.ignore_patterns, vec!["\\.git", ".*~", "node_modules"]);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_stow_with_ignore_combination() {
+        let args = Args::parse_from(&[
+            "rustow", 
+            "-S",
+            "--ignore=\\.git", 
+            "--ignore=temp",
+            "mypackage"
+        ]);
+        assert!(args.stow);
+        assert_eq!(args.ignore_patterns, vec!["\\.git", "temp"]);
+        assert_eq!(args.packages, vec!["mypackage"]);
     }
 }
