@@ -196,13 +196,28 @@ mod tests {
     #[test]
     fn test_stow_dir_from_env() {
         // This test verifies that the Args struct is configured to read STOW_DIR from environment
-        // The actual environment variable reading is tested in integration tests
-        // since parse_from doesn't read environment variables in unit tests
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
         
-        // Test that when no -d option is provided, dir is None (will be read from env at runtime)
+        // Set STOW_DIR environment variable
+        unsafe {
+            std::env::set_var("STOW_DIR", "/env/stow/path");
+        }
+        
+        // Test that when no -d option is provided, dir is read from STOW_DIR env var
         let args = Args::parse_from(&["rustow", "mypackage"]);
-        assert!(args.dir.is_none()); // Will be populated from STOW_DIR env var at runtime
+        assert_eq!(args.dir, Some(PathBuf::from("/env/stow/path")));
+    }
+
+    #[test]
+    fn test_stow_dir_no_env_no_option() {
+        let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
+        
+        // Double-check that STOW_DIR is actually cleared
+        assert!(std::env::var("STOW_DIR").is_err(), "STOW_DIR should be cleared");
+        
+        // Test that when no -d option is provided and no STOW_DIR env var, dir is None
+        let args = Args::parse_from(&["rustow", "mypackage"]);
+        assert!(args.dir.is_none(), "dir should be None when no STOW_DIR env var and no -d option");
     }
 
     #[test]

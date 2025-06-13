@@ -204,18 +204,30 @@ mod tests {
         let env_stow_dir = temp_base.path().join(env_stow_dir_name);
         fs::create_dir_all(&env_stow_dir).unwrap();
 
+        // Save original environment and current directory
+        let original_stow_dir = env::var("STOW_DIR").ok();
+        let current_dir_original = env::current_dir().unwrap();
+        
         unsafe {
             env::set_var("STOW_DIR", env_stow_dir.to_str().unwrap());
         }
-        // Need to be in a directory that is not the env_stow_dir for default target to make sense, or provide target explicitly
-        let current_dir_original = env::current_dir().unwrap();
+        
+        // Need to be in a directory that is not the env_stow_dir for default target to make sense
         let another_dir = temp_base.path().join("another_place");
         fs::create_dir_all(&another_dir).unwrap();
         env::set_current_dir(&another_dir).unwrap();
 
-        let args = basic_args_for_config_test("pkg_env");
+        // Create args that will use STOW_DIR environment variable
+        let args = Args::parse_from(&["rustow", "pkg_env"]);
         let config = Config::from_args(args).unwrap();
-        unsafe { env::remove_var("STOW_DIR"); }
+        
+        // Restore environment and directory
+        unsafe {
+            match original_stow_dir {
+                Some(val) => env::set_var("STOW_DIR", val),
+                None => env::remove_var("STOW_DIR"),
+            }
+        }
         env::set_current_dir(current_dir_original).unwrap();
 
         assert_eq!(config.stow_dir, fs_utils::canonicalize_path(&env_stow_dir).unwrap());
