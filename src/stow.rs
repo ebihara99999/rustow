@@ -10,35 +10,28 @@ use crate::ignore::{self, IgnorePatterns};
 
 // Define modules inline for now
 mod conflict_resolver {
-    use crate::config::Config;
     use crate::stow::{TargetAction, ActionType};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
     /// Handles conflict detection and resolution between packages
-    pub struct ConflictResolver<'a> {
-        config: &'a Config,
-    }
+    pub struct ConflictResolver;
 
-    impl<'a> ConflictResolver<'a> {
-        pub fn new(config: &'a Config) -> Self {
-            Self { config }
-        }
-
+    impl ConflictResolver {
         /// Detect and resolve inter-package conflicts
-        pub fn resolve_inter_package_conflicts(&self, actions: &mut [TargetAction]) {
-            let target_map = self.build_target_map(actions);
-            self.mark_conflicting_actions(actions, target_map);
+        pub fn resolve_inter_package_conflicts(actions: &mut [TargetAction]) {
+            let target_map = Self::build_target_map(actions);
+            Self::mark_conflicting_actions(actions, target_map);
         }
 
         /// Propagate conflicts to child items
-        pub fn propagate_conflicts_to_children(&self, actions: &mut [TargetAction]) {
-            let parent_conflicts = self.collect_parent_conflicts(actions);
-            let child_updates = self.find_child_conflicts(actions, &parent_conflicts);
-            self.apply_child_conflict_updates(actions, child_updates);
+        pub fn propagate_conflicts_to_children(actions: &mut [TargetAction]) {
+            let parent_conflicts = Self::collect_parent_conflicts(actions);
+            let child_updates = Self::find_child_conflicts(actions, &parent_conflicts);
+            Self::apply_child_conflict_updates(actions, child_updates);
         }
 
-        fn build_target_map(&self, actions: &[TargetAction]) -> HashMap<PathBuf, Vec<usize>> {
+        fn build_target_map(actions: &[TargetAction]) -> HashMap<PathBuf, Vec<usize>> {
             let mut target_map: HashMap<PathBuf, Vec<usize>> = HashMap::new();
 
             for (index, action) in actions.iter().enumerate() {
@@ -50,17 +43,17 @@ mod conflict_resolver {
             target_map
         }
 
-        fn mark_conflicting_actions(&self, actions: &mut [TargetAction], target_map: HashMap<PathBuf, Vec<usize>>) {
+        fn mark_conflicting_actions(actions: &mut [TargetAction], target_map: HashMap<PathBuf, Vec<usize>>) {
             for (_target_path, action_indices) in target_map {
                 if action_indices.len() > 1 {
                     for index in action_indices {
-                        self.mark_action_as_conflict(&mut actions[index]);
+                        Self::mark_action_as_conflict(&mut actions[index]);
                     }
                 }
             }
         }
 
-        fn mark_action_as_conflict(&self, action: &mut TargetAction) {
+        fn mark_action_as_conflict(action: &mut TargetAction) {
             action.action_type = ActionType::Conflict;
             if action.conflict_details.is_none() {
                 let sources_involved = action.source_item.as_ref()
@@ -75,14 +68,14 @@ mod conflict_resolver {
             action.link_target_path = None;
         }
 
-        fn collect_parent_conflicts(&self, actions: &[TargetAction]) -> std::collections::HashSet<PathBuf> {
+        fn collect_parent_conflicts(actions: &[TargetAction]) -> std::collections::HashSet<PathBuf> {
             actions.iter()
                 .filter(|action| action.action_type == ActionType::Conflict)
                 .map(|action| action.target_path.clone())
                 .collect()
         }
 
-        fn find_child_conflicts(&self, actions: &[TargetAction], parent_conflicts: &std::collections::HashSet<PathBuf>) -> Vec<(usize, String)> {
+        fn find_child_conflicts(actions: &[TargetAction], parent_conflicts: &std::collections::HashSet<PathBuf>) -> Vec<(usize, String)> {
             let mut child_conflict_updates = Vec::new();
 
             for (i, action) in actions.iter().enumerate() {
@@ -107,7 +100,7 @@ mod conflict_resolver {
             child_conflict_updates
         }
 
-        fn apply_child_conflict_updates(&self, actions: &mut [TargetAction], child_updates: Vec<(usize, String)>) {
+        fn apply_child_conflict_updates(actions: &mut [TargetAction], child_updates: Vec<(usize, String)>) {
             for (index_to_update, conflict_message) in child_updates {
                 let action_to_update = &mut actions[index_to_update];
                 if action_to_update.action_type != ActionType::Conflict {
@@ -727,7 +720,6 @@ fn execute_real_action(action: &TargetAction) -> TargetActionReport {
         ActionType::AdoptFile => execute_adopt_file_action(action),
         ActionType::AdoptDirectory => execute_adopt_directory_action(action),
         ActionType::Skip => execute_skip_action(action),
-        _ => create_unimplemented_action_report(action),
     }
 }
 
@@ -971,15 +963,6 @@ fn execute_skip_action(action: &TargetAction) -> TargetActionReport {
     }
 }
 
-/// Create a report for unimplemented action types
-fn create_unimplemented_action_report(action: &TargetAction) -> TargetActionReport {
-    TargetActionReport {
-        original_action: action.clone(),
-        status: TargetActionReportStatus::Skipped, // Placeholder
-        message: Some(format!("Action {:?} not yet implemented for target {:?}", action.action_type, action.target_path)),
-    }
-}
-
 /// Load ignore patterns for a package, with error handling
 fn load_ignore_patterns_for_package(
     package_name: &str,
@@ -1017,10 +1000,9 @@ where
 }
 
 /// Apply conflict resolution to planned actions
-fn apply_conflict_resolution(actions: &mut Vec<TargetAction>, config: &Config) {
-    let conflict_resolver = ConflictResolver::new(config);
-    conflict_resolver.resolve_inter_package_conflicts(actions);
-    conflict_resolver.propagate_conflicts_to_children(actions);
+fn apply_conflict_resolution(actions: &mut Vec<TargetAction>, _config: &Config) {
+    ConflictResolver::resolve_inter_package_conflicts(actions);
+    ConflictResolver::propagate_conflicts_to_children(actions);
 }
 
 pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
@@ -2219,7 +2201,7 @@ mod tests {
         fs::create_dir_all(&stow_dir).unwrap();
         fs::write(&test_file, "content").unwrap();
 
-        let config = create_test_config(&target_dir, &stow_dir);
+        let _config = create_test_config(&target_dir, &stow_dir);
 
         // Create a StowItem representing a file
         let stow_item = StowItem {
