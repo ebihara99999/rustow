@@ -5,36 +5,13 @@ max_width = 100
 hard_tabs = false
 tab_spaces = 4
 
-# Import and use formatting
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
-
 # Function and method formatting
-fn_args_layout = "Tall"
-brace_style = "SameLineWhere"
+fn_params_layout = "Tall"
 
 # Match and control flow formatting
 match_block_trailing_comma = true
-control_brace_style = "AlwaysSameLine"
-
-# Comment formatting
-wrap_comments = true
-format_code_in_doc_comments = true
-normalize_comments = true
-normalize_doc_attributes = true
-
-# String formatting
-format_strings = true
-
-# Macro formatting
-format_macro_matchers = true
-format_macro_bodies = true
 
 # Other formatting options
 remove_nested_parens = true
 use_field_init_shorthand = true
-force_multiline_blocks = false
-indent_style = "Block"
-trailing_comma = "Vertical"
-trailing_semicolon = true
 use_try_shorthand = true 

@@ -2,8 +2,8 @@ use crate::cli::Args;
 use crate::error::{ConfigError, Result as RustowResult, RustowError};
 use crate::fs_utils; // Import fs_utils
 use regex::Regex;
-use std::path::PathBuf;
 use std::env;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StowMode {
@@ -47,22 +47,28 @@ impl Config {
             None => match env::var("STOW_DIR") {
                 Ok(val) => PathBuf::from(val),
                 Err(_) => env::current_dir().map_err(|e| {
-                    RustowError::Config(ConfigError::InvalidStowDir(
-                        format!("Failed to get current directory for stow_dir: {}", e)
-                    ))
+                    RustowError::Config(ConfigError::InvalidStowDir(format!(
+                        "Failed to get current directory for stow_dir: {}",
+                        e
+                    )))
                 })?,
             },
         };
-        let stow_dir: PathBuf = fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| {
-            match e {
-                RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidStowDir(format!(
-                    "Failed to canonicalize stow directory '{}': {}", stow_dir_path_unresolved.display(), fs_error
-                ))),
+        let stow_dir: PathBuf =
+            fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| match e {
+                RustowError::Fs(fs_error) => {
+                    RustowError::Config(ConfigError::InvalidStowDir(format!(
+                        "Failed to canonicalize stow directory '{}': {}",
+                        stow_dir_path_unresolved.display(),
+                        fs_error
+                    )))
+                },
                 _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
-                    "An unexpected error occurred while canonicalizing stow directory '{}': {}", stow_dir_path_unresolved.display(), e
-                )))
-            }
-        })?;
+                    "An unexpected error occurred while canonicalizing stow directory '{}': {}",
+                    stow_dir_path_unresolved.display(),
+                    e
+                ))),
+            })?;
 
         // 3. Resolve target_dir
         let target_dir_path_unresolved: PathBuf = match args.target {
@@ -73,31 +79,38 @@ impl Config {
                 ))
             })?.to_path_buf(),
         };
-        let target_dir: PathBuf = fs_utils::canonicalize_path(&target_dir_path_unresolved).map_err(|e| {
-            match e {
-                RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                    "Failed to canonicalize target directory '{}': {}", target_dir_path_unresolved.display(), fs_error
-                ))),
+        let target_dir: PathBuf = fs_utils::canonicalize_path(&target_dir_path_unresolved)
+            .map_err(|e| match e {
+                RustowError::Fs(fs_error) => {
+                    RustowError::Config(ConfigError::InvalidTargetDir(format!(
+                        "Failed to canonicalize target directory '{}': {}",
+                        target_dir_path_unresolved.display(),
+                        fs_error
+                    )))
+                },
                 _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                    "An unexpected error occurred while canonicalizing target directory '{}': {}", target_dir_path_unresolved.display(), e
-                )))
-            }
-        })?;
+                    "An unexpected error occurred while canonicalizing target directory '{}': {}",
+                    target_dir_path_unresolved.display(),
+                    e
+                ))),
+            })?;
 
-        let home_dir: PathBuf = dirs::home_dir().ok_or_else(||
+        let home_dir: PathBuf = dirs::home_dir().ok_or_else(|| {
             RustowError::Config(ConfigError::InvalidStowDir(
-                "Failed to determine home directory for loading global ignore file".to_string()
+                "Failed to determine home directory for loading global ignore file".to_string(),
             ))
-        )?;
+        })?;
 
         // Compile override and defer patterns
         let mut overrides_compiled: Vec<Regex> = Vec::new();
         for pattern_str in &args.override_conflicts {
             match Regex::new(pattern_str) {
                 Ok(re) => overrides_compiled.push(re),
-                Err(e) => return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                    format!("Invalid --override pattern '{}': {}", pattern_str, e)
-                ))),
+                Err(e) => {
+                    return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
+                        format!("Invalid --override pattern '{}': {}", pattern_str, e),
+                    )));
+                },
             }
         }
 
@@ -105,9 +118,11 @@ impl Config {
         for pattern_str in &args.defer_conflicts {
             match Regex::new(pattern_str) {
                 Ok(re) => defers_compiled.push(re),
-                Err(e) => return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                    format!("Invalid --defer pattern '{}': {}", pattern_str, e)
-                ))),
+                Err(e) => {
+                    return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
+                        format!("Invalid --defer pattern '{}': {}", pattern_str, e),
+                    )));
+                },
             }
         }
 
@@ -116,9 +131,11 @@ impl Config {
         for pattern_str in &args.ignore_patterns {
             match Regex::new(pattern_str) {
                 Ok(re) => ignore_patterns_compiled.push(re),
-                Err(e) => return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                    format!("Invalid --ignore pattern '{}': {}", pattern_str, e)
-                ))),
+                Err(e) => {
+                    return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
+                        format!("Invalid --ignore pattern '{}': {}", pattern_str, e),
+                    )));
+                },
             }
         }
 
@@ -165,11 +182,17 @@ mod tests {
         fs::create_dir_all(&temp_stow_dir).unwrap();
         env::set_current_dir(&temp_stow_dir).unwrap();
 
-        unsafe { env::remove_var("STOW_DIR"); }
+        unsafe {
+            env::remove_var("STOW_DIR");
+        }
         let args = basic_args_for_config_test("testpkg");
 
         let config_result = Config::from_args(args);
-        assert!(config_result.is_ok(), "Config::from_args failed: {:?}", config_result.err());
+        assert!(
+            config_result.is_ok(),
+            "Config::from_args failed: {:?}",
+            config_result.err()
+        );
         let config = config_result.unwrap();
 
         assert_eq!(config.packages, vec!["testpkg"]);
@@ -190,11 +213,16 @@ mod tests {
         let specified_stow_dir = temp_base.path().join("my_stow");
         fs::create_dir_all(&specified_stow_dir).unwrap();
 
-        unsafe { env::remove_var("STOW_DIR"); }
+        unsafe {
+            env::remove_var("STOW_DIR");
+        }
         let args = Args::parse_from(&["rustow", "-d", specified_stow_dir.to_str().unwrap(), "pkg"]);
         let config = Config::from_args(args).unwrap();
 
-        assert_eq!(config.stow_dir, fs_utils::canonicalize_path(&specified_stow_dir).unwrap());
+        assert_eq!(
+            config.stow_dir,
+            fs_utils::canonicalize_path(&specified_stow_dir).unwrap()
+        );
     }
 
     #[test]
@@ -207,11 +235,11 @@ mod tests {
         // Save original environment and current directory
         let original_stow_dir = env::var("STOW_DIR").ok();
         let current_dir_original = env::current_dir().unwrap();
-        
+
         unsafe {
             env::set_var("STOW_DIR", env_stow_dir.to_str().unwrap());
         }
-        
+
         // Need to be in a directory that is not the env_stow_dir for default target to make sense
         let another_dir = temp_base.path().join("another_place");
         fs::create_dir_all(&another_dir).unwrap();
@@ -220,7 +248,7 @@ mod tests {
         // Create args that will use STOW_DIR environment variable
         let args = Args::parse_from(&["rustow", "pkg_env"]);
         let config = Config::from_args(args).unwrap();
-        
+
         // Restore environment and directory
         unsafe {
             match original_stow_dir {
@@ -230,7 +258,10 @@ mod tests {
         }
         env::set_current_dir(current_dir_original).unwrap();
 
-        assert_eq!(config.stow_dir, fs_utils::canonicalize_path(&env_stow_dir).unwrap());
+        assert_eq!(
+            config.stow_dir,
+            fs_utils::canonicalize_path(&env_stow_dir).unwrap()
+        );
     }
 
     #[test]
@@ -243,24 +274,34 @@ mod tests {
 
         let args = Args::parse_from(&[
             "rustow",
-            "-t", specified_target_dir.to_str().unwrap(),
-            "-d", dummy_stow_dir.to_str().unwrap(),
+            "-t",
+            specified_target_dir.to_str().unwrap(),
+            "-d",
+            dummy_stow_dir.to_str().unwrap(),
             "pkg",
         ]);
         let config = Config::from_args(args).unwrap();
-        assert_eq!(config.target_dir, fs_utils::canonicalize_path(&specified_target_dir).unwrap());
+        assert_eq!(
+            config.target_dir,
+            fs_utils::canonicalize_path(&specified_target_dir).unwrap()
+        );
     }
 
     #[test]
     fn test_stow_dir_canonicalization_failure() {
         let non_existent_stow_dir = PathBuf::from("/path/that/definitely/does/not/exist/stow");
-        let args = Args::parse_from(&["rustow", "-d", non_existent_stow_dir.to_str().unwrap(), "pkg"]);
+        let args = Args::parse_from(&[
+            "rustow",
+            "-d",
+            non_existent_stow_dir.to_str().unwrap(),
+            "pkg",
+        ]);
         let config_result = Config::from_args(args);
         assert!(config_result.is_err());
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
                 assert!(msg.contains("Failed to canonicalize stow directory"));
-            }
+            },
             e => panic!("Unexpected error type: {:?}", e),
         }
     }
@@ -274,8 +315,10 @@ mod tests {
 
         let args = Args::parse_from(&[
             "rustow",
-            "-d", valid_stow_dir.to_str().unwrap(),
-            "-t", non_existent_target_dir.to_str().unwrap(),
+            "-d",
+            valid_stow_dir.to_str().unwrap(),
+            "-t",
+            non_existent_target_dir.to_str().unwrap(),
             "pkg",
         ]);
         let config_result = Config::from_args(args);
@@ -283,7 +326,7 @@ mod tests {
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidTargetDir(msg)) => {
                 assert!(msg.contains("Failed to canonicalize target directory"));
-            }
+            },
             e => panic!("Unexpected error type: {:?}", e),
         }
     }
@@ -291,9 +334,19 @@ mod tests {
     #[test]
     fn test_stow_mode_delete() {
         let temp_base = tempdir().unwrap();
-        let dummy_stow = temp_base.path().join("s"); fs::create_dir_all(&dummy_stow).unwrap();
-        let dummy_target = temp_base.path().join("t"); fs::create_dir_all(&dummy_target).unwrap();
-        let args = Args::parse_from(&["rustow", "-D", "-d", dummy_stow.to_str().unwrap(), "-t", dummy_target.to_str().unwrap(), "pkg_del"]);
+        let dummy_stow = temp_base.path().join("s");
+        fs::create_dir_all(&dummy_stow).unwrap();
+        let dummy_target = temp_base.path().join("t");
+        fs::create_dir_all(&dummy_target).unwrap();
+        let args = Args::parse_from(&[
+            "rustow",
+            "-D",
+            "-d",
+            dummy_stow.to_str().unwrap(),
+            "-t",
+            dummy_target.to_str().unwrap(),
+            "pkg_del",
+        ]);
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.mode, StowMode::Delete);
     }
@@ -301,9 +354,19 @@ mod tests {
     #[test]
     fn test_stow_mode_restow() {
         let temp_base = tempdir().unwrap();
-        let dummy_stow = temp_base.path().join("s_res"); fs::create_dir_all(&dummy_stow).unwrap();
-        let dummy_target = temp_base.path().join("t_res"); fs::create_dir_all(&dummy_target).unwrap();
-        let args = Args::parse_from(&["rustow", "-R", "-d", dummy_stow.to_str().unwrap(), "-t", dummy_target.to_str().unwrap(),"pkg_res"]);
+        let dummy_stow = temp_base.path().join("s_res");
+        fs::create_dir_all(&dummy_stow).unwrap();
+        let dummy_target = temp_base.path().join("t_res");
+        fs::create_dir_all(&dummy_target).unwrap();
+        let args = Args::parse_from(&[
+            "rustow",
+            "-R",
+            "-d",
+            dummy_stow.to_str().unwrap(),
+            "-t",
+            dummy_target.to_str().unwrap(),
+            "pkg_res",
+        ]);
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.mode, StowMode::Restow);
     }
@@ -311,20 +374,28 @@ mod tests {
     #[test]
     fn test_override_defer_regex_compilation_success() {
         let temp_base = tempdir().unwrap();
-        let stow_dir = temp_base.path().join("s_regex"); fs::create_dir_all(&stow_dir).unwrap();
-        let target_dir = temp_base.path().join("t_regex"); fs::create_dir_all(&target_dir).unwrap();
+        let stow_dir = temp_base.path().join("s_regex");
+        fs::create_dir_all(&stow_dir).unwrap();
+        let target_dir = temp_base.path().join("t_regex");
+        fs::create_dir_all(&target_dir).unwrap();
 
         let args = Args::parse_from(&[
             "rustow",
-            "-d", stow_dir.to_str().unwrap(),
-            "-t", target_dir.to_str().unwrap(),
+            "-d",
+            stow_dir.to_str().unwrap(),
+            "-t",
+            target_dir.to_str().unwrap(),
             "--override=^foo.*",
             "--override=bar$",
             "--defer=baz",
-            "pkg_regex"
+            "pkg_regex",
         ]);
         let config_result = Config::from_args(args);
-        assert!(config_result.is_ok(), "Regex compilation failed: {:?}", config_result.err());
+        assert!(
+            config_result.is_ok(),
+            "Regex compilation failed: {:?}",
+            config_result.err()
+        );
         let config = config_result.unwrap();
 
         assert_eq!(config.overrides.len(), 2);
@@ -337,16 +408,20 @@ mod tests {
     #[test]
     fn test_override_regex_compilation_failure() {
         let temp_base = tempdir().unwrap();
-        let stow_dir = temp_base.path().join("s_regex_fail_ov"); fs::create_dir_all(&stow_dir).unwrap();
-        let target_dir = temp_base.path().join("t_regex_fail_ov"); fs::create_dir_all(&target_dir).unwrap();
+        let stow_dir = temp_base.path().join("s_regex_fail_ov");
+        fs::create_dir_all(&stow_dir).unwrap();
+        let target_dir = temp_base.path().join("t_regex_fail_ov");
+        fs::create_dir_all(&target_dir).unwrap();
 
         let invalid_pattern = "*invalid[";
         let args = Args::parse_from(&[
             "rustow",
-            "-d", stow_dir.to_str().unwrap(),
-            "-t", target_dir.to_str().unwrap(),
+            "-d",
+            stow_dir.to_str().unwrap(),
+            "-t",
+            target_dir.to_str().unwrap(),
             &format!("--override={}", invalid_pattern),
-            "pkg_regex_fail"
+            "pkg_regex_fail",
         ]);
         let config_result = Config::from_args(args);
         assert!(config_result.is_err());
@@ -354,7 +429,7 @@ mod tests {
             RustowError::Config(ConfigError::InvalidRegexPattern(msg)) => {
                 assert!(msg.contains("Invalid --override pattern"));
                 assert!(msg.contains(invalid_pattern));
-            }
+            },
             e => panic!("Unexpected error type: {:?}", e),
         }
     }
@@ -362,16 +437,20 @@ mod tests {
     #[test]
     fn test_defer_regex_compilation_failure() {
         let temp_base = tempdir().unwrap();
-        let stow_dir = temp_base.path().join("s_regex_fail_def"); fs::create_dir_all(&stow_dir).unwrap();
-        let target_dir = temp_base.path().join("t_regex_fail_def"); fs::create_dir_all(&target_dir).unwrap();
+        let stow_dir = temp_base.path().join("s_regex_fail_def");
+        fs::create_dir_all(&stow_dir).unwrap();
+        let target_dir = temp_base.path().join("t_regex_fail_def");
+        fs::create_dir_all(&target_dir).unwrap();
 
         let invalid_pattern = "(unclosed";
         let args = Args::parse_from(&[
             "rustow",
-            "-d", stow_dir.to_str().unwrap(),
-            "-t", target_dir.to_str().unwrap(),
+            "-d",
+            stow_dir.to_str().unwrap(),
+            "-t",
+            target_dir.to_str().unwrap(),
             &format!("--defer={}", invalid_pattern),
-            "pkg_regex_fail_defer"
+            "pkg_regex_fail_defer",
         ]);
         let config_result = Config::from_args(args);
         assert!(config_result.is_err());
@@ -379,7 +458,7 @@ mod tests {
             RustowError::Config(ConfigError::InvalidRegexPattern(msg)) => {
                 assert!(msg.contains("Invalid --defer pattern"));
                 assert!(msg.contains(invalid_pattern));
-            }
+            },
             e => panic!("Unexpected error type: {:?}", e),
         }
     }
@@ -387,17 +466,19 @@ mod tests {
     #[test]
     fn test_stow_mode_explicit_stow() {
         let temp_base = tempdir().unwrap();
-        let dummy_stow = temp_base.path().join("s_explicit"); 
+        let dummy_stow = temp_base.path().join("s_explicit");
         fs::create_dir_all(&dummy_stow).unwrap();
-        let dummy_target = temp_base.path().join("t_explicit"); 
+        let dummy_target = temp_base.path().join("t_explicit");
         fs::create_dir_all(&dummy_target).unwrap();
-        
+
         let args = Args::parse_from(&[
-            "rustow", 
-            "-S", 
-            "-d", dummy_stow.to_str().unwrap(), 
-            "-t", dummy_target.to_str().unwrap(), 
-            "pkg_stow"
+            "rustow",
+            "-S",
+            "-d",
+            dummy_stow.to_str().unwrap(),
+            "-t",
+            dummy_target.to_str().unwrap(),
+            "pkg_stow",
         ]);
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.mode, StowMode::Stow);
@@ -407,22 +488,28 @@ mod tests {
     #[test]
     fn test_ignore_patterns_compilation_success() {
         let temp_base = tempdir().unwrap();
-        let stow_dir = temp_base.path().join("s_ignore"); 
+        let stow_dir = temp_base.path().join("s_ignore");
         fs::create_dir_all(&stow_dir).unwrap();
-        let target_dir = temp_base.path().join("t_ignore"); 
+        let target_dir = temp_base.path().join("t_ignore");
         fs::create_dir_all(&target_dir).unwrap();
 
         let args = Args::parse_from(&[
             "rustow",
-            "-d", stow_dir.to_str().unwrap(),
-            "-t", target_dir.to_str().unwrap(),
+            "-d",
+            stow_dir.to_str().unwrap(),
+            "-t",
+            target_dir.to_str().unwrap(),
             "--ignore=\\.git",
             "--ignore=.*~$",
             "--ignore=node_modules",
-            "pkg_ignore"
+            "pkg_ignore",
         ]);
         let config_result = Config::from_args(args);
-        assert!(config_result.is_ok(), "Ignore patterns compilation failed: {:?}", config_result.err());
+        assert!(
+            config_result.is_ok(),
+            "Ignore patterns compilation failed: {:?}",
+            config_result.err()
+        );
         let config = config_result.unwrap();
 
         assert_eq!(config.ignore_patterns.len(), 3);
@@ -434,18 +521,20 @@ mod tests {
     #[test]
     fn test_ignore_patterns_compilation_failure() {
         let temp_base = tempdir().unwrap();
-        let stow_dir = temp_base.path().join("s_ignore_fail"); 
+        let stow_dir = temp_base.path().join("s_ignore_fail");
         fs::create_dir_all(&stow_dir).unwrap();
-        let target_dir = temp_base.path().join("t_ignore_fail"); 
+        let target_dir = temp_base.path().join("t_ignore_fail");
         fs::create_dir_all(&target_dir).unwrap();
 
         let invalid_pattern = "*invalid_ignore[";
         let args = Args::parse_from(&[
             "rustow",
-            "-d", stow_dir.to_str().unwrap(),
-            "-t", target_dir.to_str().unwrap(),
+            "-d",
+            stow_dir.to_str().unwrap(),
+            "-t",
+            target_dir.to_str().unwrap(),
             &format!("--ignore={}", invalid_pattern),
-            "pkg_ignore_fail"
+            "pkg_ignore_fail",
         ]);
         let config_result = Config::from_args(args);
         assert!(config_result.is_err());
@@ -453,7 +542,7 @@ mod tests {
             RustowError::Config(ConfigError::InvalidRegexPattern(msg)) => {
                 assert!(msg.contains("Invalid --ignore pattern"));
                 assert!(msg.contains(invalid_pattern));
-            }
+            },
             e => panic!("Unexpected error type: {:?}", e),
         }
     }
@@ -461,9 +550,9 @@ mod tests {
     #[test]
     fn test_stow_with_ignore_and_other_options() {
         let temp_base = tempdir().unwrap();
-        let stow_dir = temp_base.path().join("s_combined"); 
+        let stow_dir = temp_base.path().join("s_combined");
         fs::create_dir_all(&stow_dir).unwrap();
-        let target_dir = temp_base.path().join("t_combined"); 
+        let target_dir = temp_base.path().join("t_combined");
         fs::create_dir_all(&target_dir).unwrap();
 
         let args = Args::parse_from(&[
@@ -476,12 +565,14 @@ mod tests {
             "--dotfiles",
             "--adopt",
             "-v",
-            "-d", stow_dir.to_str().unwrap(),
-            "-t", target_dir.to_str().unwrap(),
-            "pkg_combined"
+            "-d",
+            stow_dir.to_str().unwrap(),
+            "-t",
+            target_dir.to_str().unwrap(),
+            "pkg_combined",
         ]);
         let config = Config::from_args(args).unwrap();
-        
+
         assert!(config.stow);
         assert_eq!(config.mode, StowMode::Stow);
         assert_eq!(config.ignore_patterns.len(), 2);
