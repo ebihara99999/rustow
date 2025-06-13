@@ -1,0 +1,17 @@
+# rustfmt configuration for rustow project
+
+# Line length and formatting
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+
+# Function and method formatting
+fn_params_layout = "Tall"
+
+# Match and control flow formatting
+match_block_trailing_comma = true
+
+# Other formatting options
+remove_nested_parens = true
+use_field_init_shorthand = true
+use_try_shorthand = true 

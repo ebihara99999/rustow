@@ -1,0 +1,22 @@
+# Clippy configuration for rustow project
+
+# Cognitive complexity limit
+cognitive-complexity-threshold = 30
+
+# Type complexity limit
+type-complexity-threshold = 250
+
+# Maximum function lines
+too-many-lines-threshold = 100
+
+# Maximum arguments for functions
+too-many-arguments-threshold = 7
+
+# Literal representation threshold
+literal-representation-threshold = 10
+
+# Enum variant name threshold
+enum-variant-name-threshold = 3
+
+# Avoid breaking exported API
+avoid-breaking-exported-api = true

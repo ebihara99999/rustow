@@ -1,9 +1,9 @@
-pub mod error;
-pub mod dotfiles;
-pub mod ignore;
-pub mod fs_utils;
 pub mod cli;
 pub mod config; // Enabled config module
+pub mod dotfiles;
+pub mod error;
+pub mod fs_utils;
+pub mod ignore;
 pub mod stow;
 
 use clap::Parser;

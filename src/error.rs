@@ -1,6 +1,6 @@
 use std::io;
-use thiserror::Error;
 use std::path::PathBuf;
+use thiserror::Error;
 
 #[allow(dead_code)]
 #[derive(Error, Debug)]
@@ -103,7 +103,9 @@ pub enum FsError {
         #[source]
         source: std::io::Error,
     },
-    #[error("Failed to move item from {source_path:?} to {destination_path:?}: {source_io_error:?}")]
+    #[error(
+        "Failed to move item from {source_path:?} to {destination_path:?}: {source_io_error:?}"
+    )]
     MoveItem {
         source_path: PathBuf,
         destination_path: PathBuf,
@@ -136,28 +138,104 @@ pub type Result<T, E = RustowError> = std::result::Result<T, E>;
 impl PartialEq for FsError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (FsError::Io { path: p1, source: s1 }, FsError::Io { path: p2, source: s2 }) =>
-                p1 == p2 && s1.kind() == s2.kind(),
-            (FsError::Canonicalize { path: p1, source: s1 }, FsError::Canonicalize { path: p2, source: s2 }) =>
-                p1 == p2 && s1.kind() == s2.kind(),
+            (
+                FsError::Io {
+                    path: p1,
+                    source: s1,
+                },
+                FsError::Io {
+                    path: p2,
+                    source: s2,
+                },
+            ) => p1 == p2 && s1.kind() == s2.kind(),
+            (
+                FsError::Canonicalize {
+                    path: p1,
+                    source: s1,
+                },
+                FsError::Canonicalize {
+                    path: p2,
+                    source: s2,
+                },
+            ) => p1 == p2 && s1.kind() == s2.kind(),
             (FsError::NotFound(p1), FsError::NotFound(p2)) => p1 == p2,
             (FsError::NotADirectory(p1), FsError::NotADirectory(p2)) => p1 == p2,
             (FsError::NotASymlink(p1), FsError::NotASymlink(p2)) => p1 == p2,
-            (FsError::CreateSymlink { link_path: lp1, target_path: tp1, source: s1 }, FsError::CreateSymlink { link_path: lp2, target_path: tp2, source: s2 }) =>
-                lp1 == lp2 && tp1 == tp2 && s1.kind() == s2.kind(),
-            (FsError::ReadSymlink { path: p1, source: s1 }, FsError::ReadSymlink { path: p2, source: s2 }) =>
-                p1 == p2 && s1.kind() == s2.kind(),
-            (FsError::DeleteSymlink { path: p1, source: s1 }, FsError::DeleteSymlink { path: p2, source: s2 }) =>
-                p1 == p2 && s1.kind() == s2.kind(),
-            (FsError::CreateDirectory { path: p1, source: s1 }, FsError::CreateDirectory { path: p2, source: s2 }) =>
-                p1 == p2 && s1.kind() == s2.kind(),
-            (FsError::DeleteDirectory { path: p1, source: s1 }, FsError::DeleteDirectory { path: p2, source: s2 }) =>
-                p1 == p2 && s1.kind() == s2.kind(),
-            (FsError::MoveItem { source_path: sp1, destination_path: dp1, source_io_error: s1 }, FsError::MoveItem { source_path: sp2, destination_path: dp2, source_io_error: s2 }) =>
-                sp1 == sp2 && dp1 == dp2 && s1.kind() == s2.kind(),
+            (
+                FsError::CreateSymlink {
+                    link_path: lp1,
+                    target_path: tp1,
+                    source: s1,
+                },
+                FsError::CreateSymlink {
+                    link_path: lp2,
+                    target_path: tp2,
+                    source: s2,
+                },
+            ) => lp1 == lp2 && tp1 == tp2 && s1.kind() == s2.kind(),
+            (
+                FsError::ReadSymlink {
+                    path: p1,
+                    source: s1,
+                },
+                FsError::ReadSymlink {
+                    path: p2,
+                    source: s2,
+                },
+            ) => p1 == p2 && s1.kind() == s2.kind(),
+            (
+                FsError::DeleteSymlink {
+                    path: p1,
+                    source: s1,
+                },
+                FsError::DeleteSymlink {
+                    path: p2,
+                    source: s2,
+                },
+            ) => p1 == p2 && s1.kind() == s2.kind(),
+            (
+                FsError::CreateDirectory {
+                    path: p1,
+                    source: s1,
+                },
+                FsError::CreateDirectory {
+                    path: p2,
+                    source: s2,
+                },
+            ) => p1 == p2 && s1.kind() == s2.kind(),
+            (
+                FsError::DeleteDirectory {
+                    path: p1,
+                    source: s1,
+                },
+                FsError::DeleteDirectory {
+                    path: p2,
+                    source: s2,
+                },
+            ) => p1 == p2 && s1.kind() == s2.kind(),
+            (
+                FsError::MoveItem {
+                    source_path: sp1,
+                    destination_path: dp1,
+                    source_io_error: s1,
+                },
+                FsError::MoveItem {
+                    source_path: sp2,
+                    destination_path: dp2,
+                    source_io_error: s2,
+                },
+            ) => sp1 == sp2 && dp1 == dp2 && s1.kind() == s2.kind(),
             (FsError::MoveSamePath(p1), FsError::MoveSamePath(p2)) => p1 == p2,
-            (FsError::WalkDir { path: p1, source: s1 }, FsError::WalkDir { path: p2, source: s2 }) =>
-                p1 == p2 && s1.kind() == s2.kind(),
+            (
+                FsError::WalkDir {
+                    path: p1,
+                    source: s1,
+                },
+                FsError::WalkDir {
+                    path: p2,
+                    source: s2,
+                },
+            ) => p1 == p2 && s1.kind() == s2.kind(),
             _ => false, // Different enum variants
         }
     }
@@ -239,16 +317,34 @@ mod tests {
 
         // Test Io variant
         assert_eq!(
-            FsError::Io { path: p1.clone(), source: io::Error::from(err_kind) },
-            FsError::Io { path: p1.clone(), source: io::Error::from(err_kind) }
+            FsError::Io {
+                path: p1.clone(),
+                source: io::Error::from(err_kind)
+            },
+            FsError::Io {
+                path: p1.clone(),
+                source: io::Error::from(err_kind)
+            }
         );
         assert_ne!(
-            FsError::Io { path: p1.clone(), source: io::Error::from(err_kind) },
-            FsError::Io { path: p2.clone(), source: io::Error::from(err_kind) }
+            FsError::Io {
+                path: p1.clone(),
+                source: io::Error::from(err_kind)
+            },
+            FsError::Io {
+                path: p2.clone(),
+                source: io::Error::from(err_kind)
+            }
         );
         assert_ne!(
-            FsError::Io { path: p1.clone(), source: io::Error::from(err_kind) },
-            FsError::Io { path: p1.clone(), source: io::Error::from(io::ErrorKind::PermissionDenied) }
+            FsError::Io {
+                path: p1.clone(),
+                source: io::Error::from(err_kind)
+            },
+            FsError::Io {
+                path: p1.clone(),
+                source: io::Error::from(io::ErrorKind::PermissionDenied)
+            }
         );
 
         // Test NotFound variant
@@ -257,7 +353,10 @@ mod tests {
 
         // Test different variants
         assert_ne!(
-            FsError::Io { path: p1.clone(), source: io::Error::from(err_kind) },
+            FsError::Io {
+                path: p1.clone(),
+                source: io::Error::from(err_kind)
+            },
             FsError::NotFound(p1.clone())
         );
     }
@@ -268,8 +367,14 @@ mod tests {
         let err_kind = io::ErrorKind::NotFound;
 
         // Reconstruct errors for comparison as FsError is not Clone
-        assert_eq!(RustowError::Fs(FsError::NotFound(p1.clone())), RustowError::Fs(FsError::NotFound(p1.clone())));
-        assert_ne!(RustowError::Fs(FsError::NotADirectory(p1.clone())), RustowError::Fs(FsError::NotFound(p1.clone())));
+        assert_eq!(
+            RustowError::Fs(FsError::NotFound(p1.clone())),
+            RustowError::Fs(FsError::NotFound(p1.clone()))
+        );
+        assert_ne!(
+            RustowError::Fs(FsError::NotADirectory(p1.clone())),
+            RustowError::Fs(FsError::NotFound(p1.clone()))
+        );
 
         assert_eq!(
             RustowError::Io(io::Error::from(err_kind)),
@@ -280,9 +385,18 @@ mod tests {
             RustowError::Io(io::Error::from(io::ErrorKind::PermissionDenied))
         );
         // Reconstruct FsError for this comparison
-        assert_ne!(RustowError::Fs(FsError::NotFound(p1.clone())), RustowError::Io(io::Error::from(err_kind)));
+        assert_ne!(
+            RustowError::Fs(FsError::NotFound(p1.clone())),
+            RustowError::Io(io::Error::from(err_kind))
+        );
 
-        assert_eq!(RustowError::InvalidPattern("pat1".to_string()), RustowError::InvalidPattern("pat1".to_string()));
-        assert_ne!(RustowError::InvalidPattern("pat1".to_string()), RustowError::InvalidPattern("pat2".to_string()));
+        assert_eq!(
+            RustowError::InvalidPattern("pat1".to_string()),
+            RustowError::InvalidPattern("pat1".to_string())
+        );
+        assert_ne!(
+            RustowError::InvalidPattern("pat1".to_string()),
+            RustowError::InvalidPattern("pat2".to_string())
+        );
     }
 }

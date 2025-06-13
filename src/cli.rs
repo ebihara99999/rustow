@@ -4,7 +4,8 @@ use std::path::PathBuf;
 /// Rustow: A Rust implementation of GNU Stow
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
-pub struct Args { // Ensure this is pub
+pub struct Args {
+    // Ensure this is pub
     /// Target directory for symlinks
     #[clap(short, long, value_parser)]
     pub target: Option<PathBuf>,
@@ -197,12 +198,12 @@ mod tests {
     fn test_stow_dir_from_env() {
         // This test verifies that the Args struct is configured to read STOW_DIR from environment
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
-        
+
         // Set STOW_DIR environment variable
         unsafe {
             std::env::set_var("STOW_DIR", "/env/stow/path");
         }
-        
+
         // Test that when no -d option is provided, dir is read from STOW_DIR env var
         let args = Args::parse_from(&["rustow", "mypackage"]);
         assert_eq!(args.dir, Some(PathBuf::from("/env/stow/path")));
@@ -211,13 +212,19 @@ mod tests {
     #[test]
     fn test_stow_dir_no_env_no_option() {
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
-        
+
         // Double-check that STOW_DIR is actually cleared
-        assert!(std::env::var("STOW_DIR").is_err(), "STOW_DIR should be cleared");
-        
+        assert!(
+            std::env::var("STOW_DIR").is_err(),
+            "STOW_DIR should be cleared"
+        );
+
         // Test that when no -d option is provided and no STOW_DIR env var, dir is None
         let args = Args::parse_from(&["rustow", "mypackage"]);
-        assert!(args.dir.is_none(), "dir should be None when no STOW_DIR env var and no -d option");
+        assert!(
+            args.dir.is_none(),
+            "dir should be None when no STOW_DIR env var and no -d option"
+        );
     }
 
     #[test]
@@ -254,11 +261,11 @@ mod tests {
     #[test]
     fn test_ignore_option_multiple() {
         let args = Args::parse_from(&[
-            "rustow", 
-            "--ignore=\\.git", 
-            "--ignore=.*~", 
+            "rustow",
+            "--ignore=\\.git",
+            "--ignore=.*~",
             "--ignore=node_modules",
-            "mypackage"
+            "mypackage",
         ]);
         assert_eq!(args.ignore_patterns, vec!["\\.git", ".*~", "node_modules"]);
         assert_eq!(args.packages, vec!["mypackage"]);
@@ -267,11 +274,11 @@ mod tests {
     #[test]
     fn test_stow_with_ignore_combination() {
         let args = Args::parse_from(&[
-            "rustow", 
+            "rustow",
             "-S",
-            "--ignore=\\.git", 
+            "--ignore=\\.git",
             "--ignore=temp",
-            "mypackage"
+            "mypackage",
         ]);
         assert!(args.stow);
         assert_eq!(args.ignore_patterns, vec!["\\.git", "temp"]);

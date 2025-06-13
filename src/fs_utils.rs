@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use crate::error::{FsError, Result, RustowError};
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub fn is_directory(path: &Path) -> bool {
@@ -17,34 +17,47 @@ pub fn path_exists(path: &Path) -> bool {
 pub fn create_symlink(link_path: &Path, target_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target_path, link_path).map_err(|e| FsError::CreateSymlink {
-            link_path: link_path.to_path_buf(),
-            target_path: target_path.to_path_buf(),
-            source: e,
-        }.into())
+        std::os::unix::fs::symlink(target_path, link_path).map_err(|e| {
+            FsError::CreateSymlink {
+                link_path: link_path.to_path_buf(),
+                target_path: target_path.to_path_buf(),
+                source: e,
+            }
+            .into()
+        })
     }
     #[cfg(windows)]
     {
         if target_path.is_dir() {
-             std::os::windows::fs::symlink_dir(target_path, link_path).map_err(|e| FsError::CreateSymlink {
-                link_path: link_path.to_path_buf(),
-                target_path: target_path.to_path_buf(),
-                source: e,
-            }.into())
+            std::os::windows::fs::symlink_dir(target_path, link_path).map_err(|e| {
+                FsError::CreateSymlink {
+                    link_path: link_path.to_path_buf(),
+                    target_path: target_path.to_path_buf(),
+                    source: e,
+                }
+                .into()
+            })
         } else {
-            std::os::windows::fs::symlink_file(target_path, link_path).map_err(|e| FsError::CreateSymlink {
-                link_path: link_path.to_path_buf(),
-                target_path: target_path.to_path_buf(),
-                source: e,
-            }.into())
+            std::os::windows::fs::symlink_file(target_path, link_path).map_err(|e| {
+                FsError::CreateSymlink {
+                    link_path: link_path.to_path_buf(),
+                    target_path: target_path.to_path_buf(),
+                    source: e,
+                }
+                .into()
+            })
         }
     }
     #[cfg(not(any(unix, windows)))]
     {
         Err(FsError::Io {
             path: link_path.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::Unsupported, "Symlink creation not supported on this platform"),
-        }.into())
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Symlink creation not supported on this platform",
+            ),
+        }
+        .into())
     }
 }
 
@@ -55,11 +68,13 @@ pub fn read_link(path: &Path) -> Result<PathBuf> {
         // So, this check correctly leads to NotASymlink for both cases.
         return Err(FsError::NotASymlink(path.to_path_buf()).into());
     }
-    std::fs::read_link(path)
-        .map_err(|e| FsError::ReadSymlink {
+    std::fs::read_link(path).map_err(|e| {
+        FsError::ReadSymlink {
             path: path.to_path_buf(),
             source: e,
-        }.into())
+        }
+        .into()
+    })
 }
 
 pub fn delete_symlink(path: &Path) -> Result<()> {
@@ -74,10 +89,13 @@ pub fn delete_symlink(path: &Path) -> Result<()> {
 
     // If is_symlink is true, the path refers to a symlink.
     // It could be a broken symlink, but std::fs::remove_file should handle it.
-    std::fs::remove_file(path).map_err(|e| FsError::DeleteSymlink {
-        path: path.to_path_buf(),
-        source: e,
-    }.into())
+    std::fs::remove_file(path).map_err(|e| {
+        FsError::DeleteSymlink {
+            path: path.to_path_buf(),
+            source: e,
+        }
+        .into()
+    })
 }
 
 pub fn create_dir_all(path: &Path) -> Result<()> {
@@ -115,14 +133,14 @@ pub fn delete_empty_dir(path: &Path) -> Result<()> {
                 }
                 .into());
             }
-        }
+        },
         Err(e) => {
             return Err(FsError::Io {
                 path: path.to_path_buf(),
                 source: e,
             }
             .into());
-        }
+        },
     }
 
     std::fs::remove_dir(path).map_err(|e| {
@@ -187,10 +205,14 @@ pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {
 
     let mut items: Vec<RawStowItem> = Vec::new();
 
-    for entry_result in WalkDir::new(package_path).min_depth(1) { // entry_result の型は walkdir::Result<walkdir::DirEntry>
-        let entry: walkdir::DirEntry = entry_result.map_err(|e| FsError::WalkDir { // 型を明示
+    for entry_result in WalkDir::new(package_path).min_depth(1) {
+        // entry_result の型は walkdir::Result<walkdir::DirEntry>
+        let entry: walkdir::DirEntry = entry_result.map_err(|e| FsError::WalkDir {
+            // 型を明示
             path: e.path().unwrap_or(package_path).to_path_buf(), // Use package_path if entry path is not available
-            source: e.into_io_error().unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "walkdir error")),
+            source: e
+                .into_io_error()
+                .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "walkdir error")),
         })?;
 
         let absolute_path: PathBuf = entry.path().to_path_buf(); // 型を明示
@@ -201,7 +223,8 @@ pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {
             .to_path_buf();
 
         let file_type: std::fs::FileType = entry.file_type(); // 型を明示
-        let item_type: RawStowItemType = if file_type.is_symlink() { // 型を明示
+        let item_type: RawStowItemType = if file_type.is_symlink() {
+            // 型を明示
             RawStowItemType::Symlink
         } else if file_type.is_dir() {
             RawStowItemType::Directory
@@ -221,32 +244,40 @@ pub fn walk_package_dir(package_path: &Path) -> Result<Vec<RawStowItem>> {
     Ok(items)
 }
 
-pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(String, PathBuf)>, RustowError> {
+pub fn is_stow_symlink(
+    link_path: &Path,
+    stow_dir: &Path,
+) -> Result<Option<(String, PathBuf)>, RustowError> {
     // 1. Check if link_path is a symlink
     if !is_symlink(link_path) {
         return Ok(None);
     }
 
     // 2. Canonicalize stow_dir for reliable comparison
-    let canonical_stow_dir: PathBuf = match canonicalize_path(stow_dir) { // 型を明示
+    let canonical_stow_dir: PathBuf = match canonicalize_path(stow_dir) {
+        // 型を明示
         Ok(p) => p,
         Err(RustowError::Fs(FsError::Canonicalize { path, source })) => {
             // Propagate canonicalization error for stow_dir
             return Err(RustowError::Fs(FsError::Canonicalize { path, source }));
-        }
-        Err(RustowError::Fs(FsError::NotFound(_))) |
-        Err(RustowError::Fs(FsError::NotADirectory(_))) => {
+        },
+        Err(RustowError::Fs(FsError::NotFound(_)))
+        | Err(RustowError::Fs(FsError::NotADirectory(_))) => {
             return Err(RustowError::Fs(FsError::Canonicalize {
                 path: stow_dir.to_path_buf(),
-                source: std::io::Error::new(std::io::ErrorKind::NotFound, "Stow directory cannot be canonicalized or is not a directory"),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Stow directory cannot be canonicalized or is not a directory",
+                ),
             }));
-        }
+        },
         Err(e) => return Err(e), // Other errors
     };
 
     // 3. Read the link's destination
     // read_link itself returns Err if not a symlink, but we've already checked.
-    let target_dest_path_from_link: PathBuf = match read_link(link_path) { // 型を明示
+    let target_dest_path_from_link: PathBuf = match read_link(link_path) {
+        // 型を明示
         Ok(p) => p,
         Err(RustowError::Fs(FsError::NotASymlink(_))) => return Ok(None), // Should be caught by is_symlink above
         Err(e) => return Err(e),
@@ -261,20 +292,27 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(Stri
         link_parent_dir.join(target_dest_path_from_link)
     };
 
-    let canonical_target_path = match canonicalize_path(&potentially_non_canonical_target_abs_path) {
+    let canonical_target_path = match canonicalize_path(&potentially_non_canonical_target_abs_path)
+    {
         Ok(p) => p,
         Err(RustowError::Fs(FsError::NotFound(_))) => {
             // Target not found directly, implies broken symlink if potentially_non_canonical_target_abs_path was derived from a link
             return Ok(None);
-        }
-        Err(RustowError::Fs(FsError::Canonicalize { path: errored_path, source })) => {
+        },
+        Err(RustowError::Fs(FsError::Canonicalize {
+            path: errored_path,
+            source,
+        })) => {
             if source.kind() == std::io::ErrorKind::NotFound {
                 // Canonicalization failed because target does not exist (broken symlink)
                 return Ok(None);
             }
             // Other canonicalization error, propagate it
-            return Err(RustowError::Fs(FsError::Canonicalize { path: errored_path, source }));
-        }
+            return Err(RustowError::Fs(FsError::Canonicalize {
+                path: errored_path,
+                source,
+            }));
+        },
         Err(e) => return Err(e), // Other errors (e.g., Io, Config, etc.)
     };
 
@@ -287,10 +325,12 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(Stri
     let path_relative_to_stow_dir = match canonical_target_path.strip_prefix(&canonical_stow_dir) {
         Ok(p) => p.to_path_buf(),
         Err(_) => {
-            return Err(crate::error::StowError::InvalidPackageStructure(
-                format!("Internal error: Failed to strip prefix for {:?} from {:?} after starts_with check", canonical_target_path, canonical_stow_dir)
-            ).into());
-        }
+            return Err(crate::error::StowError::InvalidPackageStructure(format!(
+                "Internal error: Failed to strip prefix for {:?} from {:?} after starts_with check",
+                canonical_target_path, canonical_stow_dir
+            ))
+            .into());
+        },
     };
 
     // 7. Extract package name and item path within package
@@ -302,23 +342,23 @@ pub fn is_stow_symlink(link_path: &Path, stow_dir: &Path) -> Result<Option<(Stri
             // The rest of the components form the item's path relative to the package dir.
             let item_path_in_package = components.as_path().to_path_buf();
             Ok(Some((package_name, item_path_in_package)))
-        }
+        },
         _ => {
             // Path relative to stow_dir is empty (target is stow_dir itself)
             // or starts with `.` or `..` (shouldn't happen with canonical paths)
             // or is a root dir (also shouldn't happen).
             // This means it's not pointing to an item *within a package* inside stow_dir.
             Ok(None)
-        }
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::fs::{self, File};
     use tempfile::tempdir;
-    use std::collections::HashSet;
 
     // ... existing test_path_exists functions ...
 
@@ -374,7 +414,7 @@ mod tests {
         assert!(!is_directory(&symlink_path));
     }
 
-     #[test]
+    #[test]
     fn test_is_directory_for_broken_symlink() {
         let dir = tempdir().unwrap();
         let non_existing_target = dir.path().join("non_existing_target_for_isdir");
@@ -471,9 +511,16 @@ mod tests {
         let link_path = dir.path().join("link_to_sym_dir");
 
         let result = create_symlink(&link_path, &target_dir_path);
-        assert!(result.is_ok(), "create_symlink failed for directory: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "create_symlink failed for directory: {:?}",
+            result.err()
+        );
         assert!(link_path.exists(), "Link path to directory should exist");
-        assert!(is_symlink(&link_path), "Path to directory should be a symlink");
+        assert!(
+            is_symlink(&link_path),
+            "Path to directory should be a symlink"
+        );
         let read_target = fs::read_link(&link_path).unwrap();
         assert_eq!(read_target, target_dir_path);
     }
@@ -485,15 +532,26 @@ mod tests {
         let link_path = dir.path().join("link_to_non_existing_sym");
 
         let result = create_symlink(&link_path, &non_existing_target_path);
-        assert!(result.is_ok(), "create_symlink to non-existing target failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "create_symlink to non-existing target failed: {:?}",
+            result.err()
+        );
 
         // Instead of asserting link_path.exists(), which might be problematic for broken symlinks on some platforms/setups,
         // we assert that it is a symlink and that read_link works as expected.
         // If create_symlink was successful, the link was created.
-        assert!(is_symlink(&link_path), "Path should be a symlink after creation, even if broken.");
+        assert!(
+            is_symlink(&link_path),
+            "Path should be a symlink after creation, even if broken."
+        );
 
         let read_target_result = fs::read_link(&link_path);
-        assert!(read_target_result.is_ok(), "Failed to read link even if it is broken: {:?}", read_target_result.err());
+        assert!(
+            read_target_result.is_ok(),
+            "Failed to read link even if it is broken: {:?}",
+            read_target_result.err()
+        );
         assert_eq!(read_target_result.unwrap(), non_existing_target_path);
     }
 
@@ -509,10 +567,14 @@ mod tests {
         let result = create_symlink(&link_path, &target_file_path);
         assert!(result.is_err());
         match result {
-            Err(RustowError::Fs(FsError::CreateSymlink { link_path: lp, target_path: tp, .. })) => {
+            Err(RustowError::Fs(FsError::CreateSymlink {
+                link_path: lp,
+                target_path: tp,
+                ..
+            })) => {
                 assert_eq!(lp, link_path);
                 assert_eq!(tp, target_file_path);
-            }
+            },
             _ => panic!("Expected FsError::CreateSymlink, got {:?}", result),
         }
     }
@@ -529,10 +591,14 @@ mod tests {
         let result = create_symlink(&link_path, &target_file_path);
         assert!(result.is_err());
         match result {
-            Err(RustowError::Fs(FsError::CreateSymlink { link_path: lp, target_path: tp, .. })) => {
+            Err(RustowError::Fs(FsError::CreateSymlink {
+                link_path: lp,
+                target_path: tp,
+                ..
+            })) => {
                 assert_eq!(lp, link_path);
                 assert_eq!(tp, target_file_path);
-            }
+            },
             _ => panic!("Expected FsError::CreateSymlink, got {:?}", result),
         }
     }
@@ -559,7 +625,11 @@ mod tests {
         create_symlink(&link, &target_dir).unwrap();
 
         let result = read_link(&link);
-        assert!(result.is_ok(), "read_link for dir target failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "read_link for dir target failed: {:?}",
+            result.err()
+        );
         assert_eq!(result.unwrap(), target_dir);
     }
 
@@ -571,7 +641,11 @@ mod tests {
         create_symlink(&link, &non_existent_target).unwrap();
 
         let result = read_link(&link);
-        assert!(result.is_ok(), "read_link for broken link failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "read_link for broken link failed: {:?}",
+            result.err()
+        );
         assert_eq!(result.unwrap(), non_existent_target);
     }
 
@@ -612,7 +686,10 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(RustowError::Fs(FsError::NotASymlink(p))) => assert_eq!(p, non_existent_path),
-            _ => panic!("Expected FsError::NotASymlink for non-existent path, got {:?}", result),
+            _ => panic!(
+                "Expected FsError::NotASymlink for non-existent path, got {:?}",
+                result
+            ),
         }
     }
 
@@ -640,7 +717,11 @@ mod tests {
         assert!(path_exists(&link) && is_symlink(&link));
 
         let result = delete_symlink(&link);
-        assert!(result.is_ok(), "delete_symlink for dir link failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "delete_symlink for dir link failed: {:?}",
+            result.err()
+        );
         assert!(!path_exists(&link));
     }
 
@@ -653,7 +734,11 @@ mod tests {
         assert!(is_symlink(&link)); // For broken links, exists() can be iffy, but is_symlink() should be true.
 
         let result = delete_symlink(&link);
-        assert!(result.is_ok(), "delete_symlink for broken link failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "delete_symlink for broken link failed: {:?}",
+            result.err()
+        );
         assert!(!path_exists(&link));
     }
 
@@ -696,7 +781,10 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(RustowError::Fs(FsError::NotFound(p))) => assert_eq!(p, non_existent_path),
-            _ => panic!("Expected FsError::NotFound for non-existent path, got {:?}", result),
+            _ => panic!(
+                "Expected FsError::NotFound for non-existent path, got {:?}",
+                result
+            ),
         }
     }
 
@@ -718,7 +806,11 @@ mod tests {
         let new_nested_dir_path = base_dir.path().join("nested1/nested2/nested3");
 
         let result = create_dir_all(&new_nested_dir_path);
-        assert!(result.is_ok(), "create_dir_all for nested dirs failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "create_dir_all for nested dirs failed: {:?}",
+            result.err()
+        );
         assert!(path_exists(&new_nested_dir_path));
         assert!(is_directory(&new_nested_dir_path));
         assert!(is_directory(&base_dir.path().join("nested1/nested2")));
@@ -732,7 +824,11 @@ mod tests {
         fs::create_dir(&existing_dir_path).unwrap();
 
         let result = create_dir_all(&existing_dir_path);
-        assert!(result.is_ok(), "create_dir_all for existing dir failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "create_dir_all for existing dir failed: {:?}",
+            result.err()
+        );
         assert!(path_exists(&existing_dir_path));
         assert!(is_directory(&existing_dir_path));
     }
@@ -744,11 +840,14 @@ mod tests {
         File::create(&existing_file_path).unwrap();
 
         let result = create_dir_all(&existing_file_path);
-        assert!(result.is_err(), "Expected create_dir_all to fail for existing file");
+        assert!(
+            result.is_err(),
+            "Expected create_dir_all to fail for existing file"
+        );
         match result {
             Err(RustowError::Fs(FsError::CreateDirectory { path, .. })) => {
                 assert_eq!(path, existing_file_path);
-            }
+            },
             _ => panic!("Expected FsError::CreateDirectory, got {:?}", result),
         }
         assert!(path_exists(&existing_file_path));
@@ -763,7 +862,11 @@ mod tests {
         fs::create_dir(&empty_dir_path).unwrap();
 
         let result = delete_empty_dir(&empty_dir_path);
-        assert!(result.is_ok(), "delete_empty_dir failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "delete_empty_dir failed: {:?}",
+            result.err()
+        );
         assert!(!path_exists(&empty_dir_path));
     }
 
@@ -811,8 +914,11 @@ mod tests {
                 // For now, checking the error kind is enough if it matches the setup.
                 // However, the custom message "Directory not empty" is more robust to check here.
                 assert_eq!(source.to_string(), "Directory not empty");
-            }
-            _ => panic!("Expected FsError::DeleteDirectory for not empty, got {:?}", result),
+            },
+            _ => panic!(
+                "Expected FsError::DeleteDirectory for not empty, got {:?}",
+                result
+            ),
         }
         assert!(path_exists(&non_empty_dir_path)); // Ensure the directory was not deleted
     }
@@ -829,7 +935,10 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(RustowError::Fs(FsError::NotADirectory(p))) => assert_eq!(p, symlink_path),
-            _ => panic!("Expected FsError::NotADirectory for symlink, got {:?}", result),
+            _ => panic!(
+                "Expected FsError::NotADirectory for symlink, got {:?}",
+                result
+            ),
         }
         assert!(path_exists(&symlink_path)); // Ensure the symlink was not deleted
         assert!(path_exists(&target_empty_dir)); // Ensure the target dir was not deleted
@@ -844,7 +953,11 @@ mod tests {
         File::create(&file_path).unwrap();
 
         let result = canonicalize_path(&file_path);
-        assert!(result.is_ok(), "canonicalize_path failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "canonicalize_path failed: {:?}",
+            result.err()
+        );
         let canonicalized = result.unwrap();
         assert!(canonicalized.is_absolute());
         assert!(canonicalized.ends_with(file_name));
@@ -863,7 +976,11 @@ mod tests {
 
         let path_with_dot = dir.path().join(".").join(sub_dir_name).join(file_name);
         let result = canonicalize_path(&path_with_dot);
-        assert!(result.is_ok(), "canonicalize_path with . failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "canonicalize_path with . failed: {:?}",
+            result.err()
+        );
         let canonicalized = result.unwrap();
         assert_eq!(canonicalized, std::fs::canonicalize(&file_path).unwrap());
     }
@@ -884,11 +1001,21 @@ mod tests {
         File::create(&file_in_other_sub_dir_path).unwrap();
 
         // Path like /tmp/random_dir/sub_dotdot/../other_sub/test_file_dotdot.txt
-        let path_with_dot_dot = sub_dir_path.join("..").join(other_sub_dir_name).join(file_name);
+        let path_with_dot_dot = sub_dir_path
+            .join("..")
+            .join(other_sub_dir_name)
+            .join(file_name);
         let result = canonicalize_path(&path_with_dot_dot);
-        assert!(result.is_ok(), "canonicalize_path with .. failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "canonicalize_path with .. failed: {:?}",
+            result.err()
+        );
         let canonicalized = result.unwrap();
-        assert_eq!(canonicalized, std::fs::canonicalize(&file_in_other_sub_dir_path).unwrap());
+        assert_eq!(
+            canonicalized,
+            std::fs::canonicalize(&file_in_other_sub_dir_path).unwrap()
+        );
     }
 
     #[test]
@@ -901,8 +1028,11 @@ mod tests {
         match result {
             Err(RustowError::Fs(FsError::Canonicalize { path, .. })) => {
                 assert_eq!(path, non_existent_path);
-            }
-            _ => panic!("Expected FsError::Canonicalize for non-existent path, got {:?}", result),
+            },
+            _ => panic!(
+                "Expected FsError::Canonicalize for non-existent path, got {:?}",
+                result
+            ),
         }
     }
 
@@ -918,7 +1048,11 @@ mod tests {
         create_symlink(&link_path, &target_file_path).unwrap();
 
         let result = canonicalize_path(&link_path);
-        assert!(result.is_ok(), "canonicalize_path for symlink failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "canonicalize_path for symlink failed: {:?}",
+            result.err()
+        );
         let canonicalized_link = result.unwrap();
         let canonicalized_target = std::fs::canonicalize(&target_file_path).unwrap();
         assert_eq!(canonicalized_link, canonicalized_target);
@@ -933,12 +1067,18 @@ mod tests {
         create_symlink(&broken_link_path, &non_existent_target).unwrap();
 
         let result = canonicalize_path(&broken_link_path);
-        assert!(result.is_err(), "canonicalize_path should fail for broken symlink");
+        assert!(
+            result.is_err(),
+            "canonicalize_path should fail for broken symlink"
+        );
         match result {
             Err(RustowError::Fs(FsError::Canonicalize { path, .. })) => {
                 assert_eq!(path, broken_link_path);
-            }
-            _ => panic!("Expected FsError::Canonicalize for broken symlink, got {:?}", result),
+            },
+            _ => panic!(
+                "Expected FsError::Canonicalize for broken symlink, got {:?}",
+                result
+            ),
         }
     }
 
@@ -973,7 +1113,11 @@ mod tests {
         create_nested_structure(package_dir.path());
 
         let result = walk_package_dir(package_dir.path());
-        assert!(result.is_ok(), "walk_package_dir failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "walk_package_dir failed: {:?}",
+            result.err()
+        );
         let mut items = result.unwrap();
         items.sort_by_key(|item| item.sort_key());
 
@@ -981,47 +1125,53 @@ mod tests {
             RawStowItem {
                 absolute_path: package_dir.path().join(".dotfile"),
                 package_relative_path: PathBuf::from(".dotfile"),
-                item_type: RawStowItemType::File
+                item_type: RawStowItemType::File,
             },
             RawStowItem {
                 absolute_path: package_dir.path().join("dir1"),
                 package_relative_path: PathBuf::from("dir1"),
-                item_type: RawStowItemType::Directory
+                item_type: RawStowItemType::Directory,
             },
             RawStowItem {
                 absolute_path: package_dir.path().join("dir1/file2.txt"),
                 package_relative_path: PathBuf::from("dir1/file2.txt"),
-                item_type: RawStowItemType::File
+                item_type: RawStowItemType::File,
             },
             RawStowItem {
                 absolute_path: package_dir.path().join("dir1/sub_dir1"),
                 package_relative_path: PathBuf::from("dir1/sub_dir1"),
-                item_type: RawStowItemType::Directory
+                item_type: RawStowItemType::Directory,
             },
             RawStowItem {
                 absolute_path: package_dir.path().join("dir1/sub_dir1/file3.txt"),
                 package_relative_path: PathBuf::from("dir1/sub_dir1/file3.txt"),
-                item_type: RawStowItemType::File
+                item_type: RawStowItemType::File,
             },
             RawStowItem {
                 absolute_path: package_dir.path().join("dir2"),
                 package_relative_path: PathBuf::from("dir2"),
-                item_type: RawStowItemType::Directory
+                item_type: RawStowItemType::Directory,
             },
             RawStowItem {
                 absolute_path: package_dir.path().join("file1.txt"),
                 package_relative_path: PathBuf::from("file1.txt"),
-                item_type: RawStowItemType::File
+                item_type: RawStowItemType::File,
             },
             RawStowItem {
                 absolute_path: package_dir.path().join("link_to_file1"),
                 package_relative_path: PathBuf::from("link_to_file1"),
-                item_type: RawStowItemType::Symlink
+                item_type: RawStowItemType::Symlink,
             },
         ];
         expected_items.sort_by_key(|item| item.sort_key());
 
-        assert_eq!(items.len(), expected_items.len(), "Mismatch in number of items. Got: {:?}, Expected: {:?}", items, expected_items);
+        assert_eq!(
+            items.len(),
+            expected_items.len(),
+            "Mismatch in number of items. Got: {:?}, Expected: {:?}",
+            items,
+            expected_items
+        );
 
         // Using HashSet for comparison because WalkDir doesn't guarantee order across all platforms for all items,
         // even though we sort by relative path. The absolute paths might subtly differ in intermediate steps
@@ -1036,7 +1186,11 @@ mod tests {
     fn test_walk_package_dir_empty_dir() {
         let package_dir = tempdir().unwrap();
         let result = walk_package_dir(package_dir.path());
-        assert!(result.is_ok(), "walk_package_dir for empty dir failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "walk_package_dir for empty dir failed: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().is_empty());
     }
 
@@ -1078,7 +1232,11 @@ mod tests {
         create_symlink(&symlink_to_package_path, &target_package_dir).unwrap();
 
         let result = walk_package_dir(&symlink_to_package_path);
-        assert!(result.is_ok(), "walk_package_dir for symlinked package dir failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "walk_package_dir for symlinked package dir failed: {:?}",
+            result.err()
+        );
         let mut items = result.unwrap();
         items.sort_by_key(|item| item.sort_key());
 
@@ -1111,18 +1269,24 @@ mod tests {
             RawStowItem {
                 absolute_path: target_package_dir.join("some_file_in_target.txt"), // Actual path
                 package_relative_path: PathBuf::from("some_file_in_target.txt"), // Relative to symlink
-                item_type: RawStowItemType::File
+                item_type: RawStowItemType::File,
             },
             RawStowItem {
                 absolute_path: target_package_dir.join("some_subdir_in_target"), // Actual path
                 package_relative_path: PathBuf::from("some_subdir_in_target"), // Relative to symlink
-                item_type: RawStowItemType::Directory
+                item_type: RawStowItemType::Directory,
             },
         ];
         // We only compare package_relative_path and item_type for this test,
         // as absolute_path depends on WalkDir's symlink following behavior which is on by default.
-        let items_simplified: Vec<_> = items.iter().map(|i| (&i.package_relative_path, &i.item_type)).collect();
-        let expected_simplified: Vec<_> = expected_items_adjusted_abs_path.iter().map(|i| (&i.package_relative_path, &i.item_type)).collect();
+        let items_simplified: Vec<_> = items
+            .iter()
+            .map(|i| (&i.package_relative_path, &i.item_type))
+            .collect();
+        let expected_simplified: Vec<_> = expected_items_adjusted_abs_path
+            .iter()
+            .map(|i| (&i.package_relative_path, &i.item_type))
+            .collect();
 
         assert_eq!(items_simplified.len(), 2);
         assert_eq!(items_simplified, expected_simplified);
@@ -1175,7 +1339,9 @@ mod tests {
         let result = is_stow_symlink(&link_path, &non_existent_stow_dir);
         assert!(result.is_err());
         match result.err().unwrap() {
-            RustowError::Fs(FsError::Canonicalize { path, .. }) => assert_eq!(path, non_existent_stow_dir),
+            RustowError::Fs(FsError::Canonicalize { path, .. }) => {
+                assert_eq!(path, non_existent_stow_dir)
+            },
             e => panic!("Unexpected error type: {:?}", e),
         }
     }
@@ -1212,7 +1378,10 @@ mod tests {
 
         let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::new();
-        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
+        assert_eq!(
+            is_stow_symlink(&link_path, &stow_dir).unwrap(),
+            Some((expected_package_name, expected_item_path))
+        );
     }
 
     #[test]
@@ -1224,7 +1393,10 @@ mod tests {
 
         let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::from("item.txt");
-        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
+        assert_eq!(
+            is_stow_symlink(&link_path, &stow_dir).unwrap(),
+            Some((expected_package_name, expected_item_path))
+        );
     }
 
     #[test]
@@ -1243,7 +1415,10 @@ mod tests {
 
         let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::from("sub").join(nested_item_name);
-        assert_eq!(is_stow_symlink(&link_path, &stow_dir).unwrap(), Some((expected_package_name, expected_item_path)));
+        assert_eq!(
+            is_stow_symlink(&link_path, &stow_dir).unwrap(),
+            Some((expected_package_name, expected_item_path))
+        );
     }
 
     #[test]
@@ -1266,9 +1441,12 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs as unix_fs;
-            unix_fs::symlink(&relative_target, &link_path).unwrap_or_else(|e|
-                panic!("Failed to create symlink for relative test (unix): {:?}, from {:?} to {:?}", e, relative_target, link_path)
-            );
+            unix_fs::symlink(&relative_target, &link_path).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to create symlink for relative test (unix): {:?}, from {:?} to {:?}",
+                    e, relative_target, link_path
+                )
+            });
         }
         #[cfg(windows)]
         {
@@ -1281,11 +1459,14 @@ mod tests {
             // if it's not an absolute path in some contexts.
             // The most reliable way to test `is_stow_symlink`'s resolution logic is to ensure `read_link` returns a relative path.
             // So, we *must* create it with a relative path string.
-            windows_fs::symlink_file(&relative_target, &link_path).unwrap_or_else(|e|
-                panic!("Failed to create symlink for relative test (windows): {:?}, from {:?} to {:?}", e, relative_target, link_path)
-            );
+            windows_fs::symlink_file(&relative_target, &link_path).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to create symlink for relative test (windows): {:?}, from {:?} to {:?}",
+                    e, relative_target, link_path
+                )
+            });
         }
-         #[cfg(not(any(unix, windows)))]
+        #[cfg(not(any(unix, windows)))]
         {
             eprintln!("Skipping relative symlink test on this platform.");
             return;
@@ -1295,7 +1476,9 @@ mod tests {
         let expected_item_path_in_package = PathBuf::from(item_name);
         let result = is_stow_symlink(&link_path, &stow_dir_abs);
         assert!(result.is_ok(), "is_stow_symlink failed: {:?}", result.err());
-        assert_eq!(result.unwrap(), Some((expected_package_name, expected_item_path_in_package)));
+        assert_eq!(
+            result.unwrap(),
+            Some((expected_package_name, expected_item_path_in_package))
+        );
     }
 }
-
