@@ -12,26 +12,11 @@ too-many-lines-threshold = 100
 # Maximum arguments for functions
 too-many-arguments-threshold = 7
 
-# Maximum struct fields
-struct-fields-threshold = 8
-
 # Literal representation threshold
 literal-representation-threshold = 10
 
 # Enum variant name threshold
 enum-variant-name-threshold = 3
 
-# Trivial bounds
-trivial-bounds = true
-
 # Avoid breaking exported API
 avoid-breaking-exported-api = true
-
-# Single char mathematic operators
-single-char-mathematic-operators = true
-
-# Disallow uppercase bools
-disallow-uppercase-bools = true
-
-# Disallow debug assertions in release
-disallow-debug-assertions = true 
