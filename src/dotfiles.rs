@@ -2,11 +2,11 @@
 // Placeholder for the process_item_name function
 pub fn process_item_name(item_name: &str, is_dotfiles_enabled: bool) -> String {
     if is_dotfiles_enabled {
-        if item_name.starts_with("dot-") {
+        if let Some(stripped) = item_name.strip_prefix("dot-") {
             // "dot-" を "." に置き換える
             // "dot-" のみの場合は "." になる
             // "dot-foo" の場合は ".foo" になる
-            format!(".{}", &item_name[4..])
+            format!(".{}", stripped)
         } else {
             item_name.to_string()
         }

@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn test_basic_stow_command() {
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear
-        let args = Args::parse_from(&["rustow", "mypackage"]);
+        let args = Args::parse_from(["rustow", "mypackage"]);
         assert_eq!(args.packages, vec!["mypackage"]);
         assert!(!args.stow); // explicitly set to false by default
         assert!(!args.delete);
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_delete_option() {
-        let args = Args::parse_from(&["rustow", "-D", "mypackage"]);
+        let args = Args::parse_from(["rustow", "-D", "mypackage"]);
         assert!(args.delete);
         assert!(!args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_restow_option() {
-        let args = Args::parse_from(&["rustow", "-R", "mypackage"]);
+        let args = Args::parse_from(["rustow", "-R", "mypackage"]);
         assert!(args.restow);
         assert!(!args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_target_and_dir_options() {
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-t",
             "/target/dir",
@@ -145,31 +145,31 @@ mod tests {
 
     #[test]
     fn test_verbose_option() {
-        let args = Args::parse_from(&["rustow", "-vvv", "mypackage"]);
+        let args = Args::parse_from(["rustow", "-vvv", "mypackage"]);
         assert_eq!(args.verbose, 3);
-        let args_single_v = Args::parse_from(&["rustow", "-v", "mypackage"]);
+        let args_single_v = Args::parse_from(["rustow", "-v", "mypackage"]);
         assert_eq!(args_single_v.verbose, 1);
     }
 
     #[test]
     fn test_multiple_packages() {
-        let args = Args::parse_from(&["rustow", "pkg1", "pkg2", "pkg3"]);
+        let args = Args::parse_from(["rustow", "pkg1", "pkg2", "pkg3"]);
         assert_eq!(args.packages, vec!["pkg1", "pkg2", "pkg3"]);
     }
 
     #[test]
     fn test_simulate_option() {
-        let args = Args::parse_from(&["rustow", "-n", "mypackage"]);
+        let args = Args::parse_from(["rustow", "-n", "mypackage"]);
         assert!(args.simulate);
-        let args_long = Args::parse_from(&["rustow", "--simulate", "mypackage"]);
+        let args_long = Args::parse_from(["rustow", "--simulate", "mypackage"]);
         assert!(args_long.simulate);
-        let args_alias = Args::parse_from(&["rustow", "--no", "mypackage"]);
+        let args_alias = Args::parse_from(["rustow", "--no", "mypackage"]);
         assert!(args_alias.simulate);
     }
 
     #[test]
     fn test_override_defer_options() {
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "--override=foo",
             "--override=bar",
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_all_boolean_flags() {
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "--adopt",
             "--no-folding",
@@ -205,7 +205,7 @@ mod tests {
         }
 
         // Test that when no -d option is provided, dir is read from STOW_DIR env var
-        let args = Args::parse_from(&["rustow", "mypackage"]);
+        let args = Args::parse_from(["rustow", "mypackage"]);
         assert_eq!(args.dir, Some(PathBuf::from("/env/stow/path")));
     }
 
@@ -220,7 +220,7 @@ mod tests {
         );
 
         // Test that when no -d option is provided and no STOW_DIR env var, dir is None
-        let args = Args::parse_from(&["rustow", "mypackage"]);
+        let args = Args::parse_from(["rustow", "mypackage"]);
         assert!(
             args.dir.is_none(),
             "dir should be None when no STOW_DIR env var and no -d option"
@@ -233,34 +233,34 @@ mod tests {
         unsafe {
             std::env::set_var("STOW_DIR", "/env/stow/path");
         }
-        let args = Args::parse_from(&["rustow", "-d", "/cmd/stow/path", "mypackage"]);
+        let args = Args::parse_from(["rustow", "-d", "/cmd/stow/path", "mypackage"]);
         assert_eq!(args.dir, Some(PathBuf::from("/cmd/stow/path")));
     }
 
     #[test]
     fn test_stow_option_short() {
-        let args = Args::parse_from(&["rustow", "-S", "mypackage"]);
+        let args = Args::parse_from(["rustow", "-S", "mypackage"]);
         assert!(args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 
     #[test]
     fn test_stow_option_long() {
-        let args = Args::parse_from(&["rustow", "--stow", "mypackage"]);
+        let args = Args::parse_from(["rustow", "--stow", "mypackage"]);
         assert!(args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 
     #[test]
     fn test_ignore_option_single() {
-        let args = Args::parse_from(&["rustow", "--ignore=\\.git", "mypackage"]);
+        let args = Args::parse_from(["rustow", "--ignore=\\.git", "mypackage"]);
         assert_eq!(args.ignore_patterns, vec!["\\.git"]);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 
     #[test]
     fn test_ignore_option_multiple() {
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "--ignore=\\.git",
             "--ignore=.*~",
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_stow_with_ignore_combination() {
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "rustow",
             "-S",
             "--ignore=\\.git",

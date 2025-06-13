@@ -1240,7 +1240,7 @@ mod tests {
         let mut items = result.unwrap();
         items.sort_by_key(|item| item.sort_key());
 
-        let mut expected_items = vec![
+        let mut expected_items = [
             RawStowItem {
                 // Absolute paths will be inside the symlink path initially from WalkDir if it resolves it,
                 // or inside the target_package_dir if WalkDir is given the resolved path.
@@ -1265,7 +1265,7 @@ mod tests {
         // If strip_prefix uses the original symlink path, the relative paths are correct.
         // The absolute paths in RawStowItem should reflect the actual location on disk.
 
-        let expected_items_adjusted_abs_path = vec![
+        let expected_items_adjusted_abs_path = [
             RawStowItem {
                 absolute_path: target_package_dir.join("some_file_in_target.txt"), // Actual path
                 package_relative_path: PathBuf::from("some_file_in_target.txt"), // Relative to symlink

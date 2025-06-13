@@ -286,9 +286,7 @@ mod tests {
             target_path: PathBuf::from("/target"),
             source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
         };
-        let expected_error_message = format!(
-            "Failed to create symlink from \"/source\" to \"/target\": Custom {{ kind: PermissionDenied, error: \"permission denied\" }}"
-        );
+        let expected_error_message = "Failed to create symlink from \"/source\" to \"/target\": Custom { kind: PermissionDenied, error: \"permission denied\" }".to_string();
         assert_eq!(err.to_string(), expected_error_message);
     }
 

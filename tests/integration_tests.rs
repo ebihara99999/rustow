@@ -113,7 +113,7 @@ fn test_basic_stow_operation_without_dotfiles() {
             .original_action
             .target_path
             .file_name()
-            .map_or(false, |name| name == "dot-bashrc")
+            .is_some_and(|name| name == "dot-bashrc")
     });
     assert!(
         dot_bashrc_action_exists,
@@ -126,7 +126,7 @@ fn test_basic_stow_operation_without_dotfiles() {
             .original_action
             .target_path
             .file_name()
-            .map_or(false, |name| name == "dot-config")
+            .is_some_and(|name| name == "dot-config")
     });
     assert!(
         dot_config_action_exists,
@@ -139,7 +139,7 @@ fn test_basic_stow_operation_without_dotfiles() {
             .original_action
             .target_path
             .file_name()
-            .map_or(false, |name| name == "README.md")
+            .is_some_and(|name| name == "README.md")
     });
     assert!(
         !readme_action_exists,
@@ -151,7 +151,7 @@ fn test_basic_stow_operation_without_dotfiles() {
             .original_action
             .target_path
             .file_name()
-            .map_or(false, |name| name == "LICENSE")
+            .is_some_and(|name| name == "LICENSE")
     });
     assert!(
         !license_action_exists,
@@ -193,7 +193,7 @@ fn test_basic_stow_operation_with_dotfiles() {
             .original_action
             .target_path
             .file_name()
-            .map_or(false, |name| name == ".bashrc")
+            .is_some_and(|name| name == ".bashrc")
     });
     assert!(
         bashrc_action_exists,
@@ -206,7 +206,7 @@ fn test_basic_stow_operation_with_dotfiles() {
             .original_action
             .target_path
             .file_name()
-            .map_or(false, |name| name == ".config")
+            .is_some_and(|name| name == ".config")
     });
     assert!(
         config_action_exists,
@@ -442,9 +442,7 @@ fn test_multiple_packages_stow() {
             .original_action
             .source_item
             .as_ref()
-            .map_or(false, |item| {
-                item.source_path.to_string_lossy().contains(package1_name)
-            })
+            .is_some_and(|item| item.source_path.to_string_lossy().contains(package1_name))
             && report.original_action.target_path.ends_with(".bashrc")
     });
     assert!(p1_bashrc_exists, "Expected .bashrc from package1");
@@ -454,9 +452,7 @@ fn test_multiple_packages_stow() {
             .original_action
             .source_item
             .as_ref()
-            .map_or(false, |item| {
-                item.source_path.to_string_lossy().contains(package2_name)
-            })
+            .is_some_and(|item| item.source_path.to_string_lossy().contains(package2_name))
             && report.original_action.target_path.ends_with(".bashrc")
     });
     assert!(p2_bashrc_exists, "Expected .bashrc from package2");
@@ -571,13 +567,10 @@ fn test_dotfiles_processing_edge_cases() {
     let report_pkg1_dot_file: &rustow::stow::TargetActionReport = actions
         .iter()
         .find(|r| {
-            r.original_action
-                .source_item
-                .as_ref()
-                .map_or(false, |item| {
-                    item.package_relative_path == Path::new("dot-file")
-                        && item.target_name_after_dotfiles_processing == Path::new(".file")
-                })
+            r.original_action.source_item.as_ref().is_some_and(|item| {
+                item.package_relative_path == Path::new("dot-file")
+                    && item.target_name_after_dotfiles_processing == Path::new(".file")
+            })
         })
         .expect("Report for package1/dot-file (target: .file) not found");
 
@@ -612,13 +605,10 @@ fn test_dotfiles_processing_edge_cases() {
     let report_pkg2_dot_foo_bar: &rustow::stow::TargetActionReport = actions
         .iter()
         .find(|r| {
-            r.original_action
-                .source_item
-                .as_ref()
-                .map_or(false, |item| {
-                    item.package_relative_path == Path::new("dot-foo-bar") && // Check original path from package
+            r.original_action.source_item.as_ref().is_some_and(|item| {
+                item.package_relative_path == Path::new("dot-foo-bar") && // Check original path from package
             item.target_name_after_dotfiles_processing == Path::new(".foo-bar")
-                })
+            })
         })
         .expect("Report for package2/dot-foo-bar (target: .foo-bar) not found");
 
@@ -649,13 +639,10 @@ fn test_dotfiles_processing_edge_cases() {
     let report_pkg3_dot_dir_only: &rustow::stow::TargetActionReport = actions
         .iter()
         .find(|r| {
-            r.original_action
-                .source_item
-                .as_ref()
-                .map_or(false, |item| {
-                    item.package_relative_path == Path::new("dot-dirOnly")
-                        && item.target_name_after_dotfiles_processing == Path::new(".dirOnly")
-                })
+            r.original_action.source_item.as_ref().is_some_and(|item| {
+                item.package_relative_path == Path::new("dot-dirOnly")
+                    && item.target_name_after_dotfiles_processing == Path::new(".dirOnly")
+            })
         })
         .expect("Report for package3/dot-dirOnly (target: .dirOnly) not found");
 
@@ -685,7 +672,7 @@ fn test_dotfiles_processing_edge_cases() {
 
     // Verify package3: "dot-dirOnly/some_file.txt" -> ".dirOnly/some_file.txt"
     let report_pkg3_nested_file: &rustow::stow::TargetActionReport = actions.iter().find(|r| {
-        r.original_action.source_item.as_ref().map_or(false, |item| {
+        r.original_action.source_item.as_ref().is_some_and(|item| {
             item.package_relative_path == Path::new("dot-dirOnly/some_file.txt") &&
             item.target_name_after_dotfiles_processing == Path::new(".dirOnly/some_file.txt")
         })
@@ -722,14 +709,11 @@ fn test_dotfiles_processing_edge_cases() {
     let report_pkg4_nodotprefix_file: &rustow::stow::TargetActionReport = actions
         .iter()
         .find(|r| {
-            r.original_action
-                .source_item
-                .as_ref()
-                .map_or(false, |item| {
-                    item.package_relative_path == Path::new("nodotprefix")
-                        && item.target_name_after_dotfiles_processing == Path::new("nodotprefix")
-                        && item.item_type == StowItemType::File // Ensure we are checking the file from package4
-                })
+            r.original_action.source_item.as_ref().is_some_and(|item| {
+                item.package_relative_path == Path::new("nodotprefix")
+                    && item.target_name_after_dotfiles_processing == Path::new("nodotprefix")
+                    && item.item_type == StowItemType::File // Ensure we are checking the file from package4
+            })
         })
         .expect("Report for package4/nodotprefix (target: nodotprefix) not found");
 
@@ -780,12 +764,12 @@ fn test_dotfiles_processing_edge_cases() {
     assert!(
         !expected_target_pkg4_nodotprefix_file.exists()
             || !fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file)
-                .map_or(false, |m| m.file_type().is_symlink()),
+                .is_ok_and(|m| m.file_type().is_symlink()),
         "Target nodotprefix for package4 SHOULD NOT be a symlink due to conflict. Current state: exists={}, is_symlink={}",
         expected_target_pkg4_nodotprefix_file.exists(),
         expected_target_pkg4_nodotprefix_file.exists()
             && fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file)
-                .map_or(false, |m| m.file_type().is_symlink())
+                .is_ok_and(|m| m.file_type().is_symlink())
     );
 
     // Verify package5: "nodotprefix/file.txt" -> "nodotprefix/file.txt"
@@ -793,14 +777,11 @@ fn test_dotfiles_processing_edge_cases() {
     let report_pkg5_nodotprefix_dir: &rustow::stow::TargetActionReport = actions
         .iter()
         .find(|r| {
-            r.original_action
-                .source_item
-                .as_ref()
-                .map_or(false, |item| {
-                    item.package_relative_path == Path::new("nodotprefix")
-                        && item.target_name_after_dotfiles_processing == Path::new("nodotprefix")
-                        && item.item_type == StowItemType::Directory
-                })
+            r.original_action.source_item.as_ref().is_some_and(|item| {
+                item.package_relative_path == Path::new("nodotprefix")
+                    && item.target_name_after_dotfiles_processing == Path::new("nodotprefix")
+                    && item.item_type == StowItemType::Directory
+            })
         })
         .expect("Report for package5/nodotprefix (directory) not found");
 
@@ -831,14 +812,11 @@ fn test_dotfiles_processing_edge_cases() {
     let report_pkg5_nested_file: &rustow::stow::TargetActionReport = actions
         .iter()
         .find(|r| {
-            r.original_action
-                .source_item
-                .as_ref()
-                .map_or(false, |item| {
-                    item.package_relative_path == Path::new("nodotprefix/file.txt")
-                        && item.target_name_after_dotfiles_processing
-                            == Path::new("nodotprefix/file.txt")
-                })
+            r.original_action.source_item.as_ref().is_some_and(|item| {
+                item.package_relative_path == Path::new("nodotprefix/file.txt")
+                    && item.target_name_after_dotfiles_processing
+                        == Path::new("nodotprefix/file.txt")
+            })
         })
         .expect("Report for package5/nodotprefix/file.txt not found");
 
@@ -1011,7 +989,7 @@ fn test_plan_actions_basic_creation_and_conflict() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == OsStr::new("file_to_link.txt"))
+                .is_some_and(|name| name == OsStr::new("file_to_link.txt"))
         });
     assert!(
         action_file_to_link.is_some(),
@@ -1036,7 +1014,7 @@ fn test_plan_actions_basic_creation_and_conflict() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == OsStr::new("dir_to_create"))
+                .is_some_and(|name| name == OsStr::new("dir_to_create"))
         });
     assert!(
         action_dir_to_create.is_some(),
@@ -1103,7 +1081,7 @@ fn test_plan_actions_basic_creation_and_conflict() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == OsStr::new("file_for_conflict.txt"))
+                .is_some_and(|name| name == OsStr::new("file_for_conflict.txt"))
         });
     assert!(
         action_conflicting_file.is_some(),
@@ -1165,7 +1143,7 @@ fn test_plan_actions_basic_creation_and_conflict() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == OsStr::new("dir_for_conflict"))
+                .is_some_and(|name| name == OsStr::new("dir_for_conflict"))
         });
     assert!(
         action_conflicting_dir.is_some(),
@@ -1855,10 +1833,8 @@ fn test_restow_mode_basic() {
     // Debug: Check package directory contents after modification
     println!("Files in package_dir/bin after modification:");
     if let Ok(entries) = fs::read_dir(package_dir.join("bin")) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                println!("  {:?}", entry.path());
-            }
+        for entry in entries.flatten() {
+            println!("  {:?}", entry.path());
         }
     }
 
@@ -1884,18 +1860,14 @@ fn test_restow_mode_basic() {
     // Debug: Check what files exist in target directory
     println!("Files in target_dir after restow:");
     if let Ok(entries) = fs::read_dir(&target_dir) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                println!("  {:?}", entry.path());
-            }
+        for entry in entries.flatten() {
+            println!("  {:?}", entry.path());
         }
     }
     if let Ok(entries) = fs::read_dir(target_dir.join("bin")) {
         println!("Files in target_dir/bin after restow:");
-        for entry in entries {
-            if let Ok(entry) = entry {
-                println!("  {:?}", entry.path());
-            }
+        for entry in entries.flatten() {
+            println!("  {:?}", entry.path());
         }
     }
 
@@ -2240,7 +2212,7 @@ fn test_conflict_resolution_override_option() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == "conflicting_file.txt")
+                .is_some_and(|name| name == "conflicting_file.txt")
         })
         .expect("Should find report for conflicting_file.txt");
 
@@ -2275,7 +2247,7 @@ fn test_conflict_resolution_override_option() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == "conflicting_file.txt")
+                .is_some_and(|name| name == "conflicting_file.txt")
         })
         .expect("Should find report for conflicting_file.txt with override");
 
@@ -2369,7 +2341,7 @@ fn test_conflict_resolution_defer_option() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == "deferred_file.txt")
+                .is_some_and(|name| name == "deferred_file.txt")
         })
         .expect("Should find report for deferred_file.txt with defer");
 
@@ -2441,7 +2413,7 @@ fn test_conflict_resolution_pattern_matching() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == "override_me.txt")
+                .is_some_and(|name| name == "override_me.txt")
         })
         .expect("Should find report for override_me.txt");
     assert_eq!(
@@ -2457,7 +2429,7 @@ fn test_conflict_resolution_pattern_matching() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == "defer_me.txt")
+                .is_some_and(|name| name == "defer_me.txt")
         })
         .expect("Should find report for defer_me.txt");
     assert_eq!(
@@ -2473,7 +2445,7 @@ fn test_conflict_resolution_pattern_matching() {
             r.original_action
                 .target_path
                 .file_name()
-                .map_or(false, |name| name == "normal_file.txt")
+                .is_some_and(|name| name == "normal_file.txt")
         })
         .expect("Should find report for normal_file.txt");
     assert_eq!(
