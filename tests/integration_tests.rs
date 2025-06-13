@@ -1597,3 +1597,168 @@ fn test_conflict_resolution_pattern_matching() {
     assert_eq!(normal_report.original_action.action_type, ActionType::Conflict,
                "normal_file.txt should be Conflict (no pattern matches)");
 }
+
+#[test]
+fn test_adopt_option_with_existing_file() {
+    let temp_base = tempdir().unwrap();
+    let stow_dir = temp_base.path().join("stow");
+    let target_dir = temp_base.path().join("target");
+    let package_dir = stow_dir.join("testpkg");
+
+    // Create directories
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(&package_dir).unwrap();
+
+    // Create a file in the package
+    let package_file = package_dir.join("config.txt");
+    fs::write(&package_file, "package content").unwrap();
+
+    // Create an existing file in target with different content
+    let target_file = target_dir.join("config.txt");
+    fs::write(&target_file, "existing content").unwrap();
+
+    // Run rustow with --adopt option
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: true,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        simulate: false,
+        verbose: 0,
+        packages: vec!["testpkg".to_string()],
+    });
+
+    // Should succeed
+    assert!(result.is_ok(), "rustow --adopt should succeed");
+
+    // Verify the existing file was moved to package directory
+    // (package file should now contain the original target content)
+    let package_content = fs::read_to_string(&package_file).unwrap();
+    assert_eq!(package_content, "existing content", "Package file should contain adopted content");
+
+    // Verify symlink was created in target
+    assert!(target_file.exists(), "Target file should still exist");
+    assert!(fs::symlink_metadata(&target_file).unwrap().file_type().is_symlink(), "Target should be a symlink");
+
+    // Verify symlink points to the package file
+    let link_target = fs::read_link(&target_file).unwrap();
+    assert!(link_target.to_string_lossy().contains("stow/testpkg/config.txt"), 
+           "Symlink should point to package file, got: {:?}", link_target);
+}
+
+#[test]
+fn test_adopt_option_with_existing_directory() {
+    let temp_base = tempdir().unwrap();
+    let stow_dir = temp_base.path().join("stow");
+    let target_dir = temp_base.path().join("target");
+    let package_dir = stow_dir.join("testpkg");
+
+    // Create directories
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(&package_dir).unwrap();
+
+    // Create a directory structure in the package
+    let package_config_dir = package_dir.join("config");
+    fs::create_dir_all(&package_config_dir).unwrap();
+    fs::write(package_config_dir.join("app.conf"), "package config").unwrap();
+
+    // Create an existing directory in target with different content
+    let target_config_dir = target_dir.join("config");
+    fs::create_dir_all(&target_config_dir).unwrap();
+    fs::write(target_config_dir.join("existing.conf"), "existing config").unwrap();
+
+    // Run rustow with --adopt option
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: true,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        simulate: false,
+        verbose: 0,
+        packages: vec!["testpkg".to_string()],
+    });
+
+    // Should succeed
+    assert!(result.is_ok(), "rustow --adopt should succeed with directory");
+
+    // Verify the existing directory was moved to package directory
+    let adopted_file = package_config_dir.join("existing.conf");
+    assert!(adopted_file.exists(), "Existing file should be moved to package directory");
+    assert_eq!(fs::read_to_string(&adopted_file).unwrap(), "existing config");
+
+    // Verify symlink was created in target
+    assert!(target_config_dir.exists(), "Target directory should still exist");
+    assert!(fs::symlink_metadata(&target_config_dir).unwrap().file_type().is_symlink(), 
+           "Target should be a symlink");
+
+    // Verify symlink points to the package directory
+    let link_target = fs::read_link(&target_config_dir).unwrap();
+    assert!(link_target.to_string_lossy().contains("stow/testpkg/config"), 
+           "Symlink should point to package directory, got: {:?}", link_target);
+}
+
+#[test]
+fn test_adopt_option_simulation_mode() {
+    let temp_base = tempdir().unwrap();
+    let stow_dir = temp_base.path().join("stow");
+    let target_dir = temp_base.path().join("target");
+    let package_dir = stow_dir.join("testpkg");
+
+    // Create directories
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(&package_dir).unwrap();
+
+    // Create a file in the package
+    let package_file = package_dir.join("test.txt");
+    fs::write(&package_file, "package content").unwrap();
+
+    // Create an existing file in target
+    let target_file = target_dir.join("test.txt");
+    fs::write(&target_file, "existing content").unwrap();
+
+    // Run rustow with --adopt and --simulate
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: true,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        simulate: true,
+        verbose: 1,
+        packages: vec!["testpkg".to_string()],
+    });
+
+    // Should succeed
+    assert!(result.is_ok(), "rustow --adopt --simulate should succeed");
+
+    // In simulation mode, files should NOT be modified
+    let package_content = fs::read_to_string(&package_file).unwrap();
+    assert_eq!(package_content, "package content", "Package file should be unchanged in simulation");
+
+    let target_content = fs::read_to_string(&target_file).unwrap();
+    assert_eq!(target_content, "existing content", "Target file should be unchanged in simulation");
+
+    // Target should still be a regular file, not a symlink
+    assert!(!fs::symlink_metadata(&target_file).unwrap().file_type().is_symlink(), 
+           "Target should remain a regular file in simulation mode");
+}

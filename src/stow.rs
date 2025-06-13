@@ -370,6 +370,15 @@ fn handle_directory_conflict(
     config: &Config
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
     if check_directory_for_non_stow_files(target_path_abs, config)? {
+        // Check for --adopt option when directory contains non-stow files
+        if config.adopt {
+            return Ok((
+                ActionType::AdoptDirectory,
+                Some(format!("Adopting existing directory: {:?}", target_path_abs)),
+                None,
+            ));
+        }
+        
         return Ok((ActionType::Conflict,
                   Some(format!("Directory {:?} contains non-stow managed files", target_path_abs)),
                   None));
@@ -460,11 +469,25 @@ fn handle_file_type_conflicts(
 
     // Check override/defer patterns for non-stow managed files
     let pattern_matcher = PatternMatcher::new(config);
-    if let Some((action_type, message, link_target)) = pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink) {
+    if let Some((action_type, message, link_target)) = pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink.clone()) {
         return Ok((action_type, Some(message), link_target));
     }
 
-    // No pattern matches, it's a conflict
+    // Check for --adopt option
+    if config.adopt {
+        let action_type = if fs_utils::is_directory(target_path_abs) {
+            ActionType::AdoptDirectory
+        } else {
+            ActionType::AdoptFile
+        };
+        return Ok((
+            action_type,
+            Some(format!("Adopting existing file/directory: {:?}", target_path_abs)),
+            Some(link_target_for_symlink),
+        ));
+    }
+
+    // No pattern matches and no adopt, it's a conflict
     Ok((ActionType::Conflict,
         Some(format!("Target path {:?} already exists and is not stow-managed", target_path_abs)),
         None))
@@ -479,7 +502,14 @@ fn handle_existing_target_conflict(
 
     // Check if target is a directory and we're trying to create a directory
     if fs_utils::is_directory(target_path_abs) && stow_item.item_type == StowItemType::Directory {
-        return handle_directory_conflict(target_path_abs, config);
+        let result = handle_directory_conflict(target_path_abs, config)?;
+        
+        // If it's an adopt action, we need to provide the link target
+        if result.0 == ActionType::AdoptDirectory {
+            return Ok((result.0, result.1, Some(link_target_for_symlink)));
+        }
+        
+        return Ok(result);
     }
 
     // Check if target is a symlink pointing to the same source (already stowed)
@@ -694,6 +724,8 @@ fn execute_real_action(action: &TargetAction) -> TargetActionReport {
         ActionType::CreateSymlink => execute_create_symlink_action(action),
         ActionType::DeleteSymlink => execute_delete_symlink_action(action),
         ActionType::DeleteDirectory => execute_delete_directory_action(action),
+        ActionType::AdoptFile => execute_adopt_file_action(action),
+        ActionType::AdoptDirectory => execute_adopt_directory_action(action),
         ActionType::Skip => execute_skip_action(action),
         _ => create_unimplemented_action_report(action),
     }
@@ -2905,5 +2937,352 @@ mod tests {
         assert!(matches!(report.status, TargetActionReportStatus::Failure(_)));
         assert!(report.message.unwrap().contains("cannot override"));
     }
+
+    #[test]
+    fn test_execute_adopt_file_action_basic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let package_dir = stow_dir.join("testpkg");
+        
+        // Setup directories
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        
+        // Create existing file in target
+        let target_file = target_dir.join("existing_file.txt");
+        fs::write(&target_file, "existing content").unwrap();
+        
+        // Create package source file path (where the file should be moved to)
+        let package_file = package_dir.join("existing_file.txt");
+        
+        // Create an AdoptFile action
+        let action = TargetAction {
+            source_item: Some(StowItem {
+                package_relative_path: PathBuf::from("existing_file.txt"),
+                source_path: package_file.clone(),
+                item_type: StowItemType::File,
+                target_name_after_dotfiles_processing: PathBuf::from("existing_file.txt"),
+            }),
+            target_path: target_file.clone(),
+            link_target_path: Some(PathBuf::from("../stow/testpkg/existing_file.txt")),
+            action_type: ActionType::AdoptFile,
+            conflict_details: None,
+        };
+        
+        // Execute the action
+        let report = execute_real_action(&action);
+        
+        // Verify the action was successful
+        assert_eq!(report.status, TargetActionReportStatus::Success);
+        
+        // Verify file was moved to package directory
+        assert!(package_file.exists(), "File should be moved to package directory");
+        assert_eq!(fs::read_to_string(&package_file).unwrap(), "existing content");
+        
+        // Verify symlink was created in target
+        assert!(target_file.exists(), "Symlink should exist in target directory");
+        assert!(fs::symlink_metadata(&target_file).unwrap().file_type().is_symlink());
+        
+        // Verify symlink points to the correct location
+        let link_target = fs::read_link(&target_file).unwrap();
+        assert_eq!(link_target, PathBuf::from("../stow/testpkg/existing_file.txt"));
+    }
+
+    #[test]
+    fn test_plan_adopt_action_for_existing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let package_dir = stow_dir.join("testpkg");
+        
+        // Setup directories and files
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("myfile.txt"), "package content").unwrap();
+        fs::write(target_dir.join("myfile.txt"), "existing content").unwrap();
+        
+        // Create config with adopt enabled
+        let mut config = create_test_config(&target_dir, &stow_dir);
+        config.adopt = true;
+        
+        // Load ignore patterns
+        let ignore_patterns = IgnorePatterns::load(&stow_dir, Some("testpkg"), &target_dir).unwrap();
+        
+        // Plan actions for the package
+        let actions = plan_actions("testpkg", &config, &ignore_patterns).unwrap();
+        
+        // Should find an AdoptFile action for the conflicting file
+        let adopt_action = actions.iter().find(|a| {
+            a.action_type == ActionType::AdoptFile && 
+            a.target_path.file_name().map_or(false, |name| name == "myfile.txt")
+        });
+        
+        assert!(adopt_action.is_some(), "Should plan an AdoptFile action for existing file");
+        let adopt_action = adopt_action.unwrap();
+        assert_eq!(adopt_action.action_type, ActionType::AdoptFile);
+        assert!(adopt_action.source_item.is_some());
+    }
+}
+
+/// Execute an adopt file action (move file from target to stow dir, then create symlink)
+fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
+    // Extract source item information
+    let source_item = match &action.source_item {
+        Some(item) => item,
+        None => return TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(
+                "AdoptFile action missing source_item".to_string()
+            ),
+            message: Some("AdoptFile action requires source_item to determine destination".to_string()),
+        },
+    };
+
+    // Check if target file exists
+    if !fs_utils::path_exists(&action.target_path) {
+        return TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Skipped,
+            message: Some(format!("Target file {:?} does not exist, nothing to adopt", action.target_path)),
+        };
+    }
+
+    // Ensure the package directory exists
+    if let Some(package_dir) = source_item.source_path.parent() {
+        if let Err(e) = fs_utils::create_dir_all(package_dir) {
+            return TargetActionReport {
+                original_action: action.clone(),
+                status: TargetActionReportStatus::Failure(e.to_string()),
+                message: Some(format!("Failed to create package directory {:?}: {}", package_dir, e)),
+            };
+        }
+    }
+
+    // Move the file from target to package directory
+    if let Err(e) = move_file(&action.target_path, &source_item.source_path) {
+        return TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(e.to_string()),
+            message: Some(format!(
+                "Failed to move file from {:?} to {:?}: {}",
+                action.target_path, source_item.source_path, e
+            )),
+        };
+    }
+
+    // Create symlink from target to the adopted file
+    match &action.link_target_path {
+        Some(link_target) => {
+            match fs_utils::create_symlink(&action.target_path, link_target) {
+                Ok(_) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Success,
+                    message: Some(format!(
+                        "Successfully adopted file {:?} and created symlink",
+                        action.target_path
+                    )),
+                },
+                Err(e) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Failure(e.to_string()),
+                    message: Some(format!(
+                        "Adopted file but failed to create symlink {:?} -> {:?}: {}",
+                        action.target_path, link_target, e
+                    )),
+                },
+            }
+        }
+        None => TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(
+                "AdoptFile action missing link_target_path".to_string()
+            ),
+            message: Some("AdoptFile action requires link_target_path to create symlink".to_string()),
+        },
+    }
+}
+
+/// Execute an adopt directory action (move directory from target to stow dir, then create symlink)
+fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
+    // Extract source item information
+    let source_item = match &action.source_item {
+        Some(item) => item,
+        None => return TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(
+                "AdoptDirectory action missing source_item".to_string()
+            ),
+            message: Some("AdoptDirectory action requires source_item to determine destination".to_string()),
+        },
+    };
+
+    // Check if target directory exists
+    if !fs_utils::path_exists(&action.target_path) {
+        return TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Skipped,
+            message: Some(format!("Target directory {:?} does not exist, nothing to adopt", action.target_path)),
+        };
+    }
+
+    // Ensure the parent package directory exists
+    if let Some(package_parent) = source_item.source_path.parent() {
+        if let Err(e) = fs_utils::create_dir_all(package_parent) {
+            return TargetActionReport {
+                original_action: action.clone(),
+                status: TargetActionReportStatus::Failure(e.to_string()),
+                message: Some(format!("Failed to create package parent directory {:?}: {}", package_parent, e)),
+            };
+        }
+    }
+
+    // Move the directory from target to package directory
+    if let Err(e) = move_directory(&action.target_path, &source_item.source_path) {
+        return TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(e.to_string()),
+            message: Some(format!(
+                "Failed to move directory from {:?} to {:?}: {}",
+                action.target_path, source_item.source_path, e
+            )),
+        };
+    }
+
+    // Create symlink from target to the adopted directory
+    match &action.link_target_path {
+        Some(link_target) => {
+            match fs_utils::create_symlink(&action.target_path, link_target) {
+                Ok(_) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Success,
+                    message: Some(format!(
+                        "Successfully adopted directory {:?} and created symlink",
+                        action.target_path
+                    )),
+                },
+                Err(e) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Failure(e.to_string()),
+                    message: Some(format!(
+                        "Adopted directory but failed to create symlink {:?} -> {:?}: {}",
+                        action.target_path, link_target, e
+                    )),
+                },
+            }
+        }
+        None => TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(
+                "AdoptDirectory action missing link_target_path".to_string()
+            ),
+            message: Some("AdoptDirectory action requires link_target_path to create symlink".to_string()),
+        },
+    }
+}
+
+/// Move a file from source to destination
+fn move_file(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
+    std::fs::rename(from, to).map_err(|e| {
+        crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: e,
+        }
+    })
+}
+
+/// Move a directory from source to destination, merging contents if destination exists
+fn move_directory(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
+    // If destination doesn't exist, simple rename
+    if !fs_utils::path_exists(to) {
+        return std::fs::rename(from, to).map_err(|e| {
+            crate::error::FsError::MoveItem {
+                source_path: from.to_path_buf(),
+                destination_path: to.to_path_buf(),
+                source_io_error: e,
+            }
+        });
+    }
+
+    // If destination exists, we need to merge contents
+    move_directory_contents_recursive(from, to)?;
+    
+    // Remove the now-empty source directory
+    std::fs::remove_dir(from).map_err(|e| {
+        crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: e,
+        }
+    })
+}
+
+/// Recursively move contents from source directory to destination directory
+fn move_directory_contents_recursive(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
+    // Ensure destination directory exists
+    std::fs::create_dir_all(to).map_err(|e| {
+        crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: e,
+        }
+    })?;
+
+    // Read all entries in the source directory
+    let entries = std::fs::read_dir(from).map_err(|e| {
+        crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: e,
+        }
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            crate::error::FsError::MoveItem {
+                source_path: from.to_path_buf(),
+                destination_path: to.to_path_buf(),
+                source_io_error: e,
+            }
+        })?;
+
+        let source_path = entry.path();
+        let file_name = source_path.file_name().ok_or_else(|| {
+            crate::error::FsError::MoveItem {
+                source_path: from.to_path_buf(),
+                destination_path: to.to_path_buf(),
+                source_io_error: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid file name"
+                ),
+            }
+        })?;
+        let dest_path = to.join(file_name);
+
+        if source_path.is_dir() {
+            // Recursively move directory contents
+            move_directory_contents_recursive(&source_path, &dest_path)?;
+            // Remove the now-empty source directory
+            std::fs::remove_dir(&source_path).map_err(|e| {
+                crate::error::FsError::MoveItem {
+                    source_path: source_path.clone(),
+                    destination_path: dest_path.clone(),
+                    source_io_error: e,
+                }
+            })?;
+        } else {
+            // Move file
+            std::fs::rename(&source_path, &dest_path).map_err(|e| {
+                crate::error::FsError::MoveItem {
+                    source_path: source_path.clone(),
+                    destination_path: dest_path.clone(),
+                    source_io_error: e,
+                }
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
