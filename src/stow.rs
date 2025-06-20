@@ -346,14 +346,22 @@ fn plan_stow_action_for_item(
                 config,
             )?
         } else {
-            // Target path doesn't exist, proceed with normal action
-            match stow_item.item_type {
-                StowItemType::Directory => (ActionType::CreateDirectory, None, None),
-                StowItemType::File | StowItemType::Symlink => (
-                    ActionType::CreateSymlink,
-                    None,
-                    Some(link_target_for_symlink),
-                ),
+            // Target path doesn't exist, but still check for defer/override patterns
+            let pattern_matcher = PatternMatcher::new(config);
+            if let Some((action_type, message, link_target)) =
+                pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink.clone())
+            {
+                (action_type, Some(message), link_target)
+            } else {
+                // No pattern matches, proceed with normal action
+                match stow_item.item_type {
+                    StowItemType::Directory => (ActionType::CreateDirectory, None, None),
+                    StowItemType::File | StowItemType::Symlink => (
+                        ActionType::CreateSymlink,
+                        None,
+                        Some(link_target_for_symlink),
+                    ),
+                }
             }
         };
 

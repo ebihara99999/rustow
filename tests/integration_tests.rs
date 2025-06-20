@@ -2367,6 +2367,71 @@ fn test_conflict_resolution_defer_option() {
         "Symlink should still point to package1, but points to: {:?}",
         current_link_target
     );
+
+    // Test case for non-existent target files with defer pattern
+    // This is the edge case that was previously missed and caused the bug
+    let package3_dir = stow_dir.join("package3");
+    fs::create_dir_all(&package3_dir).unwrap();
+    
+    // Create a file that matches the defer pattern but has no existing target
+    fs::write(
+        package3_dir.join("new_deferred_file.txt"),
+        "new content that should be deferred",
+    )
+    .unwrap();
+
+    // Ensure the target file does NOT exist (this is the key difference)
+    let new_target_file = target_dir.join("new_deferred_file.txt");
+    assert!(
+        !new_target_file.exists(),
+        "Target file should not exist before test"
+    );
+
+    // Configure with defer pattern that matches the new file
+    let mut config3_with_defer = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["package3".to_string()],
+        false,
+        0,
+    );
+    config3_with_defer.defers = vec![regex::Regex::new(".*deferred_file\\.txt").unwrap()];
+
+    let result3_with_defer = stow_packages(&config3_with_defer);
+    assert!(
+        result3_with_defer.is_ok(),
+        "stow_packages should succeed with --defer for non-existent target: {:?}",
+        result3_with_defer.err()
+    );
+
+    let reports3_with_defer = result3_with_defer.unwrap();
+    let defer_report_new = reports3_with_defer
+        .iter()
+        .find(|r| {
+            r.original_action
+                .target_path
+                .file_name()
+                .is_some_and(|name| name == "new_deferred_file.txt")
+        })
+        .expect("Should find report for new_deferred_file.txt with defer");
+
+    // This is the critical assertion that would have caught the original bug
+    assert_eq!(
+        defer_report_new.original_action.action_type,
+        ActionType::Skip,
+        "Should be Skip with --defer even for non-existent target files"
+    );
+    assert_eq!(
+        defer_report_new.status,
+        TargetActionReportStatus::Skipped,
+        "Should be skipped with --defer even for non-existent target files"
+    );
+
+    // Verify the target file was NOT created (because it was deferred)
+    assert!(
+        !new_target_file.exists(),
+        "Target file should not be created when deferred"
+    );
 }
 
 #[test]
