@@ -265,8 +265,35 @@ fn plan_actions(
     let raw_items = load_package_items(&package_path, package_name)?;
     let mut actions = Vec::new();
 
-    // Process each item to create initial actions
+    // First pass: identify directories that will be folded
+    let mut folded_directories = std::collections::HashSet::new();
+    
+    if !config.no_folding {
+        for raw_item in &raw_items {
+            if raw_item.item_type == fs_utils::RawStowItemType::Directory {
+                let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
+                    raw_item.package_relative_path.to_str().unwrap_or(""),
+                    config.dotfiles,
+                ));
+                
+                if !should_ignore_item(&processed_target_relative_path, current_ignore_patterns) {
+                    let target_path_abs = config.target_dir.join(&processed_target_relative_path);
+                    
+                    if should_fold_directory(&raw_item.package_relative_path, &target_path_abs, config)? {
+                        folded_directories.insert(raw_item.package_relative_path.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass: process items, skipping children of folded directories
     for raw_item in raw_items {
+        // Skip items that are children of folded directories
+        if is_child_of_folded_directory(&raw_item.package_relative_path, &folded_directories) {
+            continue;
+        }
+
         if let Some(action) =
             process_item_for_stow(raw_item, config, current_ignore_patterns, package_name)?
         {
@@ -278,6 +305,19 @@ fn plan_actions(
     refine_actions_for_parent_conflicts(&mut actions, config);
 
     Ok(actions)
+}
+
+/// Check if a path is a child of any folded directory
+fn is_child_of_folded_directory(
+    item_path: &Path,
+    folded_directories: &std::collections::HashSet<PathBuf>,
+) -> bool {
+    for folded_dir in folded_directories {
+        if item_path != folded_dir && item_path.starts_with(folded_dir) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Process a single item for stowing, returning an action if needed
@@ -355,7 +395,16 @@ fn plan_stow_action_for_item(
             } else {
                 // No pattern matches, proceed with normal action
                 match stow_item.item_type {
-                    StowItemType::Directory => (ActionType::CreateDirectory, None, None),
+                    StowItemType::Directory => {
+                        // Check if we should fold this directory
+                        if should_fold_directory(&stow_item.package_relative_path, target_path_abs, config)? {
+                            // Fold: create symlink to the entire directory
+                            (ActionType::CreateSymlink, None, Some(link_target_for_symlink))
+                        } else {
+                            // No fold: create directory structure
+                            (ActionType::CreateDirectory, None, None)
+                        }
+                    },
                     StowItemType::File | StowItemType::Symlink => (
                         ActionType::CreateSymlink,
                         None,
@@ -372,134 +421,6 @@ fn plan_stow_action_for_item(
         action_type,
         conflict_details,
     })
-}
-
-/// Handle conflicts when target path already exists
-/// Check if a directory contains non-stow managed files
-fn check_directory_for_non_stow_files(
-    target_path_abs: &Path,
-    config: &Config,
-) -> Result<bool, RustowError> {
-    if let Ok(entries) = std::fs::read_dir(target_path_abs) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if is_non_stow_entry(&entry_path, &config.stow_dir) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// Check if a directory entry represents a non-stow managed file
-fn is_non_stow_entry(entry_path: &Path, stow_dir: &Path) -> bool {
-    // If there's any file that's not a stow-managed symlink, it's a conflict
-    if !fs_utils::is_symlink(entry_path) {
-        return true;
-    }
-
-    // Check if it's a stow-managed symlink
-    match fs_utils::is_stow_symlink(entry_path, stow_dir) {
-        Ok(Some(_)) => {
-            // It's a stow-managed symlink, not a conflict
-            false
-        },
-        Ok(None) | Err(_) => {
-            // Not a stow-managed symlink or error checking, treat as conflict
-            true
-        },
-    }
-}
-
-/// Handle directory-to-directory conflicts
-fn handle_directory_conflict(
-    target_path_abs: &Path,
-    config: &Config,
-) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-    if check_directory_for_non_stow_files(target_path_abs, config)? {
-        // Check for --adopt option when directory contains non-stow files
-        if config.adopt {
-            return Ok((
-                ActionType::AdoptDirectory,
-                Some(format!(
-                    "Adopting existing directory: {:?}",
-                    target_path_abs
-                )),
-                None,
-            ));
-        }
-
-        return Ok((
-            ActionType::Conflict,
-            Some(format!(
-                "Directory {:?} contains non-stow managed files",
-                target_path_abs
-            )),
-            None,
-        ));
-    }
-    Ok((ActionType::CreateDirectory, None, None))
-}
-
-/// Validate if symlink is stow-managed and extract package info
-fn validate_stow_symlink(
-    target_path_abs: &Path,
-    stow_dir: &Path,
-) -> Result<Option<(String, PathBuf)>, RustowError> {
-    fs_utils::is_stow_symlink(target_path_abs, stow_dir)
-}
-
-/// Check if symlink points to the same package and item
-fn is_same_package_and_item(
-    existing_package_name: &str,
-    existing_item_path: &Path,
-    stow_item: &StowItem,
-    config: &Config,
-) -> bool {
-    if existing_item_path == stow_item.package_relative_path {
-        if let Some(current_package_name) = config.packages.first() {
-            return existing_package_name == *current_package_name;
-        }
-    }
-    false
-}
-
-/// Handle conflicts with existing symlinks
-fn handle_existing_symlink_conflict(
-    stow_item: &StowItem,
-    target_path_abs: &Path,
-    link_target_for_symlink: PathBuf,
-    config: &Config,
-) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-    if let Some((existing_package_name, existing_item_path)) =
-        validate_stow_symlink(target_path_abs, &config.stow_dir)?
-    {
-        // It's a stow-managed symlink
-        if is_same_package_and_item(
-            &existing_package_name,
-            &existing_item_path,
-            stow_item,
-            config,
-        ) {
-            // Same package and same item, no conflict - already correctly stowed
-            return Ok((
-                ActionType::Skip,
-                Some("Target already points to the same source".to_string()),
-                None,
-            ));
-        } else {
-            // Different package or item path - check conflict resolution options
-            return handle_stow_package_conflict(
-                stow_item,
-                target_path_abs,
-                link_target_for_symlink,
-                config,
-            );
-        }
-    }
-
-    // Not a stow-managed symlink, treat as regular file conflict
-    handle_file_type_conflicts(stow_item, target_path_abs, link_target_for_symlink, config)
 }
 
 /// Check for file vs directory type conflicts
@@ -595,7 +516,7 @@ fn handle_existing_target_conflict(
             return Ok((result.0, result.1, Some(link_target_for_symlink)));
         }
 
-        return Ok(result);
+        return Ok((result.0, result.1, None));
     }
 
     // Check if target is a symlink pointing to the same source (already stowed)
@@ -611,30 +532,7 @@ fn handle_existing_target_conflict(
     handle_file_type_conflicts(stow_item, target_path_abs, link_target_for_symlink, config)
 }
 
-/// Handle conflicts between different stow packages
-fn handle_stow_package_conflict(
-    _stow_item: &StowItem,
-    target_path_abs: &Path,
-    link_target_for_symlink: PathBuf,
-    config: &Config,
-) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-    let pattern_matcher = PatternMatcher::new(config);
-    if let Some((action_type, message, link_target)) =
-        pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink)
-    {
-        return Ok((action_type, Some(message), link_target));
-    }
 
-    // No pattern matches, it's a conflict
-    Ok((
-        ActionType::Conflict,
-        Some(format!(
-            "Target path {:?} is managed by another stow package",
-            target_path_abs
-        )),
-        None,
-    ))
-}
 
 /// Refine actions by checking for parent path conflicts
 /// Collect parent conflict information for all actions
@@ -1938,7 +1836,7 @@ mod tests {
     }
 
     #[test]
-    fn test_check_directory_for_non_stow_files_empty_directory() {
+    fn test_can_fold_into_existing_target_empty_directory() {
         let temp_dir = TempDir::new().unwrap();
         let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
@@ -1949,12 +1847,12 @@ mod tests {
 
         let config = create_test_config(&target_dir, &stow_dir);
 
-        let result = check_directory_for_non_stow_files(&test_dir, &config).unwrap();
-        assert!(!result, "Empty directory should not contain non-stow files");
+        let result = can_fold_into_existing_target(&test_dir, &config).unwrap();
+        assert!(result, "Empty directory should allow folding");
     }
 
     #[test]
-    fn test_check_directory_for_non_stow_files_with_regular_file() {
+    fn test_can_fold_into_existing_target_with_regular_file() {
         let temp_dir = TempDir::new().unwrap();
         let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
@@ -1968,10 +1866,10 @@ mod tests {
 
         let config = create_test_config(&target_dir, &stow_dir);
 
-        let result = check_directory_for_non_stow_files(&test_dir, &config).unwrap();
+        let result = can_fold_into_existing_target(&test_dir, &config).unwrap();
         assert!(
-            result,
-            "Directory with regular file should contain non-stow files"
+            !result,
+            "Directory with regular file should not allow folding"
         );
     }
 
@@ -1990,7 +1888,6 @@ mod tests {
         let result = handle_directory_conflict(&test_dir, &config).unwrap();
         assert_eq!(result.0, ActionType::CreateDirectory);
         assert!(result.1.is_none());
-        assert!(result.2.is_none());
     }
 
     #[test]
@@ -2015,9 +1912,8 @@ mod tests {
             result
                 .1
                 .unwrap()
-                .contains("contains non-stow managed files")
+                .contains("contains non-stow files")
         );
-        assert!(result.2.is_none());
     }
 
     #[test]
@@ -2359,103 +2255,9 @@ mod tests {
         assert!(!empty_dir.exists(), "Directory should be deleted");
     }
 
-    #[test]
-    fn test_validate_stow_symlink_valid() {
-        let temp_dir = TempDir::new().unwrap();
-        let target_dir = temp_dir.path().join("target");
-        let stow_dir = temp_dir.path().join("stow");
-        let test_file = target_dir.join("test_file.txt");
 
-        fs::create_dir_all(&target_dir).unwrap();
-        fs::create_dir_all(stow_dir.join("test_package")).unwrap();
-        fs::write(
-            stow_dir.join("test_package").join("test_file.txt"),
-            "content",
-        )
-        .unwrap();
 
-        // Create a symlink from target to stow
-        let link_target = PathBuf::from("../stow/test_package/test_file.txt");
-        fs_utils::create_symlink(&test_file, &link_target).unwrap();
 
-        let result = validate_stow_symlink(&test_file, &stow_dir).unwrap();
-
-        assert!(result.is_some());
-        let (package_name, item_path) = result.unwrap();
-        assert_eq!(package_name, "test_package");
-        assert_eq!(item_path, PathBuf::from("test_file.txt"));
-    }
-
-    #[test]
-    fn test_validate_stow_symlink_not_stow_managed() {
-        let temp_dir = TempDir::new().unwrap();
-        let target_dir = temp_dir.path().join("target");
-        let stow_dir = temp_dir.path().join("stow");
-        let test_file = target_dir.join("test_file.txt");
-
-        fs::create_dir_all(&target_dir).unwrap();
-        fs::create_dir_all(&stow_dir).unwrap();
-
-        // Create a symlink to somewhere else
-        let link_target = PathBuf::from("../other/file.txt");
-        fs_utils::create_symlink(&test_file, &link_target).unwrap();
-
-        let result = validate_stow_symlink(&test_file, &stow_dir).unwrap();
-
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_is_same_package_and_item_true() {
-        let temp_dir = TempDir::new().unwrap();
-        let target_dir = temp_dir.path().join("target");
-        let stow_dir = temp_dir.path().join("stow");
-
-        let mut config = create_test_config(&target_dir, &stow_dir);
-        config.packages = vec!["test_package".to_string()];
-
-        let stow_item = StowItem {
-            package_relative_path: PathBuf::from("test_file.txt"),
-            source_path: stow_dir.join("test_package").join("test_file.txt"),
-            item_type: StowItemType::File,
-            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
-        };
-
-        let result = is_same_package_and_item(
-            "test_package",
-            &PathBuf::from("test_file.txt"),
-            &stow_item,
-            &config,
-        );
-
-        assert!(result);
-    }
-
-    #[test]
-    fn test_is_same_package_and_item_different_package() {
-        let temp_dir = TempDir::new().unwrap();
-        let target_dir = temp_dir.path().join("target");
-        let stow_dir = temp_dir.path().join("stow");
-
-        let mut config = create_test_config(&target_dir, &stow_dir);
-        config.packages = vec!["test_package".to_string()];
-
-        let stow_item = StowItem {
-            package_relative_path: PathBuf::from("test_file.txt"),
-            source_path: stow_dir.join("test_package").join("test_file.txt"),
-            item_type: StowItemType::File,
-            target_name_after_dotfiles_processing: PathBuf::from("test_file.txt"),
-        };
-
-        let result = is_same_package_and_item(
-            "other_package",
-            &PathBuf::from("test_file.txt"),
-            &stow_item,
-            &config,
-        );
-
-        assert!(!result);
-    }
 
     #[test]
     fn test_check_parent_path_conflicts_file_conflict() {
@@ -3542,5 +3344,188 @@ mod tests {
         let adopt_action = adopt_action.unwrap();
         assert_eq!(adopt_action.action_type, ActionType::AdoptFile);
         assert!(adopt_action.source_item.is_some());
+    }
+
+
+}
+
+/// Determine if a directory should be folded (symlinked as a whole) or unfolded (contents symlinked individually)
+fn should_fold_directory(
+    _package_dir: &Path,
+    target_path_abs: &Path,
+    config: &Config,
+) -> Result<bool, RustowError> {
+    // If no_folding is enabled, never fold
+    if config.no_folding {
+        return Ok(false);
+    }
+
+    // If target doesn't exist, we can fold
+    if !fs_utils::path_exists(target_path_abs) {
+        return Ok(true);
+    }
+
+    // If target exists and is not a directory, cannot fold
+    if !fs_utils::is_directory(target_path_abs) {
+        return Ok(false);
+    }
+
+    // Target is an existing directory - check if we can fold into it
+    can_fold_into_existing_target(target_path_abs, config)
+}
+
+/// Check if we can fold into an existing target directory
+fn can_fold_into_existing_target(
+    target_path: &Path,
+    config: &Config,
+) -> Result<bool, RustowError> {
+    // Read directory contents
+    let entries = std::fs::read_dir(target_path).map_err(|e| {
+        RustowError::Fs(crate::error::FsError::Io {
+            path: target_path.to_path_buf(),
+            source: e,
+        })
+    })?;
+
+    // Check all entries in the directory
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            RustowError::Fs(crate::error::FsError::Io {
+                path: target_path.to_path_buf(),
+                source: e,
+            })
+        })?;
+        
+        let entry_path = entry.path();
+        
+        // If it's not a stow-managed entry, we cannot fold
+        if is_non_stow_entry(&entry_path, &config.stow_dir) {
+            return Ok(false);
+        }
+    }
+
+    // All entries are stow-managed, we can fold
+    Ok(true)
+}
+
+/// Check if a symlink is managed by stow
+fn is_stow_managed_symlink(
+    symlink_path: &Path,
+    stow_dir: &Path,
+) -> Result<bool, RustowError> {
+    if !fs_utils::is_symlink(symlink_path) {
+        return Ok(false);
+    }
+
+    let link_target = fs_utils::read_link(symlink_path)?;
+    let resolved_target = if link_target.is_absolute() {
+        link_target
+    } else {
+        symlink_path.parent().unwrap_or(Path::new(".")).join(&link_target)
+    };
+
+    // Canonicalize both paths for comparison
+    let canonical_target = match resolved_target.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return Ok(false), // Target doesn't exist
+    };
+
+    let canonical_stow_dir = match stow_dir.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return Ok(false), // Stow dir doesn't exist
+    };
+
+    // Check if the target is under the stow directory
+    Ok(canonical_target.starts_with(canonical_stow_dir))
+}
+
+/// Handle directory conflicts during stow operation
+fn handle_directory_conflict(
+    target_path: &Path,
+    config: &Config,
+) -> Result<(ActionType, Option<String>), RustowError> {
+    // Check if directory contains non-stow files
+    if can_fold_into_existing_target(target_path, config)? {
+        // Directory is empty or contains only stow symlinks
+        Ok((ActionType::CreateDirectory, None))
+    } else {
+        // Directory contains non-stow files
+        if config.adopt {
+            Ok((
+                ActionType::AdoptDirectory,
+                Some(format!("Adopting existing directory: {:?}", target_path)),
+            ))
+        } else {
+            Ok((
+                ActionType::Conflict,
+                Some(format!(
+                    "Directory {:?} contains non-stow files",
+                    target_path
+                )),
+            ))
+        }
+    }
+}
+
+/// Handle existing symlink conflicts
+fn handle_existing_symlink_conflict(
+    stow_item: &StowItem,
+    target_path_abs: &Path,
+    link_target_for_symlink: PathBuf,
+    config: &Config,
+) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
+    let existing_target = fs_utils::read_link(target_path_abs)?;
+    
+    // Resolve the existing symlink target
+    let resolved_existing = if existing_target.is_absolute() {
+        existing_target
+    } else {
+        target_path_abs.parent().unwrap_or(Path::new(".")).join(&existing_target)
+    };
+
+    // Check if it points to the same source as what we want to create
+    let expected_source = target_path_abs.parent().unwrap_or(Path::new(".")).join(&link_target_for_symlink);
+    
+    if let (Ok(resolved_existing_canonical), Ok(expected_source_canonical)) = 
+        (resolved_existing.canonicalize(), expected_source.canonicalize()) {
+        if resolved_existing_canonical == expected_source_canonical {
+            // Already points to the correct target
+            return Ok((
+                ActionType::Skip,
+                Some("Symlink already points to correct target".to_string()),
+                None,
+            ));
+        }
+    }
+
+    // Check if it's stow-managed
+    if is_stow_managed_symlink(target_path_abs, &config.stow_dir)? {
+        // Different stow package - check patterns
+        let pattern_matcher = PatternMatcher::new(config);
+        if let Some((action_type, message, link_target)) =
+            pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink)
+        {
+            Ok((action_type, Some(message), link_target))
+        } else {
+            Ok((
+                ActionType::Conflict,
+                Some(format!(
+                    "Target path {:?} is managed by another stow package",
+                    target_path_abs
+                )),
+                None,
+            ))
+        }
+    } else {
+        // Non-stow symlink - treat as regular file conflict
+        handle_file_type_conflicts(stow_item, target_path_abs, link_target_for_symlink, config)
+    }
+}
+
+fn is_non_stow_entry(entry_path: &Path, stow_dir: &Path) -> bool {
+    if fs_utils::is_symlink(entry_path) {
+        is_stow_managed_symlink(entry_path, stow_dir).unwrap_or(false) == false
+    } else {
+        true // Regular files/directories are non-stow
     }
 }

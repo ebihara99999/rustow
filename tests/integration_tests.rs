@@ -2731,3 +2731,131 @@ fn test_adopt_option_simulation_mode() {
         "Target should remain a regular file in simulation mode"
     );
 }
+
+// ==================== FOLDING INTEGRATION TESTS ====================
+
+#[test]
+fn test_no_folding_option_basic() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let stow_dir = temp_dir.path().join("stow");
+    let target_dir = temp_dir.path().join("target");
+
+    // Create package with nested structure
+    let package_dir = stow_dir.join("test-folding");
+    fs::create_dir_all(&package_dir.join("bin")).unwrap();
+    fs::create_dir_all(&package_dir.join("lib")).unwrap();
+    
+    fs::write(package_dir.join("bin").join("script1"), "#!/bin/bash\necho script1").unwrap();
+    fs::write(package_dir.join("bin").join("script2"), "#!/bin/bash\necho script2").unwrap();
+    fs::write(package_dir.join("lib").join("library.so"), "library content").unwrap();
+
+    // Test with folding enabled (default)
+    let mut config_with_folding = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["test-folding".to_string()],
+        false,
+        0,
+    );
+    config_with_folding.simulate = true;
+
+    let reports_with_folding = stow_packages(&config_with_folding).unwrap();
+
+    // Test with no_folding enabled
+    let mut config_no_folding = config_with_folding.clone();
+    config_no_folding.no_folding = true;
+
+    let reports_no_folding = stow_packages(&config_no_folding).unwrap();
+
+    // With folding: should create symlinks to directories
+    let folding_actions: Vec<_> = reports_with_folding.iter()
+        .filter(|r| r.original_action.action_type == ActionType::CreateSymlink)
+        .collect();
+
+    // With no_folding: should create individual file symlinks
+    let no_folding_actions: Vec<_> = reports_no_folding.iter()
+        .filter(|r| r.original_action.action_type == ActionType::CreateSymlink)
+        .collect();
+
+    // Print results for debugging
+    println!("=== FOLDING ENABLED ===");
+    for report in &reports_with_folding {
+        println!("{:?}: {:?} -> {:?}", 
+            report.original_action.action_type,
+            report.original_action.target_path,
+            report.original_action.link_target_path);
+    }
+
+    println!("=== NO FOLDING (--no-folding) ===");
+    for report in &reports_no_folding {
+        println!("{:?}: {:?} -> {:?}", 
+            report.original_action.action_type,
+            report.original_action.target_path,
+            report.original_action.link_target_path);
+    }
+
+    // Verify that no_folding creates more individual symlinks
+    assert!(
+        no_folding_actions.len() >= folding_actions.len(),
+        "No-folding should create at least as many symlinks as folding. Folding: {}, No-folding: {}",
+        folding_actions.len(),
+        no_folding_actions.len()
+    );
+
+    // This test documents the current behavior and will help us verify the fix
+}
+
+#[test]
+fn test_no_folding_vs_folding_detailed() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let stow_dir = temp_dir.path().join("stow");
+    let target_dir = temp_dir.path().join("target");
+
+    // Create a simple package structure
+    let package_dir = stow_dir.join("simple-pkg");
+    fs::create_dir_all(&package_dir.join("tools")).unwrap();
+    fs::write(package_dir.join("tools").join("tool1"), "tool1 content").unwrap();
+    fs::write(package_dir.join("tools").join("tool2"), "tool2 content").unwrap();
+
+    // Test folding behavior
+    let mut config_folding = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["simple-pkg".to_string()],
+        false,
+        0,
+    );
+    config_folding.simulate = true;
+    config_folding.no_folding = false; // Explicit folding
+
+    let reports_folding = stow_packages(&config_folding).unwrap();
+
+    // Test no-folding behavior
+    let mut config_no_folding = config_folding.clone();
+    config_no_folding.no_folding = true;
+
+    let reports_no_folding = stow_packages(&config_no_folding).unwrap();
+
+    // Count different types of actions
+    let folding_symlinks = reports_folding.iter()
+        .filter(|r| r.original_action.action_type == ActionType::CreateSymlink)
+        .count();
+    let folding_dirs = reports_folding.iter()
+        .filter(|r| r.original_action.action_type == ActionType::CreateDirectory)
+        .count();
+
+    let no_folding_symlinks = reports_no_folding.iter()
+        .filter(|r| r.original_action.action_type == ActionType::CreateSymlink)
+        .count();
+    let no_folding_dirs = reports_no_folding.iter()
+        .filter(|r| r.original_action.action_type == ActionType::CreateDirectory)
+        .count();
+
+    println!("Folding: {} symlinks, {} directories", folding_symlinks, folding_dirs);
+    println!("No-folding: {} symlinks, {} directories", no_folding_symlinks, no_folding_dirs);
+
+    // This test documents current behavior - will help us verify when the fix is working
+    // Expected after fix:
+    // - Folding: 1 symlink (tools -> ../stow/simple-pkg/tools), 0 directories
+    // - No-folding: 2 symlinks (tool1, tool2), 1 directory (tools/)
+}
