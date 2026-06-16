@@ -165,13 +165,14 @@ fn test_basic_stow_operation_with_dotfiles() {
     let package_name: &str = "test_package_dots";
     create_test_package(&stow_dir, package_name);
 
-    let config: Config = create_test_config(
+    let mut config: Config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
         vec![package_name.to_string()],
         true, // dotfiles enabled
         0,
     );
+    config.no_folding = true;
 
     let actions_result: Result<Vec<rustow::stow::TargetActionReport>, rustow::error::RustowError> =
         stow_packages(&config);
@@ -309,13 +310,14 @@ fn test_custom_ignore_patterns() {
     fs::write(package_dir.join(".stow-local-ignore"), ignore_file_content)
         .expect("Failed to create .stow-local-ignore file");
 
-    let config: Config = create_test_config(
+    let mut config: Config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
         vec![package_name.to_string()],
         true, // dotfiles enabled
         0,
     );
+    config.no_folding = true;
 
     let actions_result: Result<Vec<rustow::stow::TargetActionReport>, rustow::error::RustowError> =
         stow_packages(&config);
@@ -459,6 +461,162 @@ fn test_multiple_packages_stow() {
 }
 
 #[test]
+fn test_default_tree_folding_creates_directory_symlink() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    let package_name = "fold_pkg";
+    let package_dir = stow_dir.join(package_name);
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "#!/bin/sh\n").unwrap();
+
+    let config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0,
+    );
+
+    let reports = stow_packages(&config).unwrap();
+
+    let bin_report = reports
+        .iter()
+        .find(|report| report.original_action.target_path == target_dir.join("bin"))
+        .expect("bin folding report should exist");
+    assert_eq!(
+        bin_report.original_action.action_type,
+        ActionType::CreateSymlink
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bin should be a folded symlink"
+    );
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.original_action.target_path != target_dir.join("bin/tool")),
+        "folded descendants should not be linked individually"
+    );
+}
+
+#[test]
+fn test_split_open_folded_tree_for_second_package() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    let package1_dir = stow_dir.join("perl");
+    let package2_dir = stow_dir.join("emacs");
+    fs::create_dir_all(package1_dir.join("bin")).unwrap();
+    fs::create_dir_all(package2_dir.join("bin")).unwrap();
+    fs::write(package1_dir.join("bin/perl"), "perl").unwrap();
+    fs::write(package2_dir.join("bin/emacs"), "emacs").unwrap();
+
+    let package1_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["perl".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&package1_config).unwrap();
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "first package should fold bin"
+    );
+
+    let package2_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["emacs".to_string()],
+        false,
+        0,
+    );
+    let reports = stow_packages(&package2_config).unwrap();
+
+    assert!(
+        reports.iter().any(|report| {
+            report.original_action.target_path == target_dir.join("bin")
+                && report.original_action.action_type == ActionType::DeleteSymlink
+        }),
+        "split-open should delete the old folded bin symlink"
+    );
+    assert!(
+        target_dir.join("bin").is_dir()
+            && !fs::symlink_metadata(target_dir.join("bin"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+        "bin should become a real directory after split-open"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/perl"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "old package entry should be relinked"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/emacs"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "new package entry should be linked"
+    );
+}
+
+#[test]
+fn test_delete_refolds_single_remaining_package_tree() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    let package1_dir = stow_dir.join("perl");
+    let package2_dir = stow_dir.join("emacs");
+    fs::create_dir_all(package1_dir.join("bin")).unwrap();
+    fs::create_dir_all(package2_dir.join("bin")).unwrap();
+    fs::write(package1_dir.join("bin/perl"), "perl").unwrap();
+    fs::write(package2_dir.join("bin/emacs"), "emacs").unwrap();
+
+    stow_packages(&create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["perl".to_string()],
+        false,
+        0,
+    ))
+    .unwrap();
+    stow_packages(&create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["emacs".to_string()],
+        false,
+        0,
+    ))
+    .unwrap();
+
+    let mut delete_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["emacs".to_string()],
+        false,
+        0,
+    );
+    delete_config.mode = StowMode::Delete;
+    delete_packages(&delete_config).unwrap();
+
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bin should refold to the remaining package"
+    );
+    assert!(target_dir.join("bin/perl").exists());
+    assert!(!target_dir.join("bin/emacs").exists());
+}
+
+#[test]
 fn test_empty_package_list() {
     let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
     let config: Config = create_test_config(
@@ -531,7 +689,7 @@ fn test_dotfiles_processing_edge_cases() {
     // Test case 4: file NOT starting with "dot-"
     let package_dir_4: PathBuf = stow_dir.join("package4");
     fs::create_dir_all(&package_dir_4).unwrap();
-    fs::write(package_dir_4.join("nodotprefix"), "content").unwrap();
+    fs::write(package_dir_4.join("nodotprefix-file"), "content").unwrap();
 
     // Test case 5: directory NOT starting with "dot-", containing a file
     let package_dir_5: PathBuf = stow_dir.join("package5");
@@ -540,7 +698,7 @@ fn test_dotfiles_processing_edge_cases() {
     fs::create_dir_all(&nested_dir_5).unwrap();
     fs::write(nested_dir_5.join("file.txt"), "content").unwrap();
 
-    let config: Config = create_test_config(
+    let mut config: Config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
         vec![
@@ -553,6 +711,7 @@ fn test_dotfiles_processing_edge_cases() {
         true, // enable dotfiles processing
         0,    // Verbosity 0 for this test after debug logs were removed from core
     );
+    config.no_folding = true;
 
     let actions_result: Result<Vec<rustow::stow::TargetActionReport>, rustow::error::RustowError> =
         stow_packages(&config);
@@ -705,71 +864,43 @@ fn test_dotfiles_processing_edge_cases() {
         "ActionType for .dirOnly/some_file.txt should be CreateSymlink"
     );
 
-    // Verify package4: "nodotprefix" -> "nodotprefix"
+    // Verify package4: "nodotprefix-file" -> "nodotprefix-file"
     let report_pkg4_nodotprefix_file: &rustow::stow::TargetActionReport = actions
         .iter()
         .find(|r| {
             r.original_action.source_item.as_ref().is_some_and(|item| {
-                item.package_relative_path == Path::new("nodotprefix")
-                    && item.target_name_after_dotfiles_processing == Path::new("nodotprefix")
-                    && item.item_type == StowItemType::File // Ensure we are checking the file from package4
+                item.package_relative_path == Path::new("nodotprefix-file")
+                    && item.target_name_after_dotfiles_processing == Path::new("nodotprefix-file")
+                    && item.item_type == StowItemType::File
             })
         })
-        .expect("Report for package4/nodotprefix (target: nodotprefix) not found");
+        .expect("Report for package4/nodotprefix-file (target: nodotprefix-file) not found");
 
     assert_eq!(
         report_pkg4_nodotprefix_file.status,
-        TargetActionReportStatus::ConflictPrevented, // EXPECT CONFLICT
-        "Expected package4/nodotprefix processing to be ConflictPrevented, but got {:?}. Message: {:?}",
+        TargetActionReportStatus::Success,
+        "Expected package4/nodotprefix-file processing to be Success, but got {:?}. Message: {:?}",
         report_pkg4_nodotprefix_file.status,
         report_pkg4_nodotprefix_file.message
     );
     assert_eq!(
         report_pkg4_nodotprefix_file.original_action.action_type,
-        ActionType::Conflict,
-        "ActionType for package4/nodotprefix should be Conflict"
+        ActionType::CreateSymlink,
+        "ActionType for package4/nodotprefix-file should be CreateSymlink"
     );
-    let expected_target_pkg4_nodotprefix_file: PathBuf = target_dir.join("nodotprefix");
-    // In case of conflict, the file from package4 might not be created,
-    // or if an earlier package created something, it might remain.
-    // For this specific test, package4 is processed before package5.
-    // So, if package4 attempts to create a symlink and package5 attempts a directory,
-    // one of them will be a conflict. If stow_packages processes them sequentially
-    // and the conflict detection is global *after* all plans, then execute_actions sees the Conflict.
-    // Let's assume the symlink from package4 *would* have been created if no conflict from package5 existed.
-    // However, because of the conflict, its action is marked Conflict, and it should NOT be created by execute_actions.
-    // The *other* conflicting item (from package5) will also be marked Conflict.
-    // So, the target path should ideally be empty or untouched by these conflicting actions.
-    // However, the current execute_actions creates the *first* non-conflicting item if multiple packages target the same path
-    // before the inter-package conflict marks them all as Conflict. This needs refinement.
-    // For now, we will assert that the final state of the target does not correspond to package4's successful symlink
-    // when a conflict with package5 is present and detected.
-    // If the conflict is properly handled, neither package4's file symlink nor package5's directory should solely occupy the target.
-    // The test output showed package4's symlink IS created, then package5's dir fails.
-    // This implies the conflict detection in plan_actions might not be preventing the *first* action if multiple packages are involved.
-    // Let's adjust the expectation: package4 creates its link, then package5's dir creation action is marked as Conflict.
-    // No, the new `plan_actions` inter-package conflict should mark BOTH as conflict *before* execution.
-
-    // After proper conflict handling, the target path should not be a symlink *from package4* specifically
-    // if the conflict with package5 (directory) was identified *before* execution.
-    // It's possible the target path remains as it was before any operation from these two packages.
-    // For this test, we'll assume if it's a conflict, the symlink from package4 does not get created.
-    // This means the assertion `expected_target_pkg4_nodotprefix_file.exists()` might be false.
-    // And `is_symlink` would also be false or panic if it doesn't exist.
-
-    // Given the current test failure (package4's symlink IS created),
-    // the inter-package conflict detection in `plan_actions` might not be effective across packages,
-    // or `execute_actions` doesn't respect it fully for the first item.
-    // Let's assume the `plan_actions` conflict detection *should* prevent creation.
+    let expected_target_pkg4_nodotprefix_file: PathBuf = target_dir.join("nodotprefix-file");
     assert!(
-        !expected_target_pkg4_nodotprefix_file.exists()
-            || !fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file)
-                .is_ok_and(|m| m.file_type().is_symlink()),
-        "Target nodotprefix for package4 SHOULD NOT be a symlink due to conflict. Current state: exists={}, is_symlink={}",
         expected_target_pkg4_nodotprefix_file.exists(),
-        expected_target_pkg4_nodotprefix_file.exists()
-            && fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file)
-                .is_ok_and(|m| m.file_type().is_symlink())
+        "Target nodotprefix-file for package4 was not created. Report details: {:?}",
+        report_pkg4_nodotprefix_file
+    );
+    assert!(
+        fs::symlink_metadata(&expected_target_pkg4_nodotprefix_file)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "Target nodotprefix-file for package4 is not a symlink. Report details: {:?}",
+        report_pkg4_nodotprefix_file
     );
 
     // Verify package5: "nodotprefix/file.txt" -> "nodotprefix/file.txt"
@@ -787,25 +918,26 @@ fn test_dotfiles_processing_edge_cases() {
 
     assert_eq!(
         report_pkg5_nodotprefix_dir.status,
-        TargetActionReportStatus::ConflictPrevented, // EXPECT CONFLICT
-        "Expected package5/nodotprefix (directory) processing to be ConflictPrevented, but got {:?}. Message: {:?}",
+        TargetActionReportStatus::Success,
+        "Expected package5/nodotprefix (directory) processing to be Success, but got {:?}. Message: {:?}",
         report_pkg5_nodotprefix_dir.status,
         report_pkg5_nodotprefix_dir.message
     );
     assert_eq!(
         report_pkg5_nodotprefix_dir.original_action.action_type,
-        ActionType::Conflict,
-        "ActionType for package5/nodotprefix (directory) should be Conflict"
+        ActionType::CreateDirectory,
+        "ActionType for package5/nodotprefix (directory) should be CreateDirectory"
     );
     let expected_target_pkg5_nodotprefix_dir: PathBuf = target_dir.join("nodotprefix");
-    // If conflict is properly handled, package5's directory should not be created.
     assert!(
-        !expected_target_pkg5_nodotprefix_dir.exists()
-            || !expected_target_pkg5_nodotprefix_dir.is_dir(),
-        "Target nodotprefix for package5 SHOULD NOT be a directory due to conflict. Current state: exists={}, is_dir={}",
         expected_target_pkg5_nodotprefix_dir.exists(),
-        expected_target_pkg5_nodotprefix_dir.exists()
-            && expected_target_pkg5_nodotprefix_dir.is_dir()
+        "Target nodotprefix for package5 was not created. Report details: {:?}",
+        report_pkg5_nodotprefix_dir
+    );
+    assert!(
+        expected_target_pkg5_nodotprefix_dir.is_dir(),
+        "Target nodotprefix for package5 is not a directory. Report details: {:?}",
+        report_pkg5_nodotprefix_dir
     );
 
     // Next, verify the nested file "nodotprefix/file.txt" for package5
@@ -820,25 +952,31 @@ fn test_dotfiles_processing_edge_cases() {
         })
         .expect("Report for package5/nodotprefix/file.txt not found");
 
-    // If the parent directory `nodotprefix` for package5 is a Conflict,
-    // then the nested file should also be treated as a Conflict or at least not Success.
     assert_eq!(
         report_pkg5_nested_file.status,
-        TargetActionReportStatus::ConflictPrevented, // EXPECT CONFLICT (due to parent conflict)
-        "Expected package5/nodotprefix/file.txt processing to be ConflictPrevented due to parent, but got {:?}. Message: {:?}",
+        TargetActionReportStatus::Success,
+        "Expected package5/nodotprefix/file.txt processing to be Success, but got {:?}. Message: {:?}",
         report_pkg5_nested_file.status,
         report_pkg5_nested_file.message
     );
     assert_eq!(
         report_pkg5_nested_file.original_action.action_type,
-        ActionType::Conflict,
-        "ActionType for package5/nodotprefix/file.txt should be Conflict due to parent"
+        ActionType::CreateSymlink,
+        "ActionType for package5/nodotprefix/file.txt should be CreateSymlink"
     );
     let expected_target_pkg5_nested_file: PathBuf = target_dir.join("nodotprefix/file.txt");
     assert!(
-        !expected_target_pkg5_nested_file.exists(),
-        "Target nodotprefix/file.txt for package5 SHOULD NOT exist due to parent conflict. Current state: exists={}",
-        expected_target_pkg5_nested_file.exists()
+        expected_target_pkg5_nested_file.exists(),
+        "Target nodotprefix/file.txt for package5 was not created. Report details: {:?}",
+        report_pkg5_nested_file
+    );
+    assert!(
+        fs::symlink_metadata(&expected_target_pkg5_nested_file)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "Target nodotprefix/file.txt for package5 is not a symlink. Report details: {:?}",
+        report_pkg5_nested_file
     );
 }
 
@@ -965,13 +1103,14 @@ fn test_plan_actions_basic_creation_and_conflict() {
     )
     .unwrap();
 
-    let config_empty_target: Config = create_test_config(
+    let mut config_empty_target: Config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
         vec![package_name.to_string()],
         false,
         0,
     );
+    config_empty_target.no_folding = true;
 
     let actions_empty_result: Result<
         Vec<rustow::stow::TargetActionReport>,
@@ -1210,6 +1349,7 @@ fn test_execute_actions_basic_creation() {
         false, // dotfiles disabled for simplicity here
         0,     // verbosity
     );
+    config1.no_folding = true;
 
     // Plan actions
     let planned_actions1_result: Result<
@@ -1397,13 +1537,14 @@ fn test_execute_actions_basic_creation() {
     )
     .unwrap();
 
-    let config3: Config = create_test_config(
+    let mut config3: Config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
         vec![pkg3_name.to_string()],
         false,
         0,
     );
+    config3.no_folding = true;
     let reports3_result: Result<Vec<rustow::stow::TargetActionReport>, rustow::error::RustowError> =
         rustow::stow::stow_packages(&config3);
     assert!(
@@ -1499,6 +1640,7 @@ fn test_execute_actions_basic_creation() {
         false,
         0,
     );
+    config3_sim.no_folding = true;
     config3_sim.simulate = true;
     let reports3_sim_result: Result<
         Vec<rustow::stow::TargetActionReport>,
@@ -1561,13 +1703,14 @@ fn test_delete_mode_basic() {
     create_test_package(&stow_dir, package_name);
 
     // First, stow the package to create symlinks
-    let stow_config: Config = create_test_config(
+    let mut stow_config: Config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
         vec![package_name.to_string()],
         false,
         0,
     );
+    stow_config.no_folding = true;
 
     let stow_result = stow_packages(&stow_config);
     assert!(
@@ -1803,13 +1946,14 @@ fn test_restow_mode_basic() {
     let package_dir = create_test_package(&stow_dir, package_name);
 
     // First, stow the package
-    let stow_config: Config = create_test_config(
+    let mut stow_config: Config = create_test_config(
         stow_dir.clone(),
         target_dir.clone(),
         vec![package_name.to_string()],
         false,
         0,
     );
+    stow_config.no_folding = true;
 
     let stow_result = stow_packages(&stow_config);
     assert!(
@@ -2406,7 +2550,7 @@ fn test_conflict_resolution_pattern_matching() {
 
     let reports = result.unwrap();
 
-    // Check override_me.txt - should be CreateSymlink (overridden)
+    // Check override_me.txt - should be Conflict (override does not apply to non-stow targets)
     let override_report = reports
         .iter()
         .find(|r| {
@@ -2418,11 +2562,11 @@ fn test_conflict_resolution_pattern_matching() {
         .expect("Should find report for override_me.txt");
     assert_eq!(
         override_report.original_action.action_type,
-        ActionType::CreateSymlink,
-        "override_me.txt should be CreateSymlink due to --override pattern"
+        ActionType::Conflict,
+        "override_me.txt should be Conflict when target is not stow-managed"
     );
 
-    // Check defer_me.txt - should be Skip (deferred)
+    // Check defer_me.txt - should be Conflict (defer does not apply to non-stow targets)
     let defer_report = reports
         .iter()
         .find(|r| {
@@ -2434,8 +2578,8 @@ fn test_conflict_resolution_pattern_matching() {
         .expect("Should find report for defer_me.txt");
     assert_eq!(
         defer_report.original_action.action_type,
-        ActionType::Skip,
-        "defer_me.txt should be Skip due to --defer pattern"
+        ActionType::Conflict,
+        "defer_me.txt should be Conflict when target is not stow-managed"
     );
 
     // Check normal_file.txt - should be Conflict (no pattern matches)

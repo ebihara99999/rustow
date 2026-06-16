@@ -382,16 +382,18 @@ mod tests {
     const TEST_LOAD_BASE_DIR: &str = "target/test_ignore_load_data";
 
     fn setup_load_test_dir(test_name: &str) -> PathBuf {
-        let base = PathBuf::from(TEST_LOAD_BASE_DIR).join(test_name);
+        let base = PathBuf::from(TEST_LOAD_BASE_DIR)
+            .join(std::process::id().to_string())
+            .join(test_name);
         if base.exists() {
-            fs::remove_dir_all(&base).unwrap();
+            let _ = fs::remove_dir_all(&base);
         }
         fs::create_dir_all(&base).unwrap();
         base
     }
 
     fn teardown_load_test_dir(base_dir: &Path) {
-        fs::remove_dir_all(base_dir).unwrap();
+        let _ = fs::remove_dir_all(base_dir);
     }
 
     #[test]

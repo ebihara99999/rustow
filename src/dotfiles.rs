@@ -1,18 +1,28 @@
 #[allow(dead_code)] // Allow dead code for this function as it will be used by other modules later
-// Placeholder for the process_item_name function
 pub fn process_item_name(item_name: &str, is_dotfiles_enabled: bool) -> String {
-    if is_dotfiles_enabled {
-        if let Some(stripped) = item_name.strip_prefix("dot-") {
-            // "dot-" を "." に置き換える
-            // "dot-" のみの場合は "." になる
-            // "dot-foo" の場合は ".foo" になる
-            format!(".{}", stripped)
-        } else {
-            item_name.to_string()
-        }
-    } else {
-        item_name.to_string()
+    if !is_dotfiles_enabled {
+        return item_name.to_string();
     }
+
+    let mut processed = std::path::PathBuf::new();
+    for component in std::path::Path::new(item_name).components() {
+        match component {
+            std::path::Component::Normal(name) => {
+                let name_str = name.to_string_lossy();
+                if let Some(stripped) = name_str.strip_prefix("dot-") {
+                    processed.push(format!(".{}", stripped));
+                } else {
+                    processed.push(name_str.as_ref());
+                }
+            },
+            std::path::Component::CurDir => processed.push("."),
+            std::path::Component::ParentDir => processed.push(".."),
+            std::path::Component::RootDir => processed.push(std::path::Path::new("/")),
+            std::path::Component::Prefix(prefix) => processed.push(prefix.as_os_str()),
+        }
+    }
+
+    processed.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
@@ -49,14 +59,9 @@ mod tests {
     fn test_process_item_name_path_like_string() {
         // process_item_name is expected to work on individual path components usually,
         // but the spec implies it can work on the whole relative path string from the package.
-        // Let's assume it should replace only the *first* "dot-" if it's at the beginning of a segment.
-        // However, the current simple implementation replaces based on the whole string starting with "dot-".
-        // This test reflects the current simple implementation.
         assert_eq!(
             process_item_name("dot-config/sub/dot-another", true),
-            ".config/sub/dot-another"
+            ".config/sub/.another"
         );
-        // If we wanted to process segments: (this would require a more complex function)
-        // assert_eq!(process_item_name_segmented("dot-config/sub/dot-another", true), ".config/sub/.another");
     }
 }
