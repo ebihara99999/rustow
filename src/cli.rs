@@ -767,6 +767,18 @@ mod tests {
     }
 
     #[test]
+    fn test_help_takes_precedence_after_packages() {
+        let error = Args::try_parse_from(["rustow", "mypackage", "--help"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+
+        let error = Args::try_parse_from(["rustow", "mypackage", "-h"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+
+        let error = Args::try_parse_from(["rustow", "mypackage", "-V"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
     fn test_try_parse_from_with_operation_groups_returns_parse_errors() {
         let error =
             Args::try_parse_from_with_operation_groups(["rustow", "--verbose=6", "mypackage"])
@@ -1000,6 +1012,28 @@ mod tests {
                 packages: vec!["old".to_string()],
             }]
         );
+    }
+
+    #[test]
+    fn test_short_cluster_with_value_flag_stops_verbosity_counting() {
+        let args = Args::parse_from(["rustow", "-tv", "mypackage"]);
+        assert_eq!(args.target, Some(PathBuf::from("v")));
+        assert_eq!(args.verbose, 0);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_short_cluster_mode_value_attached_to_target() {
+        let parsed_args = Args::parse_from_with_operation_groups(["rustow", "-Dt/tmp/stow", "pkg"]);
+
+        assert_eq!(
+            parsed_args.operation_groups,
+            vec![OperationGroup {
+                mode: OperationMode::Delete,
+                packages: vec!["pkg".to_string()],
+            }]
+        );
+        assert_eq!(parsed_args.args.target, Some(PathBuf::from("/tmp/stow")));
     }
 
     #[test]
