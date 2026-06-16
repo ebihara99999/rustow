@@ -173,6 +173,11 @@ impl IgnorePatterns {
         self.patterns.iter()
     }
 
+    pub fn with_extra_patterns(mut self, extra_patterns: &[Regex]) -> Self {
+        self.patterns.extend(extra_patterns.iter().cloned());
+        self
+    }
+
     pub fn load(
         stow_dir: &Path,
         package_name: Option<&str>,
@@ -234,6 +239,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     // Note: The tempdir crate is not available in this environment.
     // Tests will create files in subdirectories and clean them up.
 
@@ -379,15 +385,14 @@ mod tests {
 
     // --- Tests for IgnorePatterns::load ---
     // Base directory for load tests to avoid polluting the project root.
-    const TEST_LOAD_BASE_DIR: &str = "target/test_ignore_load_data";
+    static TEST_LOAD_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn setup_load_test_dir(test_name: &str) -> PathBuf {
-        let base = PathBuf::from(TEST_LOAD_BASE_DIR)
+        let unique_id = TEST_LOAD_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir()
+            .join("rustow_test_ignore_load_data")
             .join(std::process::id().to_string())
-            .join(test_name);
-        if base.exists() {
-            let _ = fs::remove_dir_all(&base);
-        }
+            .join(format!("{test_name}_{unique_id}"));
         fs::create_dir_all(&base).unwrap();
         base
     }

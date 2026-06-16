@@ -6,6 +6,7 @@ use crate::dotfiles;
 use crate::error::{FsError, RustowError, StowError};
 use crate::fs_utils::{self};
 use crate::ignore::{self, IgnorePatterns};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // Define modules inline for now
@@ -299,8 +300,7 @@ fn plan_actions(
     config: &Config,
     current_ignore_patterns: &IgnorePatterns,
 ) -> Result<Vec<TargetAction>, RustowError> {
-    let package_path = config.stow_dir.join(package_name);
-    validate_package_path(&package_path, package_name)?;
+    let package_path = validated_package_path(&config.stow_dir, package_name)?;
 
     let raw_items = load_package_items(&package_path, package_name)?;
     let mut actions = Vec::new();
@@ -412,12 +412,38 @@ fn plan_stow_action_for_item(
         };
 
     Ok(TargetAction {
-        source_item: Some(stow_item.clone()),
+        source_item: Some(source_item_for_action(
+            stow_item,
+            &action_type,
+            config,
+            package_name,
+        )?),
         target_path: target_path_abs.to_path_buf(),
         link_target_path: final_link_target,
         action_type,
         conflict_details,
     })
+}
+
+fn source_item_for_action(
+    stow_item: &StowItem,
+    action_type: &ActionType,
+    config: &Config,
+    package_name: &str,
+) -> Result<StowItem, RustowError> {
+    let mut source_item = stow_item.clone();
+
+    if config.adopt
+        && matches!(
+            action_type,
+            ActionType::AdoptFile | ActionType::AdoptDirectory
+        )
+    {
+        source_item.source_path = canonical_package_path(&config.stow_dir, package_name)?
+            .join(&stow_item.package_relative_path);
+    }
+
+    Ok(source_item)
 }
 
 /// Handle conflicts when target path already exists
@@ -426,14 +452,26 @@ fn check_directory_for_non_stow_files(
     target_path_abs: &Path,
     config: &Config,
 ) -> Result<bool, RustowError> {
-    if let Ok(entries) = std::fs::read_dir(target_path_abs) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if is_non_stow_entry(&entry_path, &config.stow_dir) {
-                return Ok(true);
-            }
+    let entries = std::fs::read_dir(target_path_abs).map_err(|e| {
+        RustowError::Fs(FsError::Io {
+            path: target_path_abs.to_path_buf(),
+            source: e,
+        })
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            RustowError::Fs(FsError::Io {
+                path: target_path_abs.to_path_buf(),
+                source: e,
+            })
+        })?;
+        let entry_path = entry.path();
+        if is_non_stow_entry(&entry_path, &config.stow_dir) {
+            return Ok(true);
         }
     }
+
     Ok(false)
 }
 
@@ -501,8 +539,10 @@ fn is_same_package_and_item(
     existing_item_path: &Path,
     stow_item: &StowItem,
     package_name: &str,
+    config: &Config,
 ) -> bool {
-    existing_package_name == package_name && existing_item_path == stow_item.package_relative_path
+    is_same_package_name(existing_package_name, package_name, config)
+        && existing_item_path == stow_item.package_relative_path
 }
 
 fn calculate_link_target_for_source(source_path: &Path, target_path_abs: &Path) -> PathBuf {
@@ -527,6 +567,27 @@ fn read_sorted_directory_entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, 
     })?;
     entries.sort_by_key(|entry| entry.file_name());
     Ok(entries)
+}
+
+fn read_directory_entries(path: &Path) -> Result<std::fs::ReadDir, RustowError> {
+    std::fs::read_dir(path).map_err(|e| {
+        RustowError::Fs(FsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    })
+}
+
+fn read_directory_entry(
+    entry: std::io::Result<std::fs::DirEntry>,
+    path: &Path,
+) -> Result<std::fs::DirEntry, RustowError> {
+    entry.map_err(|e| {
+        RustowError::Fs(FsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    })
 }
 
 fn stow_item_type_from_file_type(file_type: std::fs::FileType) -> Option<StowItemType> {
@@ -679,12 +740,19 @@ fn plan_split_open_actions_if_needed(
     else {
         return Ok(None);
     };
+    let (existing_package_name, existing_item_path) =
+        lexical_stow_symlink_package_and_item_path(target_path_abs, &config.stow_dir)?
+            .unwrap_or((existing_package_name, existing_item_path));
+    if !package_is_valid_refold_source(&existing_package_name, config)? {
+        return Ok(None);
+    }
 
     if is_same_package_and_item(
         &existing_package_name,
         &existing_item_path,
         stow_item,
         package_name,
+        config,
     ) {
         return Ok(None);
     }
@@ -729,12 +797,13 @@ fn handle_existing_symlink_conflict(
             &existing_item_path,
             stow_item,
             package_name,
+            config,
         ) {
             // Same package and same item, no conflict - already correctly stowed
             return Ok((
                 ActionType::Skip,
                 Some("Target already points to the same source".to_string()),
-                None,
+                Some(link_target_for_symlink),
             ));
         } else {
             // Different package or item path - check conflict resolution options
@@ -863,7 +932,7 @@ fn handle_stow_package_conflict(
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
     let pattern_matcher = PatternMatcher::new(config);
     if let Some((action_type, message, link_target)) =
-        pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink)
+        pattern_matcher.check_patterns(target_path_abs, link_target_for_symlink.clone())
     {
         return Ok((action_type, Some(message), link_target));
     }
@@ -875,7 +944,7 @@ fn handle_stow_package_conflict(
             "Target path {:?} is managed by another stow package",
             target_path_abs
         )),
-        None,
+        Some(link_target_for_symlink),
     ))
 }
 
@@ -1146,8 +1215,9 @@ struct ParentConflictInfo {
 
 #[derive(Debug)]
 enum ParentConflictType {
-    ParentIsFile,
-    ParentIsConflictTarget,
+    File,
+    SymlinkAncestor,
+    ConflictTarget,
 }
 
 /// Check if a specific parent path has conflicts
@@ -1155,10 +1225,19 @@ fn check_parent_path_conflicts(
     parent_path: &Path,
     all_actions: &[TargetAction],
 ) -> Option<ParentConflictInfo> {
+    if fs_utils::is_symlink(parent_path)
+        && !parent_symlink_is_opened_by_plan(parent_path, all_actions)
+    {
+        return Some(ParentConflictInfo {
+            conflict_type: ParentConflictType::SymlinkAncestor,
+            parent_path: parent_path.to_path_buf(),
+        });
+    }
+
     // Check if parent path is a file (conflicts with directory requirement)
     if fs_utils::path_exists(parent_path) && !fs_utils::is_directory(parent_path) {
         return Some(ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: parent_path.to_path_buf(),
         });
     }
@@ -1166,12 +1245,23 @@ fn check_parent_path_conflicts(
     // Check if parent path is target of another conflicting action
     if is_parent_target_of_conflict(parent_path, all_actions) {
         return Some(ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsConflictTarget,
+            conflict_type: ParentConflictType::ConflictTarget,
             parent_path: parent_path.to_path_buf(),
         });
     }
 
     None
+}
+
+fn parent_symlink_is_opened_by_plan(parent_path: &Path, all_actions: &[TargetAction]) -> bool {
+    let has_delete_symlink = all_actions.iter().any(|action| {
+        action.target_path == parent_path && action.action_type == ActionType::DeleteSymlink
+    });
+    let has_create_directory = all_actions.iter().any(|action| {
+        action.target_path == parent_path && action.action_type == ActionType::CreateDirectory
+    });
+
+    has_delete_symlink && has_create_directory
 }
 
 /// Find parent conflicts for an action
@@ -1200,7 +1290,7 @@ fn find_parent_conflict(
 /// Generate conflict message based on conflict type and action
 fn generate_conflict_message(conflict_info: &ParentConflictInfo, action: &TargetAction) -> String {
     match conflict_info.conflict_type {
-        ParentConflictType::ParentIsFile => {
+        ParentConflictType::File => {
             let item_name = action
                 .source_item
                 .as_ref()
@@ -1212,7 +1302,13 @@ fn generate_conflict_message(conflict_info: &ParentConflictInfo, action: &Target
                 conflict_info.parent_path, item_name
             )
         },
-        ParentConflictType::ParentIsConflictTarget => {
+        ParentConflictType::SymlinkAncestor => {
+            format!(
+                "Parent path {:?} is a symlink; refusing to traverse symlinked target ancestors.",
+                conflict_info.parent_path
+            )
+        },
+        ParentConflictType::ConflictTarget => {
             format!(
                 "Parent path {:?} is part of a conflicting item tree.",
                 conflict_info.parent_path
@@ -1254,10 +1350,9 @@ fn execute_actions(
     actions: &[TargetAction],
     config: &Config,
 ) -> Result<Vec<TargetActionReport>, RustowError> {
-    if !config.simulate
-        && actions
-            .iter()
-            .any(|a| a.action_type == ActionType::Conflict)
+    if actions
+        .iter()
+        .any(|a| a.action_type == ActionType::Conflict)
     {
         return Ok(build_conflict_reports(actions));
     }
@@ -1268,7 +1363,7 @@ fn execute_actions(
         let report = if config.simulate {
             execute_simulate_action(action)
         } else {
-            execute_real_action(action)
+            execute_real_action(action, config)
         };
         reports.push(report);
     }
@@ -1317,15 +1412,15 @@ fn execute_simulate_action(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute an action for real
-fn execute_real_action(action: &TargetAction) -> TargetActionReport {
+fn execute_real_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     match action.action_type {
         ActionType::Conflict => execute_conflict_action(action),
-        ActionType::CreateDirectory => execute_create_directory_action(action),
-        ActionType::CreateSymlink => execute_create_symlink_action(action),
-        ActionType::DeleteSymlink => execute_delete_symlink_action(action),
-        ActionType::DeleteDirectory => execute_delete_directory_action(action),
-        ActionType::AdoptFile => execute_adopt_file_action(action),
-        ActionType::AdoptDirectory => execute_adopt_directory_action(action),
+        ActionType::CreateDirectory => execute_create_directory_action(action, config),
+        ActionType::CreateSymlink => execute_create_symlink_action(action, config),
+        ActionType::DeleteSymlink => execute_delete_symlink_action(action, config),
+        ActionType::DeleteDirectory => execute_delete_directory_action(action, config),
+        ActionType::AdoptFile => execute_adopt_file_action(action, config),
+        ActionType::AdoptDirectory => execute_adopt_directory_action(action, config),
         ActionType::Skip => execute_skip_action(action),
     }
 }
@@ -1344,7 +1439,11 @@ fn execute_conflict_action(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute a create directory action
-fn execute_create_directory_action(action: &TargetAction) -> TargetActionReport {
+fn execute_create_directory_action(action: &TargetAction, config: &Config) -> TargetActionReport {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, true) {
+        return error_report;
+    }
+
     match fs_utils::create_dir_all(&action.target_path) {
         Ok(_) => TargetActionReport {
             original_action: action.clone(),
@@ -1384,6 +1483,43 @@ fn ensure_parent_directory_exists(action: &TargetAction) -> Option<TargetActionR
             }
         }
     }
+    None
+}
+
+fn ensure_target_path_ancestors_not_symlink(
+    action: &TargetAction,
+    config: &Config,
+    include_target: bool,
+) -> Option<TargetActionReport> {
+    let symlink_path =
+        target_symlink_ancestor_path(&action.target_path, &config.target_dir, include_target)?;
+
+    Some(TargetActionReport {
+        original_action: action.clone(),
+        status: TargetActionReportStatus::Failure(format!(
+            "Refusing to traverse symlinked target ancestor {:?}",
+            symlink_path
+        )),
+        message: Some(format!(
+            "Target path {:?} contains symlinked ancestor {:?}",
+            action.target_path, symlink_path
+        )),
+    })
+}
+
+fn target_symlink_ancestor_path(path: &Path, root: &Path, include_target: bool) -> Option<PathBuf> {
+    let relative_path = path.strip_prefix(root).ok()?;
+    let mut current = root.to_path_buf();
+    let mut components = relative_path.components().peekable();
+
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        let is_target = components.peek().is_none();
+        if (include_target || !is_target) && fs_utils::is_symlink(&current) {
+            return Some(current);
+        }
+    }
+
     None
 }
 
@@ -1444,7 +1580,11 @@ fn create_symlink_with_target(action: &TargetAction, link_target: &Path) -> Targ
 }
 
 /// Prepare for symlink creation by ensuring prerequisites are met
-fn prepare_symlink_creation(action: &TargetAction) -> Option<TargetActionReport> {
+fn prepare_symlink_creation(action: &TargetAction, config: &Config) -> Option<TargetActionReport> {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return Some(error_report);
+    }
+
     // Ensure parent directory exists
     if let Some(error_report) = ensure_parent_directory_exists(action) {
         return Some(error_report);
@@ -1459,11 +1599,11 @@ fn prepare_symlink_creation(action: &TargetAction) -> Option<TargetActionReport>
 }
 
 /// Execute a create symlink action
-fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
+fn execute_create_symlink_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     match &action.link_target_path {
         Some(link_target) => {
             // Prepare for symlink creation
-            if let Some(error_report) = prepare_symlink_creation(action) {
+            if let Some(error_report) = prepare_symlink_creation(action, config) {
                 return error_report;
             }
 
@@ -1484,7 +1624,11 @@ fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute a delete symlink action
-fn execute_delete_symlink_action(action: &TargetAction) -> TargetActionReport {
+fn execute_delete_symlink_action(action: &TargetAction, config: &Config) -> TargetActionReport {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
     match fs_utils::delete_symlink(&action.target_path) {
         Ok(_) => TargetActionReport {
             original_action: action.clone(),
@@ -1560,7 +1704,11 @@ fn perform_directory_deletion(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute a delete directory action
-fn execute_delete_directory_action(action: &TargetAction) -> TargetActionReport {
+fn execute_delete_directory_action(action: &TargetAction, config: &Config) -> TargetActionReport {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
     // Check if directory exists first
     if let Some(skip_report) = check_directory_exists_for_deletion(action) {
         return skip_report;
@@ -1590,30 +1738,6 @@ fn execute_delete_directory_action(action: &TargetAction) -> TargetActionReport 
     }
 }
 
-fn collect_refold_candidate_dirs(
-    dir_path: &Path,
-    config: &Config,
-    dirs: &mut Vec<PathBuf>,
-) -> Result<(), RustowError> {
-    if dir_path == config.stow_dir || dir_path.starts_with(&config.stow_dir) {
-        return Ok(());
-    }
-
-    for entry in read_sorted_directory_entries(dir_path)? {
-        let path = entry.path();
-        if path == config.stow_dir || path.starts_with(&config.stow_dir) {
-            continue;
-        }
-
-        if fs_utils::is_directory(&path) && !fs_utils::is_symlink(&path) {
-            collect_refold_candidate_dirs(&path, config, dirs)?;
-            dirs.push(path);
-        }
-    }
-
-    Ok(())
-}
-
 fn common_package_directory_for_symlinks(
     dir_path: &Path,
     config: &Config,
@@ -1633,7 +1757,7 @@ fn common_package_directory_for_symlinks(
         }
 
         let Some((package_name, item_path)) =
-            fs_utils::is_stow_symlink(&entry_path, &config.stow_dir)?
+            lexical_stow_symlink_package_and_item_path(&entry_path, &config.stow_dir)?
         else {
             return Ok(None);
         };
@@ -1657,13 +1781,213 @@ fn common_package_directory_for_symlinks(
     let Some(package_name) = common_package_name else {
         return Ok(None);
     };
+    if !package_is_valid_refold_source(&package_name, config)? {
+        return Ok(None);
+    }
+
     let item_parent = common_item_parent.unwrap_or_default();
     let source_dir = config.stow_dir.join(package_name).join(item_parent);
 
-    if fs_utils::is_directory(&source_dir) {
+    if fs_utils::is_directory(&source_dir)
+        && source_directory_can_refold(dir_path, &source_dir, config)?
+    {
         Ok(Some(source_dir))
     } else {
         Ok(None)
+    }
+}
+
+fn source_directory_can_refold(
+    dir_path: &Path,
+    source_dir: &Path,
+    config: &Config,
+) -> Result<bool, RustowError> {
+    let Some((package_name, item_parent)) =
+        package_and_item_path_for_source_dir(source_dir, config)
+    else {
+        return Ok(false);
+    };
+    if !package_is_valid_refold_source(&package_name, config)? {
+        return Ok(false);
+    }
+
+    let ignore_patterns = load_ignore_patterns_for_package(&package_name, config)?;
+    if directory_contains_ignored_descendants(
+        &package_name,
+        &item_parent,
+        config,
+        &ignore_patterns,
+    )? || directory_contains_deferred_descendants(&package_name, &item_parent, config)?
+    {
+        return Ok(false);
+    }
+
+    for entry in read_directory_entries(dir_path)? {
+        let path = read_directory_entry(entry, dir_path)?.path();
+        let Ok(target_relative_path) = path.strip_prefix(&config.target_dir) else {
+            return Ok(false);
+        };
+
+        if should_ignore_item(target_relative_path, &ignore_patterns)
+            || should_defer_item(target_relative_path, config)
+        {
+            return Ok(false);
+        }
+
+        if !fs_utils::is_symlink(&path) {
+            return Ok(false);
+        }
+
+        let Some((target_package, target_item_path)) =
+            lexical_stow_symlink_package_and_item_path(&path, &config.stow_dir)?
+        else {
+            return Ok(false);
+        };
+
+        if target_package != package_name {
+            return Ok(false);
+        }
+
+        let expected_item_parent = if item_parent.as_os_str().is_empty() {
+            None
+        } else {
+            Some(item_parent.as_path())
+        };
+        if target_item_path.parent() != expected_item_parent {
+            return Ok(false);
+        }
+
+        if !fs_utils::path_exists(
+            &config
+                .stow_dir
+                .join(&target_package)
+                .join(target_item_path.as_path()),
+        ) {
+            return Ok(false);
+        }
+    }
+
+    for entry in read_directory_entries(source_dir)? {
+        let entry = read_directory_entry(entry, source_dir)?;
+        let entry_file_name = entry.file_name();
+        let package_relative_path = item_parent.join(entry_file_name);
+        let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
+            package_relative_path.to_str().unwrap_or(""),
+            config.dotfiles,
+        ));
+
+        if should_ignore_item(&processed_target_relative_path, &ignore_patterns)
+            || should_defer_item(&processed_target_relative_path, config)
+        {
+            return Ok(false);
+        }
+
+        let target_path = config.target_dir.join(&processed_target_relative_path);
+        if target_path.parent() != Some(dir_path) || !fs_utils::is_symlink(&target_path) {
+            return Ok(false);
+        }
+
+        let Some((target_package, target_item_path)) =
+            lexical_stow_symlink_package_and_item_path(&target_path, &config.stow_dir)?
+        else {
+            return Ok(false);
+        };
+
+        if target_package != package_name || target_item_path != package_relative_path {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn package_and_item_path_for_source_dir(
+    source_dir: &Path,
+    config: &Config,
+) -> Option<(String, PathBuf)> {
+    let relative_to_stow = source_dir.strip_prefix(&config.stow_dir).ok()?;
+    let mut components = relative_to_stow.components();
+    let package_name = match components.next() {
+        Some(std::path::Component::Normal(package_name)) => {
+            package_name.to_string_lossy().into_owned()
+        },
+        _ => return None,
+    };
+
+    Some((package_name, components.as_path().to_path_buf()))
+}
+
+fn package_is_valid_refold_source(
+    package_name: &str,
+    config: &Config,
+) -> Result<bool, RustowError> {
+    match canonical_package_path(&config.stow_dir, package_name) {
+        Ok(_) => Ok(true),
+        Err(RustowError::Stow(StowError::InvalidPackageStructure(_)))
+        | Err(RustowError::Fs(FsError::NotFound(_)))
+        | Err(RustowError::Fs(FsError::NotADirectory(_))) => Ok(false),
+        Err(RustowError::Fs(FsError::Canonicalize { source, .. }))
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(false)
+        },
+        Err(e) => Err(e),
+    }
+}
+
+fn directory_contains_deferred_descendants(
+    package_name: &str,
+    directory_item_path: &Path,
+    config: &Config,
+) -> Result<bool, RustowError> {
+    let source_dir = config.stow_dir.join(package_name).join(directory_item_path);
+
+    for raw_item in fs_utils::walk_package_dir(&source_dir)? {
+        let package_relative_path = directory_item_path.join(raw_item.package_relative_path);
+        let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
+            package_relative_path.to_str().unwrap_or(""),
+            config.dotfiles,
+        ));
+
+        if should_defer_item(&processed_target_relative_path, config) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn should_defer_item(processed_target_relative_path: &Path, config: &Config) -> bool {
+    let target_path_str = processed_target_relative_path.to_string_lossy();
+    config
+        .defers
+        .iter()
+        .any(|defer| defer.is_match(&target_path_str))
+}
+
+fn lexical_stow_symlink_package_and_item_path(
+    link_path: &Path,
+    stow_dir: &Path,
+) -> Result<Option<(String, PathBuf)>, RustowError> {
+    if !fs_utils::is_symlink(link_path) {
+        return Ok(None);
+    }
+
+    let link_target = fs_utils::read_link(link_path)?;
+    let resolved_target =
+        normalize_path_components(&resolve_symlink_target(link_path, &link_target));
+    let normalized_stow_dir = normalize_path_components(stow_dir);
+    let Ok(relative_to_stow) = resolved_target.strip_prefix(&normalized_stow_dir) else {
+        return Ok(None);
+    };
+
+    let mut components = relative_to_stow.components();
+    match components.next() {
+        Some(std::path::Component::Normal(package_name)) => Ok(Some((
+            package_name.to_string_lossy().into_owned(),
+            components.as_path().to_path_buf(),
+        ))),
+        _ => Ok(None),
     }
 }
 
@@ -1737,18 +2061,54 @@ fn refold_directory(dir_path: &Path, source_dir: &Path) -> TargetActionReport {
     }
 }
 
-fn refold_foldable_trees(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
+fn collect_refold_candidate_dirs<'a, I>(actions: I, config: &Config) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = &'a TargetAction>,
+{
+    let mut dirs = HashSet::new();
+
+    for action in actions {
+        for candidate in action.target_path.ancestors() {
+            if candidate == config.target_dir {
+                break;
+            }
+
+            if !candidate.starts_with(&config.target_dir)
+                || candidate == config.stow_dir
+                || candidate.starts_with(&config.stow_dir)
+            {
+                continue;
+            }
+
+            dirs.insert(candidate.to_path_buf());
+        }
+    }
+
+    let mut dirs: Vec<PathBuf> = dirs.into_iter().collect();
+    dirs.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
+    dirs
+}
+
+fn refold_foldable_trees<'a, I>(
+    config: &Config,
+    actions: I,
+) -> Result<Vec<TargetActionReport>, RustowError>
+where
+    I: IntoIterator<Item = &'a TargetAction>,
+{
     if config.no_folding {
         return Ok(Vec::new());
     }
 
-    let mut dirs = Vec::new();
-    collect_refold_candidate_dirs(&config.target_dir, config, &mut dirs)?;
-    dirs.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
+    let dirs = collect_refold_candidate_dirs(actions, config);
 
     let mut reports = Vec::new();
     for dir in dirs {
-        if !fs_utils::path_exists(&dir) || fs_utils::is_symlink(&dir) {
+        if !fs_utils::path_exists(&dir)
+            || fs_utils::is_symlink(&dir)
+            || !fs_utils::is_directory(&dir)
+            || path_has_symlink_ancestor(&dir, &config.target_dir)
+        {
             continue;
         }
 
@@ -1788,12 +2148,14 @@ fn load_ignore_patterns_for_package(
     package_name: &str,
     config: &Config,
 ) -> Result<IgnorePatterns, RustowError> {
-    IgnorePatterns::load(&config.stow_dir, Some(package_name), &config.home_dir).map_err(|e| {
-        RustowError::Ignore(crate::error::IgnoreError::LoadPatternsError(format!(
-            "Failed to load ignore patterns for package '{}': {:?}",
-            package_name, e
-        )))
-    })
+    IgnorePatterns::load(&config.stow_dir, Some(package_name), &config.home_dir)
+        .map(|patterns| patterns.with_extra_patterns(&config.ignore_patterns))
+        .map_err(|e| {
+            RustowError::Ignore(crate::error::IgnoreError::LoadPatternsError(format!(
+                "Failed to load ignore patterns for package '{}': {:?}",
+                package_name, e
+            )))
+        })
 }
 
 /// Process all packages and collect their actions
@@ -1825,19 +2187,29 @@ fn apply_conflict_resolution(actions: &mut [TargetAction], _config: &Config) {
     ConflictResolver::propagate_conflicts_to_children(actions);
 }
 
+fn plan_stow_package_actions(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
+    let mut all_planned_actions = collect_package_actions(config, plan_actions)?;
+
+    apply_tree_folding(&mut all_planned_actions, config)?;
+    apply_conflict_resolution(&mut all_planned_actions, config);
+
+    Ok(all_planned_actions)
+}
+
 pub fn stow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
     if config.packages.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut all_planned_actions = collect_package_actions(config, plan_actions)?;
-
-    apply_tree_folding(&mut all_planned_actions, config)?;
-
-    // Resolve conflicts using the dedicated conflict resolver
-    apply_conflict_resolution(&mut all_planned_actions, config);
-
+    let all_planned_actions = plan_stow_package_actions(config)?;
     execute_actions(&all_planned_actions, config)
+}
+
+fn plan_delete_package_actions(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
+    let mut all_planned_actions = collect_package_actions(config, plan_delete_actions)?;
+    sort_deletion_actions(&mut all_planned_actions);
+
+    Ok(all_planned_actions)
 }
 
 /// Delete (unstow) packages from the target directory
@@ -1846,174 +2218,653 @@ pub fn delete_packages(config: &Config) -> Result<Vec<TargetActionReport>, Rusto
         return Ok(Vec::new());
     }
 
-    let mut all_planned_actions = collect_package_actions(config, plan_delete_actions)?;
-    sort_deletion_actions(&mut all_planned_actions);
-
+    let all_planned_actions = plan_delete_package_actions(config)?;
     let mut reports = execute_actions(&all_planned_actions, config)?;
     if reports_allow_refolding(&reports, config) {
-        reports.extend(refold_foldable_trees(config)?);
+        reports.extend(refold_foldable_trees(config, all_planned_actions.iter())?);
     }
 
     Ok(reports)
 }
 
-/// Restow packages (delete then stow)
-/// Execute deletion phase for restow operation
-fn execute_restow_deletion_phase(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
-    let mut all_reports = Vec::new();
-
-    // For restow, we need to delete all existing stow-managed symlinks for the packages
-    // regardless of what's currently in the package directory
-    for package_name in &config.packages {
-        let delete_actions = plan_restow_delete_actions(package_name, config)?;
-        let delete_reports = execute_actions(&delete_actions, config)?;
-        all_reports.extend(delete_reports);
+fn plan_restow_delete_package_actions(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
+    let mut all_actions = plan_delete_package_actions(config)?;
+    let package_matchers = create_restow_symlink_package_matchers(config)?;
+    let mut existing_package_canonical_paths = HashMap::new();
+    if config.compat {
+        collect_matching_stow_symlinks_under_target_dir(
+            &config.target_dir,
+            config,
+            &package_matchers,
+            &mut existing_package_canonical_paths,
+            &mut all_actions,
+        )?;
+    } else {
+        collect_matching_stow_symlinks_for_current_package_images(
+            config,
+            &package_matchers,
+            &mut existing_package_canonical_paths,
+            &mut all_actions,
+        )?;
     }
 
-    Ok(all_reports)
+    sort_deletion_actions(&mut all_actions);
+    deduplicate_delete_actions(&mut all_actions);
+    Ok(all_actions)
 }
 
-pub fn restow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
-    let mut all_reports = Vec::new();
-
-    // Execute deletion phase
-    let delete_reports = execute_restow_deletion_phase(config)?;
-    all_reports.extend(delete_reports);
-
-    // Then stow them again based on current package contents
-    let stow_reports = stow_packages(config)?;
-    all_reports.extend(stow_reports);
-
-    Ok(all_reports)
-}
-
-/// Sort deletion actions to ensure proper deletion order
-fn sort_deletion_actions(actions: &mut [TargetAction]) {
-    actions.sort_by(|a, b| match (&a.action_type, &b.action_type) {
-        (ActionType::DeleteSymlink, ActionType::DeleteDirectory) => std::cmp::Ordering::Less,
-        (ActionType::DeleteDirectory, ActionType::DeleteSymlink) => std::cmp::Ordering::Greater,
-        (ActionType::DeleteDirectory, ActionType::DeleteDirectory) => {
-            path_depth(&b.target_path).cmp(&path_depth(&a.target_path))
-        },
-        _ => path_depth(&b.target_path).cmp(&path_depth(&a.target_path)),
-    });
-}
-
-/// Plan delete actions for restow operation - removes all stow-managed symlinks for a package
-/// regardless of current package contents
-fn plan_restow_delete_actions(
-    package_name: &str,
+fn collect_matching_stow_symlinks_for_current_package_images(
     config: &Config,
-) -> Result<Vec<TargetAction>, RustowError> {
-    let mut actions: Vec<TargetAction> = Vec::new();
-    let package_path: PathBuf = config.stow_dir.join(package_name);
-
-    if !fs_utils::path_exists(&package_path) {
-        return Err(StowError::PackageNotFound(package_name.to_string()).into());
-    }
-
-    // Walk through the target directory and find all stow-managed symlinks that point to this package
-    collect_stow_symlinks_for_package(
-        &config.target_dir,
-        &config.stow_dir,
-        package_name,
-        &mut actions,
-    )?;
-
-    // Sort actions so that symlink deletions come before directory deletions
-    // This ensures that directories are only deleted after their contents are removed
-    sort_deletion_actions(&mut actions);
-
-    Ok(actions)
-}
-
-/// Read directory entries safely with error handling
-fn read_directory_entries(target_dir: &Path) -> Result<std::fs::ReadDir, RustowError> {
-    std::fs::read_dir(target_dir).map_err(|_| {
-        RustowError::Stow(StowError::InvalidPackageStructure(format!(
-            "Cannot read directory: {:?}",
-            target_dir
-        )))
-    })
-}
-
-/// Collect stow-managed symlinks from a target directory for deletion
-fn collect_stow_symlinks_for_package(
-    target_dir: &Path,
-    stow_dir: &Path,
-    package_name: &str,
+    package_matchers: &[RestowSymlinkPackageMatcher],
+    existing_package_canonical_paths: &mut HashMap<String, Option<PathBuf>>,
     actions: &mut Vec<TargetAction>,
 ) -> Result<(), RustowError> {
-    if !fs_utils::path_exists(target_dir) {
-        return Ok(());
+    let mut candidate_target_dirs = Vec::new();
+
+    for package_matcher in package_matchers {
+        let package_path = validated_package_path(&config.stow_dir, &package_matcher.name)?;
+        let ignore_patterns = &package_matcher.ignore_patterns;
+        let raw_items = load_package_items(&package_path, &package_matcher.name)?;
+
+        for raw_item in raw_items {
+            if raw_item.item_type != fs_utils::RawStowItemType::Directory {
+                continue;
+            }
+
+            let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
+                raw_item.package_relative_path.to_str().unwrap_or(""),
+                config.dotfiles,
+            ));
+
+            if should_ignore_item(&processed_target_relative_path, ignore_patterns) {
+                continue;
+            }
+
+            candidate_target_dirs.push(config.target_dir.join(processed_target_relative_path));
+        }
     }
 
-    let entries = read_directory_entries(target_dir)?;
+    candidate_target_dirs.sort_by(|a, b| path_depth(a).cmp(&path_depth(b)).then_with(|| a.cmp(b)));
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut deduplicated_target_dirs: Vec<PathBuf> = Vec::new();
+    for target_dir in candidate_target_dirs {
+        if deduplicated_target_dirs
+            .iter()
+            .any(|scanned| target_dir.starts_with(scanned))
+        {
+            continue;
+        }
 
-        if path == stow_dir || path.starts_with(stow_dir) {
+        deduplicated_target_dirs.push(target_dir);
+    }
+
+    for target_dir in deduplicated_target_dirs {
+        collect_matching_stow_symlinks_under_target_dir(
+            &target_dir,
+            config,
+            package_matchers,
+            existing_package_canonical_paths,
+            actions,
+        )?;
+    }
+
+    Ok(())
+}
+
+struct RestowSymlinkPackageMatcher {
+    name: String,
+    canonical_path: Option<PathBuf>,
+    ignore_patterns: IgnorePatterns,
+}
+
+fn create_restow_symlink_package_matchers(
+    config: &Config,
+) -> Result<Vec<RestowSymlinkPackageMatcher>, RustowError> {
+    config
+        .packages
+        .iter()
+        .map(|package_name| {
+            Ok(RestowSymlinkPackageMatcher {
+                name: package_name.clone(),
+                canonical_path: canonical_package_path(&config.stow_dir, package_name).ok(),
+                ignore_patterns: load_ignore_patterns_for_package(package_name, config)?,
+            })
+        })
+        .collect()
+}
+
+fn collect_matching_stow_symlinks_under_target_dir(
+    target_path: &Path,
+    config: &Config,
+    package_matchers: &[RestowSymlinkPackageMatcher],
+    existing_package_canonical_paths: &mut HashMap<String, Option<PathBuf>>,
+    actions: &mut Vec<TargetAction>,
+) -> Result<bool, RustowError> {
+    if path_has_symlink_ancestor(target_path, &config.target_dir) {
+        return Ok(false);
+    }
+
+    if fs_utils::is_symlink(target_path) {
+        if symlink_matches_any_package_target_path(
+            target_path,
+            config,
+            package_matchers,
+            existing_package_canonical_paths,
+        )? {
+            actions.push(create_delete_symlink_action(target_path.to_path_buf()));
+            return Ok(true);
+        }
+
+        return Ok(false);
+    }
+
+    if !fs_utils::path_exists(target_path) {
+        return Ok(false);
+    }
+
+    if !fs_utils::is_directory(target_path) {
+        return Ok(false);
+    }
+
+    let mut contains_package_symlink = false;
+    for entry in read_directory_entries(target_path)? {
+        let path = read_directory_entry(entry, target_path)?.path();
+        if path == config.stow_dir || path.starts_with(&config.stow_dir) {
             continue;
         }
 
         if fs_utils::is_symlink(&path) {
-            process_symlink_for_deletion(&path, stow_dir, package_name, actions)?;
-        } else if fs_utils::is_directory(&path) {
-            process_directory_for_deletion(&path, stow_dir, package_name, actions)?;
+            if symlink_matches_any_package_target_path(
+                &path,
+                config,
+                package_matchers,
+                existing_package_canonical_paths,
+            )? {
+                actions.push(create_delete_symlink_action(path));
+                contains_package_symlink = true;
+            }
+        } else if fs_utils::is_directory(&path)
+            && collect_matching_stow_symlinks_under_target_dir(
+                &path,
+                config,
+                package_matchers,
+                existing_package_canonical_paths,
+                actions,
+            )?
+        {
+            actions.push(create_delete_directory_action(path));
+            contains_package_symlink = true;
         }
     }
 
-    Ok(())
+    Ok(contains_package_symlink)
 }
 
-/// Prepare canonical package path for symlink deletion check
-fn prepare_canonical_package_path(
-    stow_dir: &Path,
-    package_name: &str,
-) -> Result<PathBuf, RustowError> {
-    let package_path = stow_dir.join(package_name);
-    fs_utils::canonicalize_path(&package_path)
-}
+fn symlink_matches_any_package_target_path(
+    target_path: &Path,
+    config: &Config,
+    package_matchers: &[RestowSymlinkPackageMatcher],
+    existing_package_canonical_paths: &mut HashMap<String, Option<PathBuf>>,
+) -> Result<bool, RustowError> {
+    let Some((existing_package_name, item_path)) =
+        lexical_stow_symlink_package_and_item_path(target_path, &config.stow_dir)?
+    else {
+        return Ok(false);
+    };
 
-/// Process a symlink for potential deletion
-fn process_symlink_for_deletion(
-    symlink_path: &Path,
-    stow_dir: &Path,
-    package_name: &str,
-    actions: &mut Vec<TargetAction>,
-) -> Result<(), RustowError> {
-    let link_target = fs_utils::read_link(symlink_path).map_err(|_| {
-        RustowError::Stow(StowError::InvalidPackageStructure(format!(
-            "Failed to read symlink: {:?}",
-            symlink_path
-        )))
-    })?;
-
-    let resolved_target = resolve_symlink_target(symlink_path, &link_target);
-    let canonical_package_path = prepare_canonical_package_path(stow_dir, package_name)?;
-
-    if should_delete_symlink(&resolved_target, &canonical_package_path)? {
-        actions.push(create_delete_symlink_action(symlink_path.to_path_buf()));
+    let Ok(target_relative_path) = target_path.strip_prefix(&config.target_dir) else {
+        return Ok(false);
+    };
+    let processed_item_path = PathBuf::from(dotfiles::process_item_name(
+        item_path.to_str().unwrap_or(""),
+        config.dotfiles,
+    ));
+    if processed_item_path != target_relative_path {
+        return Ok(false);
     }
 
+    for package_matcher in package_matchers {
+        if target_relative_path_is_ignored(target_relative_path, &package_matcher.ignore_patterns) {
+            continue;
+        }
+
+        if existing_package_name == package_matcher.name {
+            return Ok(true);
+        }
+
+        let existing_canonical_path = existing_package_canonical_paths
+            .entry(existing_package_name.clone())
+            .or_insert_with(|| {
+                canonical_package_path(&config.stow_dir, &existing_package_name).ok()
+            });
+        if matches!(
+            (
+                existing_canonical_path.as_ref(),
+                package_matcher.canonical_path.as_ref(),
+            ),
+            (Some(existing_path), Some(requested_path)) if existing_path == requested_path
+        ) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn target_relative_path_is_ignored(
+    target_relative_path: &Path,
+    ignore_patterns: &IgnorePatterns,
+) -> bool {
+    should_ignore_item(target_relative_path, ignore_patterns)
+}
+
+pub fn restow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
+    let delete_actions = plan_restow_delete_package_actions(config)?;
+    let mut stow_actions = plan_stow_package_actions(config)?;
+
+    reconcile_stow_actions_with_delete_phase(
+        &mut stow_actions,
+        &delete_actions,
+        &[],
+        &[],
+        &config.packages,
+        config,
+    )?;
+    apply_conflict_resolution(&mut stow_actions, config);
+
+    let mut reports = execute_delete_then_stow_actions(&delete_actions, &stow_actions, config)?;
+    if reports_allow_refolding(&reports, config) {
+        reports.extend(refold_foldable_trees(
+            config,
+            delete_actions.iter().chain(stow_actions.iter()),
+        )?);
+    }
+
+    Ok(reports)
+}
+
+pub fn mixed_packages(
+    config: &Config,
+    delete_packages: &[String],
+    stow_packages: &[String],
+    restow_packages: &[String],
+) -> Result<Vec<TargetActionReport>, RustowError> {
+    let (delete_packages, stow_packages, restow_packages) =
+        normalize_mixed_package_sets(delete_packages, stow_packages, restow_packages);
+    let mut delete_actions = Vec::new();
+
+    let delete_config = config_for_packages(config, &delete_packages);
+    delete_actions.extend(plan_delete_package_actions(&delete_config)?);
+
+    let restow_delete_config = config_for_packages(config, &restow_packages);
+    delete_actions.extend(plan_restow_delete_package_actions(&restow_delete_config)?);
+    sort_deletion_actions(&mut delete_actions);
+    deduplicate_delete_symlink_actions(&mut delete_actions);
+
+    let mut stow_phase_packages = stow_packages.clone();
+    stow_phase_packages.extend_from_slice(&restow_packages);
+    let stow_config = config_for_packages(config, &stow_phase_packages);
+    let mut stow_actions = plan_stow_package_actions(&stow_config)?;
+
+    reconcile_stow_actions_with_delete_phase(
+        &mut stow_actions,
+        &delete_actions,
+        &delete_packages,
+        &stow_packages,
+        &restow_packages,
+        config,
+    )?;
+    apply_conflict_resolution(&mut stow_actions, config);
+
+    let mut reports = execute_delete_then_stow_actions(&delete_actions, &stow_actions, config)?;
+    if reports_allow_refolding(&reports, config) {
+        reports.extend(refold_foldable_trees(
+            config,
+            delete_actions.iter().chain(stow_actions.iter()),
+        )?);
+    }
+
+    Ok(reports)
+}
+
+fn normalize_mixed_package_sets(
+    delete_packages: &[String],
+    stow_packages: &[String],
+    restow_packages: &[String],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let delete_set: HashSet<String> = delete_packages.iter().cloned().collect();
+    let restow_set: HashSet<String> = restow_packages.iter().cloned().collect();
+    let stow_set: HashSet<String> = stow_packages.iter().cloned().collect();
+
+    let mut normalized_restow = Vec::new();
+    for package_name in restow_packages {
+        if !normalized_restow.contains(package_name) {
+            normalized_restow.push(package_name.clone());
+        }
+    }
+    for package_name in delete_packages {
+        if stow_set.contains(package_name)
+            && !restow_set.contains(package_name)
+            && !normalized_restow.contains(package_name)
+        {
+            normalized_restow.push(package_name.clone());
+        }
+    }
+
+    let normalized_delete = delete_packages
+        .iter()
+        .filter(|package_name| {
+            !restow_set.contains(*package_name) && !stow_set.contains(*package_name)
+        })
+        .cloned()
+        .collect();
+    let mut normalized_stow = Vec::new();
+    for package_name in stow_packages {
+        if !restow_set.contains(package_name)
+            && !delete_set.contains(package_name)
+            && !normalized_stow.contains(package_name)
+        {
+            normalized_stow.push(package_name.clone());
+        }
+    }
+
+    (normalized_delete, normalized_stow, normalized_restow)
+}
+
+fn execute_delete_then_stow_actions(
+    delete_actions: &[TargetAction],
+    stow_actions: &[TargetAction],
+    config: &Config,
+) -> Result<Vec<TargetActionReport>, RustowError> {
+    if delete_actions
+        .iter()
+        .chain(stow_actions.iter())
+        .any(|action| action.action_type == ActionType::Conflict)
+    {
+        let mut all_actions = delete_actions.to_vec();
+        all_actions.extend_from_slice(stow_actions);
+        return execute_actions(&all_actions, config);
+    }
+
+    let mut reports = execute_actions(delete_actions, config)?;
+    if target_action_reports_have_blocking_status(&reports) {
+        return Ok(reports);
+    }
+
+    reports.extend(execute_actions(stow_actions, config)?);
+    Ok(reports)
+}
+
+fn config_for_packages(config: &Config, packages: &[String]) -> Config {
+    let mut operation_config = config.clone();
+    operation_config.packages = packages.to_vec();
+    operation_config
+}
+
+fn deduplicate_delete_symlink_actions(actions: &mut Vec<TargetAction>) {
+    deduplicate_delete_actions(actions);
+}
+
+fn deduplicate_delete_actions(actions: &mut Vec<TargetAction>) {
+    let mut seen_symlink_targets = HashSet::new();
+    let mut seen_directory_targets = HashSet::new();
+
+    actions.retain(|action| match action.action_type {
+        ActionType::DeleteSymlink => seen_symlink_targets.insert(action.target_path.clone()),
+        ActionType::DeleteDirectory => seen_directory_targets.insert(action.target_path.clone()),
+        _ => true,
+    });
+}
+
+fn reconcile_stow_actions_with_delete_phase(
+    stow_actions: &mut Vec<TargetAction>,
+    delete_actions: &[TargetAction],
+    delete_packages: &[String],
+    stow_packages: &[String],
+    restow_packages: &[String],
+    config: &Config,
+) -> Result<(), RustowError> {
+    let removed_targets = collect_targets_removed_by_delete_phase(delete_actions)?;
+    let open_directory_targets =
+        removed_directory_targets_to_keep_open(stow_actions, &removed_targets, config)?;
+    let stowed_packages: HashSet<&str> = stow_packages
+        .iter()
+        .chain(restow_packages.iter())
+        .map(String::as_str)
+        .collect();
+    let delete_only_packages: HashSet<&str> = delete_packages
+        .iter()
+        .map(String::as_str)
+        .filter(|package_name| !stowed_packages.contains(package_name))
+        .collect();
+
+    stow_actions.retain(|action| {
+        action.action_type != ActionType::DeleteSymlink
+            || !removed_targets.contains(&action.target_path)
+    });
+    stow_actions.retain(|action| {
+        if matches!(
+            action.action_type,
+            ActionType::CreateSymlink | ActionType::CreateDirectory
+        ) {
+            if let Some(package_name) = action_package_name(action, config) {
+                return !delete_only_packages.contains(package_name.as_str());
+            }
+        }
+
+        true
+    });
+
+    let mut folded_targets = Vec::new();
+    for action in stow_actions.iter_mut() {
+        if !target_removed_by_delete_phase(&action.target_path, &removed_targets) {
+            continue;
+        }
+
+        if matches!(action.action_type, ActionType::Conflict | ActionType::Skip) {
+            let Some(stow_item) = action.source_item.as_ref() else {
+                continue;
+            };
+
+            if open_directory_targets.contains(&action.target_path) {
+                action.action_type = ActionType::CreateDirectory;
+                action.link_target_path = None;
+                action.conflict_details = None;
+                continue;
+            }
+
+            if action.link_target_path.is_none() {
+                action.link_target_path = Some(calculate_link_target_for_source(
+                    &stow_item.source_path,
+                    &action.target_path,
+                ));
+            }
+
+            if action.link_target_path.is_some() {
+                action.action_type = ActionType::CreateSymlink;
+                action.conflict_details = None;
+                if stow_item.item_type == StowItemType::Directory {
+                    if let Some(package_name) = action_package_name(action, config) {
+                        folded_targets.push((action.target_path.clone(), package_name));
+                    }
+                }
+            }
+        }
+    }
+
+    prune_descendants_for_folded_targets(stow_actions, &folded_targets, config);
     Ok(())
 }
 
-/// Process a directory recursively and mark empty directories for deletion
-fn process_directory_for_deletion(
-    dir_path: &Path,
-    stow_dir: &Path,
-    package_name: &str,
-    actions: &mut Vec<TargetAction>,
-) -> Result<(), RustowError> {
-    // Recursively process subdirectories first
-    collect_stow_symlinks_for_package(dir_path, stow_dir, package_name, actions)?;
+fn removed_directory_targets_to_keep_open(
+    stow_actions: &[TargetAction],
+    removed_targets: &HashSet<PathBuf>,
+    config: &Config,
+) -> Result<HashSet<PathBuf>, RustowError> {
+    let mut open_directory_targets = HashSet::new();
+    let mut ignore_pattern_cache: HashMap<String, IgnorePatterns> = HashMap::new();
+    let mut ignored_descendant_cache: HashMap<(String, PathBuf), bool> = HashMap::new();
+    let mut deferred_descendant_cache: HashMap<(String, PathBuf), bool> = HashMap::new();
 
-    // Always mark directory for potential deletion - the execution phase will check if it's empty
-    actions.push(create_delete_directory_action(dir_path.to_path_buf()));
+    for (index, action) in stow_actions.iter().enumerate() {
+        if !matches!(action.action_type, ActionType::Conflict | ActionType::Skip)
+            || !target_removed_by_delete_phase(&action.target_path, removed_targets)
+        {
+            continue;
+        }
 
-    Ok(())
+        let Some(stow_item) = action.source_item.as_ref() else {
+            continue;
+        };
+        if stow_item.item_type != StowItemType::Directory {
+            continue;
+        }
+
+        let Some(package_name) = action_package_name(action, config) else {
+            continue;
+        };
+
+        let ignore_patterns = if let Some(patterns) = ignore_pattern_cache.get(&package_name) {
+            patterns.clone()
+        } else {
+            let patterns = load_ignore_patterns_for_package(&package_name, config)?;
+            ignore_pattern_cache.insert(package_name.clone(), patterns.clone());
+            patterns
+        };
+
+        let cache_key = (
+            package_name.clone(),
+            stow_item.package_relative_path.clone(),
+        );
+        let has_ignored_descendants = if let Some(result) = ignored_descendant_cache.get(&cache_key)
+        {
+            *result
+        } else {
+            let result = directory_contains_ignored_descendants(
+                &package_name,
+                &stow_item.package_relative_path,
+                config,
+                &ignore_patterns,
+            )?;
+            ignored_descendant_cache.insert(cache_key.clone(), result);
+            result
+        };
+        let has_deferred_descendants =
+            if let Some(result) = deferred_descendant_cache.get(&cache_key) {
+                *result
+            } else {
+                let result = directory_contains_deferred_descendants(
+                    &package_name,
+                    &stow_item.package_relative_path,
+                    config,
+                )?;
+                deferred_descendant_cache.insert(cache_key, result);
+                result
+            };
+
+        if config.no_folding
+            || has_ignored_descendants
+            || has_deferred_descendants
+            || target_has_other_package_actions(
+                index,
+                stow_actions,
+                config,
+                &action.target_path,
+                &package_name,
+            )
+        {
+            open_directory_targets.insert(action.target_path.clone());
+        }
+    }
+
+    Ok(open_directory_targets)
+}
+
+fn collect_targets_removed_by_delete_phase(
+    delete_actions: &[TargetAction],
+) -> Result<HashSet<PathBuf>, RustowError> {
+    let mut removed_targets: HashSet<PathBuf> = delete_actions
+        .iter()
+        .filter(|action| action.action_type == ActionType::DeleteSymlink)
+        .map(|action| action.target_path.clone())
+        .collect();
+
+    let mut directory_targets: Vec<PathBuf> = delete_actions
+        .iter()
+        .filter(|action| action.action_type == ActionType::DeleteDirectory)
+        .map(|action| action.target_path.clone())
+        .collect();
+    directory_targets.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
+
+    for directory_target in directory_targets {
+        if planned_directory_will_be_empty(&directory_target, &removed_targets)? {
+            removed_targets.insert(directory_target);
+        }
+    }
+
+    Ok(removed_targets)
+}
+
+fn planned_directory_will_be_empty(
+    directory_target: &Path,
+    removed_targets: &HashSet<PathBuf>,
+) -> Result<bool, RustowError> {
+    if !fs_utils::path_exists(directory_target) {
+        return Ok(true);
+    }
+
+    if !fs_utils::is_directory(directory_target) || fs_utils::is_symlink(directory_target) {
+        return Ok(false);
+    }
+
+    for entry in read_directory_entries(directory_target)? {
+        if !removed_targets.contains(&read_directory_entry(entry, directory_target)?.path()) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn target_removed_by_delete_phase(target_path: &Path, removed_targets: &HashSet<PathBuf>) -> bool {
+    target_path
+        .ancestors()
+        .any(|candidate| removed_targets.contains(candidate))
+}
+
+/// Sort deletion actions to ensure proper deletion order
+fn sort_deletion_actions(actions: &mut [TargetAction]) {
+    actions.sort_by(|a, b| {
+        deletion_action_rank(&a.action_type)
+            .cmp(&deletion_action_rank(&b.action_type))
+            .then_with(|| path_depth(&b.target_path).cmp(&path_depth(&a.target_path)))
+            .then_with(|| a.target_path.cmp(&b.target_path))
+    });
+}
+
+fn deletion_action_rank(action_type: &ActionType) -> u8 {
+    match action_type {
+        ActionType::DeleteSymlink => 0,
+        ActionType::DeleteDirectory => 1,
+        _ => 2,
+    }
+}
+
+fn path_has_symlink_ancestor(path: &Path, root: &Path) -> bool {
+    let Ok(relative_path) = path.strip_prefix(root) else {
+        return false;
+    };
+
+    let mut current = root.to_path_buf();
+    let mut components = relative_path.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        if components.peek().is_some() && fs_utils::is_symlink(&current) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Resolve symlink target to absolute path
@@ -2026,32 +2877,6 @@ fn resolve_symlink_target(symlink_path: &Path, link_target: &Path) -> PathBuf {
             .unwrap_or_else(|| Path::new(""))
             .join(link_target)
     }
-}
-
-/// Check if target is under package path using manual normalization
-fn is_target_under_package_path_manual(
-    resolved_target: &Path,
-    canonical_package_path: &Path,
-) -> bool {
-    let normalized_target = normalize_path_components(resolved_target);
-    normalized_target.starts_with(canonical_package_path)
-}
-
-/// Determine if a symlink should be deleted based on its target
-fn should_delete_symlink(
-    resolved_target: &Path,
-    canonical_package_path: &Path,
-) -> Result<bool, RustowError> {
-    // Try to canonicalize the target (works for existing files)
-    if let Ok(canonical_target) = fs_utils::canonicalize_path(resolved_target) {
-        return Ok(canonical_target.starts_with(canonical_package_path));
-    }
-
-    // For broken symlinks, normalize the path manually
-    Ok(is_target_under_package_path_manual(
-        resolved_target,
-        canonical_package_path,
-    ))
 }
 
 /// Normalize path by resolving .. and . components manually
@@ -2077,14 +2902,16 @@ fn normalize_path_components(path: &Path) -> PathBuf {
 
 /// Check if a directory is empty
 fn is_directory_empty(dir_path: &Path) -> Result<bool, RustowError> {
-    let entries = std::fs::read_dir(dir_path).map_err(|_| {
-        RustowError::Stow(StowError::InvalidPackageStructure(format!(
-            "Cannot read directory: {:?}",
-            dir_path
-        )))
-    })?;
-
-    Ok(entries.count() == 0)
+    Ok(read_directory_entries(dir_path)?
+        .next()
+        .transpose()
+        .map_err(|e| {
+            RustowError::Fs(FsError::Io {
+                path: dir_path.to_path_buf(),
+                source: e,
+            })
+        })?
+        .is_none())
 }
 
 /// Create a delete symlink action
@@ -2109,7 +2936,6 @@ fn create_create_directory_action(target_path: PathBuf) -> TargetAction {
     }
 }
 
-/// Create a delete directory action
 fn create_delete_directory_action(target_path: PathBuf) -> TargetAction {
     TargetAction {
         source_item: None,
@@ -2149,11 +2975,105 @@ fn plan_delete_actions(
     config: &Config,
     current_ignore_patterns: &IgnorePatterns,
 ) -> Result<Vec<TargetAction>, RustowError> {
-    let package_path = config.stow_dir.join(package_name);
-    validate_package_path(&package_path, package_name)?;
+    let package_path = validated_package_path(&config.stow_dir, package_name)?;
 
     let raw_items = load_package_items(&package_path, package_name)?;
     process_deletion_items(raw_items, config, current_ignore_patterns, package_name)
+}
+
+pub fn validate_package_for_operation(
+    stow_dir: &Path,
+    package_name: &str,
+) -> Result<(), RustowError> {
+    validated_package_path(stow_dir, package_name).map(|_| ())
+}
+
+fn validated_package_path(stow_dir: &Path, package_name: &str) -> Result<PathBuf, RustowError> {
+    validate_relative_package_name(package_name)?;
+
+    let package_path = stow_dir.join(package_name);
+    validate_package_path(&package_path, package_name)?;
+
+    let canonical_package_path = fs_utils::canonicalize_path(&package_path)?;
+    let canonical_stow_dir = fs_utils::canonicalize_path(stow_dir)?;
+
+    if canonical_package_path == canonical_stow_dir {
+        return Err(StowError::InvalidPackageStructure(format!(
+            "Package '{}' resolves to the stow directory itself",
+            package_name
+        ))
+        .into());
+    }
+
+    if !canonical_package_path.starts_with(&canonical_stow_dir) {
+        return Err(StowError::InvalidPackageStructure(format!(
+            "Package '{}' resolves outside stow directory '{}'",
+            package_name,
+            canonical_stow_dir.display()
+        ))
+        .into());
+    }
+
+    Ok(package_path)
+}
+
+fn canonical_package_path(stow_dir: &Path, package_name: &str) -> Result<PathBuf, RustowError> {
+    validate_relative_package_name(package_name)?;
+
+    let package_path = stow_dir.join(package_name);
+    let canonical_package_path = fs_utils::canonicalize_path(&package_path)?;
+    let canonical_stow_dir = fs_utils::canonicalize_path(stow_dir)?;
+
+    if canonical_package_path == canonical_stow_dir {
+        return Err(StowError::InvalidPackageStructure(format!(
+            "Package '{}' resolves to the stow directory itself",
+            package_name
+        ))
+        .into());
+    }
+
+    if !canonical_package_path.starts_with(&canonical_stow_dir) {
+        return Err(StowError::InvalidPackageStructure(format!(
+            "Package '{}' resolves outside stow directory '{}'",
+            package_name,
+            canonical_stow_dir.display()
+        ))
+        .into());
+    }
+
+    Ok(canonical_package_path)
+}
+
+fn validate_relative_package_name(package_name: &str) -> Result<(), RustowError> {
+    let package_path = Path::new(package_name);
+    let escapes_stow_dir = package_path.is_absolute()
+        || package_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+
+    if package_name.is_empty() || escapes_stow_dir {
+        return Err(StowError::InvalidPackageStructure(format!(
+            "Invalid package name '{}'",
+            package_name
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+fn target_action_reports_have_blocking_status(reports: &[TargetActionReport]) -> bool {
+    reports.iter().any(|report| {
+        matches!(
+            report.status,
+            TargetActionReportStatus::ConflictPrevented | TargetActionReportStatus::Failure(_)
+        )
+    })
 }
 
 /// Validate that the package path exists and is a directory
@@ -2207,13 +3127,36 @@ fn process_item_for_deletion(
     let target_path_abs = config.target_dir.join(&processed_target_relative_path);
     let stow_item = create_stow_item_from_raw(raw_item, processed_target_relative_path);
 
-    let action = if fs_utils::path_exists(&target_path_abs) {
+    let action = if let Some(conflict) =
+        create_conflict_for_symlinked_target_ancestor(&stow_item, &target_path_abs, config)
+    {
+        conflict
+    } else if fs_utils::path_exists(&target_path_abs) {
         plan_deletion_for_existing_target(&stow_item, &target_path_abs, config, package_name)?
     } else {
         create_skip_action_for_missing_target(stow_item, target_path_abs)
     };
 
     Ok(Some(action))
+}
+
+fn create_conflict_for_symlinked_target_ancestor(
+    stow_item: &StowItem,
+    target_path_abs: &Path,
+    config: &Config,
+) -> Option<TargetAction> {
+    let symlink_path = target_symlink_ancestor_path(target_path_abs, &config.target_dir, false)?;
+
+    Some(TargetAction {
+        source_item: Some(stow_item.clone()),
+        target_path: target_path_abs.to_path_buf(),
+        link_target_path: None,
+        action_type: ActionType::Conflict,
+        conflict_details: Some(format!(
+            "Refusing to delete through symlinked target ancestor {:?}",
+            symlink_path
+        )),
+    })
 }
 
 /// Prepare paths for ignore pattern checking
@@ -2348,7 +3291,7 @@ fn validate_target_for_deletion(
 
     match fs_utils::is_stow_symlink(target_path_abs, &config.stow_dir) {
         Ok(Some((existing_package_name, item_path_in_package))) => {
-            if existing_package_name == package_name
+            if is_same_package_for_deletion(&existing_package_name, package_name, config)
                 && item_path_in_package == stow_item.package_relative_path
             {
                 Ok((ActionType::DeleteSymlink, None))
@@ -2376,6 +3319,36 @@ fn validate_target_for_deletion(
     }
 }
 
+fn is_same_package_for_deletion(
+    existing_package_name: &str,
+    requested_package_name: &str,
+    config: &Config,
+) -> bool {
+    is_same_package_name(existing_package_name, requested_package_name, config)
+}
+
+fn is_same_package_name(
+    existing_package_name: &str,
+    requested_package_name: &str,
+    config: &Config,
+) -> bool {
+    if existing_package_name == requested_package_name {
+        return true;
+    }
+
+    let Ok(existing_package_path) = canonical_package_path(&config.stow_dir, existing_package_name)
+    else {
+        return false;
+    };
+    let Ok(requested_package_path) =
+        canonical_package_path(&config.stow_dir, requested_package_name)
+    else {
+        return false;
+    };
+
+    existing_package_path == requested_package_path
+}
+
 /// Determine the appropriate action for deleting a file or symlink
 fn determine_file_deletion_action(
     stow_item: &StowItem,
@@ -2401,7 +3374,7 @@ fn create_skip_action_for_missing_target(
 }
 
 /// Execute an adopt file action (move file from target to stow dir, then create symlink)
-fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
+fn execute_adopt_file_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     // Extract source item information
     let source_item = match &action.source_item {
         Some(item) => item,
@@ -2428,6 +3401,15 @@ fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
                 action.target_path
             )),
         };
+    }
+
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
+    if let Some(error_report) = ensure_adopt_destination_ancestors_not_symlink(action, source_item)
+    {
+        return error_report;
     }
 
     // Ensure the package directory exists
@@ -2458,23 +3440,31 @@ fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
 
     // Create symlink from target to the adopted file
     match &action.link_target_path {
-        Some(link_target) => match fs_utils::create_symlink(&action.target_path, link_target) {
-            Ok(_) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Success,
-                message: Some(format!(
-                    "Successfully adopted file {:?} and created symlink",
-                    action.target_path
-                )),
-            },
-            Err(e) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Failure(e.to_string()),
-                message: Some(format!(
-                    "Adopted file but failed to create symlink {:?} -> {:?}: {}",
-                    action.target_path, link_target, e
-                )),
-            },
+        Some(link_target) => {
+            if let Some(error_report) =
+                ensure_target_path_ancestors_not_symlink(action, config, false)
+            {
+                return error_report;
+            }
+
+            match fs_utils::create_symlink(&action.target_path, link_target) {
+                Ok(_) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Success,
+                    message: Some(format!(
+                        "Successfully adopted file {:?} and created symlink",
+                        action.target_path
+                    )),
+                },
+                Err(e) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Failure(e.to_string()),
+                    message: Some(format!(
+                        "Adopted file but failed to create symlink {:?} -> {:?}: {}",
+                        action.target_path, link_target, e
+                    )),
+                },
+            }
         },
         None => TargetActionReport {
             original_action: action.clone(),
@@ -2489,7 +3479,7 @@ fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute an adopt directory action (move directory from target to stow dir, then create symlink)
-fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
+fn execute_adopt_directory_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     // Extract source item information
     let source_item = match &action.source_item {
         Some(item) => item,
@@ -2514,6 +3504,28 @@ fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
             status: TargetActionReportStatus::Skipped,
             message: Some(format!(
                 "Target directory {:?} does not exist, nothing to adopt",
+                action.target_path
+            )),
+        };
+    }
+
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
+    if let Some(error_report) = ensure_adopt_destination_ancestors_not_symlink(action, source_item)
+    {
+        return error_report;
+    }
+
+    if fs_utils::is_symlink(&action.target_path) {
+        return TargetActionReport {
+            original_action: action.clone(),
+            status: TargetActionReportStatus::Failure(
+                "Refusing to adopt symlinked directory".to_string(),
+            ),
+            message: Some(format!(
+                "Refusing to adopt symlinked directory {:?}",
                 action.target_path
             )),
         };
@@ -2547,23 +3559,31 @@ fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
 
     // Create symlink from target to the adopted directory
     match &action.link_target_path {
-        Some(link_target) => match fs_utils::create_symlink(&action.target_path, link_target) {
-            Ok(_) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Success,
-                message: Some(format!(
-                    "Successfully adopted directory {:?} and created symlink",
-                    action.target_path
-                )),
-            },
-            Err(e) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Failure(e.to_string()),
-                message: Some(format!(
-                    "Adopted directory but failed to create symlink {:?} -> {:?}: {}",
-                    action.target_path, link_target, e
-                )),
-            },
+        Some(link_target) => {
+            if let Some(error_report) =
+                ensure_target_path_ancestors_not_symlink(action, config, false)
+            {
+                return error_report;
+            }
+
+            match fs_utils::create_symlink(&action.target_path, link_target) {
+                Ok(_) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Success,
+                    message: Some(format!(
+                        "Successfully adopted directory {:?} and created symlink",
+                        action.target_path
+                    )),
+                },
+                Err(e) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Failure(e.to_string()),
+                    message: Some(format!(
+                        "Adopted directory but failed to create symlink {:?} -> {:?}: {}",
+                        action.target_path, link_target, e
+                    )),
+                },
+            }
         },
         None => TargetActionReport {
             original_action: action.clone(),
@@ -2577,8 +3597,30 @@ fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
     }
 }
 
+fn ensure_adopt_destination_ancestors_not_symlink(
+    action: &TargetAction,
+    source_item: &StowItem,
+) -> Option<TargetActionReport> {
+    let Err(error) =
+        ensure_destination_ancestors_not_symlink(&action.target_path, &source_item.source_path)
+    else {
+        return None;
+    };
+
+    Some(TargetActionReport {
+        original_action: action.clone(),
+        status: TargetActionReportStatus::Failure(error.to_string()),
+        message: Some(format!(
+            "Failed to move target {:?} to package path {:?}: {}",
+            action.target_path, source_item.source_path, error
+        )),
+    })
+}
+
 /// Move a file from source to destination
 fn move_file(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
+    ensure_destination_ancestors_not_symlink(from, to)?;
+
     std::fs::rename(from, to).map_err(|e| crate::error::FsError::MoveItem {
         source_path: from.to_path_buf(),
         destination_path: to.to_path_buf(),
@@ -2586,8 +3628,76 @@ fn move_file(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
     })
 }
 
+fn ensure_destination_is_not_symlink(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
+    match std::fs::symlink_metadata(to) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Refusing to merge directory into symlinked destination",
+            ),
+        }),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: error,
+        }),
+    }
+}
+
+fn ensure_destination_ancestors_not_symlink(
+    from: &Path,
+    to: &Path,
+) -> Result<(), crate::error::FsError> {
+    let mut current = PathBuf::new();
+
+    for component in to.components() {
+        current.push(component);
+        if current == to {
+            break;
+        }
+
+        if fs_utils::is_symlink(&current) {
+            return Err(crate::error::FsError::MoveItem {
+                source_path: from.to_path_buf(),
+                destination_path: to.to_path_buf(),
+                source_io_error: std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Refusing to move into path containing symlinked ancestor",
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Move a directory from source to destination, merging contents if destination exists
 fn move_directory(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
+    ensure_destination_ancestors_not_symlink(from, to)?;
+
+    let from_file_type = std::fs::symlink_metadata(from)
+        .map_err(|e| crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: e,
+        })?
+        .file_type();
+
+    if from_file_type.is_symlink() || !from_file_type.is_dir() {
+        ensure_destination_is_not_symlink(from, to)?;
+        return std::fs::rename(from, to).map_err(|e| crate::error::FsError::MoveItem {
+            source_path: from.to_path_buf(),
+            destination_path: to.to_path_buf(),
+            source_io_error: e,
+        });
+    }
+
+    ensure_destination_is_not_symlink(from, to)?;
+
     // If destination doesn't exist, simple rename
     if !fs_utils::path_exists(to) {
         return std::fs::rename(from, to).map_err(|e| crate::error::FsError::MoveItem {
@@ -2610,6 +3720,9 @@ fn move_directory(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
 
 /// Recursively move contents from source directory to destination directory
 fn move_directory_contents_recursive(from: &Path, to: &Path) -> Result<(), crate::error::FsError> {
+    ensure_destination_ancestors_not_symlink(from, to)?;
+    ensure_destination_is_not_symlink(from, to)?;
+
     // Ensure destination directory exists
     std::fs::create_dir_all(to).map_err(|e| crate::error::FsError::MoveItem {
         source_path: from.to_path_buf(),
@@ -2644,7 +3757,15 @@ fn move_directory_contents_recursive(from: &Path, to: &Path) -> Result<(), crate
             })?;
         let dest_path = to.join(file_name);
 
-        if source_path.is_dir() {
+        let file_type = entry
+            .file_type()
+            .map_err(|e| crate::error::FsError::MoveItem {
+                source_path: source_path.clone(),
+                destination_path: dest_path.clone(),
+                source_io_error: e,
+            })?;
+
+        if file_type.is_dir() {
             // Recursively move directory contents
             move_directory_contents_recursive(&source_path, &dest_path)?;
             // Remove the now-empty source directory
@@ -2683,6 +3804,7 @@ mod tests {
             packages: vec!["test_package".to_string()],
             mode: StowMode::Stow,
             stow: false,
+            compat: false,
             adopt: false,
             no_folding: false,
             dotfiles: false,
@@ -2693,6 +3815,44 @@ mod tests {
             verbosity: 0,
             home_dir: PathBuf::from("/tmp"),
         }
+    }
+
+    #[test]
+    fn test_execute_delete_then_stow_actions_stops_after_delete_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+        let not_a_symlink = target_dir.join("not_a_symlink");
+        fs::write(&not_a_symlink, "content").unwrap();
+        let stow_target = target_dir.join("created_after_delete");
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let delete_actions = vec![TargetAction {
+            source_item: None,
+            target_path: not_a_symlink,
+            link_target_path: None,
+            action_type: ActionType::DeleteSymlink,
+            conflict_details: None,
+        }];
+        let stow_actions = vec![TargetAction {
+            source_item: None,
+            target_path: stow_target.clone(),
+            link_target_path: Some(PathBuf::from("../stow/source")),
+            action_type: ActionType::CreateSymlink,
+            conflict_details: None,
+        }];
+
+        let reports =
+            execute_delete_then_stow_actions(&delete_actions, &stow_actions, &config).unwrap();
+
+        assert_eq!(reports.len(), 1);
+        assert!(matches!(
+            reports[0].status,
+            TargetActionReportStatus::Failure(_)
+        ));
+        assert!(!fs_utils::is_symlink(&stow_target));
     }
 
     #[test]
@@ -2731,6 +3891,26 @@ mod tests {
             result,
             "Directory with regular file should contain non-stow files"
         );
+    }
+
+    #[test]
+    fn test_check_directory_for_non_stow_files_reports_read_dir_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let file_path = target_dir.join("not_a_directory");
+
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::write(&file_path, "content").unwrap();
+
+        let config = create_test_config(&target_dir, &stow_dir);
+
+        let result = check_directory_for_non_stow_files(&file_path, &config);
+        assert!(matches!(
+            result,
+            Err(RustowError::Fs(FsError::Io { path, .. })) if path == file_path
+        ));
     }
 
     #[test]
@@ -3166,8 +4346,9 @@ mod tests {
     #[test]
     fn test_is_same_package_and_item_true() {
         let temp_dir = TempDir::new().unwrap();
-        let _target_dir = temp_dir.path().join("target");
+        let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
 
         let stow_item = StowItem {
             package_relative_path: PathBuf::from("test_file.txt"),
@@ -3181,6 +4362,7 @@ mod tests {
             &PathBuf::from("test_file.txt"),
             &stow_item,
             "test_package",
+            &config,
         );
 
         assert!(result);
@@ -3189,8 +4371,9 @@ mod tests {
     #[test]
     fn test_is_same_package_and_item_different_package() {
         let temp_dir = TempDir::new().unwrap();
-        let _target_dir = temp_dir.path().join("target");
+        let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
+        let config = create_test_config(&target_dir, &stow_dir);
 
         let stow_item = StowItem {
             package_relative_path: PathBuf::from("test_file.txt"),
@@ -3204,6 +4387,7 @@ mod tests {
             &PathBuf::from("test_file.txt"),
             &stow_item,
             "test_package",
+            &config,
         );
 
         assert!(!result);
@@ -3224,7 +4408,7 @@ mod tests {
         let conflict_info = result.unwrap();
         assert!(matches!(
             conflict_info.conflict_type,
-            ParentConflictType::ParentIsFile
+            ParentConflictType::File
         ));
         assert_eq!(conflict_info.parent_path, parent_file);
     }
@@ -3251,7 +4435,7 @@ mod tests {
         let conflict_info = result.unwrap();
         assert!(matches!(
             conflict_info.conflict_type,
-            ParentConflictType::ParentIsConflictTarget
+            ParentConflictType::ConflictTarget
         ));
         assert_eq!(conflict_info.parent_path, parent_dir);
     }
@@ -3285,7 +4469,7 @@ mod tests {
         let parent_file = target_dir.join("parent_file.txt");
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: parent_file.clone(),
         };
 
@@ -3318,7 +4502,7 @@ mod tests {
         let parent_dir = target_dir.join("parent_dir");
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsConflictTarget,
+            conflict_type: ParentConflictType::ConflictTarget,
             parent_path: parent_dir.clone(),
         };
 
@@ -3343,7 +4527,7 @@ mod tests {
         let parent_file = target_dir.join("parent_file.txt");
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: parent_file.clone(),
         };
 
@@ -3371,7 +4555,7 @@ mod tests {
         fs::create_dir_all(&stow_dir).unwrap();
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: target_dir.join("parent"),
         };
 
@@ -3566,52 +4750,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_directory_entries_valid_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_dir = temp_dir.path().join("test_dir");
-        fs::create_dir_all(&test_dir).unwrap();
-
-        // Create some files in the directory
-        fs::write(test_dir.join("file1.txt"), "content1").unwrap();
-        fs::write(test_dir.join("file2.txt"), "content2").unwrap();
-
-        let result = read_directory_entries(&test_dir);
-        assert!(result.is_ok());
-
-        let entries: Vec<_> = result.unwrap().collect();
-        assert_eq!(entries.len(), 2);
-    }
-
-    #[test]
-    fn test_read_directory_entries_nonexistent_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let nonexistent_dir = temp_dir.path().join("nonexistent");
-
-        let result = read_directory_entries(&nonexistent_dir);
-        assert!(result.is_err());
-
-        if let Err(RustowError::Stow(StowError::InvalidPackageStructure(msg))) = result {
-            assert!(msg.contains("Cannot read directory"));
-            assert!(msg.contains("nonexistent"));
-        } else {
-            panic!("Expected InvalidPackageStructure error");
-        }
-    }
-
-    #[test]
-    fn test_read_directory_entries_empty_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let valid_dir = temp_dir.path().join("empty_dir");
-        fs::create_dir_all(&valid_dir).unwrap();
-
-        let result = read_directory_entries(&valid_dir);
-        assert!(result.is_ok());
-
-        let entries: Vec<_> = result.unwrap().collect();
-        assert_eq!(entries.len(), 0);
-    }
-
-    #[test]
     fn test_prepare_ignore_check_paths_simple_file() {
         let path = Path::new("test_file.txt");
         let (fullpath, basename) = prepare_ignore_check_paths(path);
@@ -3696,33 +4834,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_target_under_package_path_manual_under_package() {
-        let package_path = Path::new("/home/user/stow/mypackage");
-        let target_path = Path::new("/home/user/stow/mypackage/bin/script");
-
-        let result = is_target_under_package_path_manual(target_path, package_path);
-        assert!(result); // Target under package path should return true
-    }
-
-    #[test]
-    fn test_is_target_under_package_path_manual_outside_package() {
-        let package_path = Path::new("/home/user/stow/mypackage");
-        let target_path = Path::new("/home/user/stow/otherpackage/bin/script");
-
-        let result = is_target_under_package_path_manual(target_path, package_path);
-        assert!(!result); // Target outside package path should return false
-    }
-
-    #[test]
-    fn test_is_target_under_package_path_manual_with_parent_dirs() {
-        let package_path = Path::new("/home/user/stow/mypackage");
-        let target_path = Path::new("/home/user/stow/mypackage/subdir/../bin/script");
-
-        let result = is_target_under_package_path_manual(target_path, package_path);
-        assert!(result); // Target with .. components should be normalized correctly
-    }
-
-    #[test]
     fn test_prepare_canonical_package_path_valid_package() {
         let temp_dir = TempDir::new().unwrap();
         let stow_dir = temp_dir.path().join("stow");
@@ -3730,7 +4841,7 @@ mod tests {
 
         fs::create_dir_all(&package_dir).unwrap();
 
-        let result = prepare_canonical_package_path(&stow_dir, "test_package");
+        let result = canonical_package_path(&stow_dir, "test_package");
         assert!(result.is_ok());
         let canonical_path = result.unwrap();
         assert!(canonical_path.ends_with("test_package"));
@@ -3743,7 +4854,7 @@ mod tests {
 
         fs::create_dir_all(&stow_dir).unwrap();
 
-        let result = prepare_canonical_package_path(&stow_dir, "nonexistent_package");
+        let result = canonical_package_path(&stow_dir, "nonexistent_package");
         assert!(result.is_err()); // Should fail for nonexistent package
     }
 
@@ -3753,7 +4864,48 @@ mod tests {
         let nonexistent_stow_dir = temp_dir.path().join("nonexistent");
         let package_name = "test_package";
 
-        let result = prepare_canonical_package_path(&nonexistent_stow_dir, package_name);
+        let result = canonical_package_path(&nonexistent_stow_dir, package_name);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prepare_canonical_package_path_rejects_absolute_package_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let result = canonical_package_path(&stow_dir, "/tmp/outside");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prepare_canonical_package_path_rejects_parent_dir_package_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let result = canonical_package_path(&stow_dir, "../outside");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prepare_canonical_package_path_rejects_stow_root_package_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        let result = canonical_package_path(&stow_dir, ".");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prepare_canonical_package_path_rejects_package_symlink_to_stow_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs_utils::create_symlink(&stow_dir.join("all"), Path::new(".")).unwrap();
+
+        let result = canonical_package_path(&stow_dir, "all");
         assert!(result.is_err());
     }
 
@@ -3819,6 +4971,56 @@ mod tests {
 
         assert!(matches!(actions[0].action_type, ActionType::DeleteSymlink));
         assert!(matches!(actions[1].action_type, ActionType::DeleteSymlink));
+    }
+
+    #[test]
+    fn test_sort_deletion_actions_orders_equal_depth_by_path() {
+        let mut actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/link-b"),
+                link_target_path: None,
+                action_type: ActionType::DeleteSymlink,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/dir-b"),
+                link_target_path: None,
+                action_type: ActionType::DeleteDirectory,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/link-a"),
+                link_target_path: None,
+                action_type: ActionType::DeleteSymlink,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/dir-a"),
+                link_target_path: None,
+                action_type: ActionType::DeleteDirectory,
+                conflict_details: None,
+            },
+        ];
+
+        sort_deletion_actions(&mut actions);
+
+        let sorted_paths: Vec<PathBuf> = actions
+            .iter()
+            .map(|action| action.target_path.clone())
+            .collect();
+        assert_eq!(
+            sorted_paths,
+            vec![
+                PathBuf::from("/tmp/link-a"),
+                PathBuf::from("/tmp/link-b"),
+                PathBuf::from("/tmp/dir-a"),
+                PathBuf::from("/tmp/dir-b"),
+            ]
+        );
     }
 
     #[test]
@@ -3890,33 +5092,33 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_restow_deletion_phase_empty_packages() {
+    fn test_plan_restow_delete_package_actions_empty_packages() {
         let temp_dir = TempDir::new().unwrap();
         let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
         let mut config = create_test_config(&target_dir, &stow_dir);
         config.packages = vec![]; // Empty packages
 
-        let result = execute_restow_deletion_phase(&config);
+        let result = plan_restow_delete_package_actions(&config);
         assert!(result.is_ok());
-        let reports = result.unwrap();
-        assert!(reports.is_empty());
+        let actions = result.unwrap();
+        assert!(actions.is_empty());
     }
 
     #[test]
-    fn test_execute_restow_deletion_phase_nonexistent_package() {
+    fn test_plan_restow_delete_package_actions_nonexistent_package() {
         let temp_dir = TempDir::new().unwrap();
         let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
         let mut config = create_test_config(&target_dir, &stow_dir);
         config.packages = vec!["nonexistent_package".to_string()];
 
-        let result = execute_restow_deletion_phase(&config);
+        let result = plan_restow_delete_package_actions(&config);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_execute_restow_deletion_phase_valid_package() {
+    fn test_plan_restow_delete_package_actions_valid_package() {
         let temp_dir = TempDir::new().unwrap();
         let target_dir = temp_dir.path().join("target");
         let stow_dir = temp_dir.path().join("stow");
@@ -3929,11 +5131,10 @@ mod tests {
         let mut config = create_test_config(&target_dir, &stow_dir);
         config.packages = vec!["test_package".to_string()];
 
-        let result = execute_restow_deletion_phase(&config);
+        let result = plan_restow_delete_package_actions(&config);
         assert!(result.is_ok());
-        let reports = result.unwrap();
-        // Should return some reports (empty since no symlinks to delete)
-        assert!(reports.is_empty());
+        let actions = result.unwrap();
+        assert!(actions.is_empty());
     }
 
     #[test]
@@ -4071,7 +5272,7 @@ mod tests {
         assert_eq!(*index, 0);
         assert!(matches!(
             conflict_info.conflict_type,
-            ParentConflictType::ParentIsFile
+            ParentConflictType::File
         ));
         assert_eq!(conflict_info.parent_path, target_dir.join("parent"));
     }
@@ -4097,9 +5298,10 @@ mod tests {
             action_type: ActionType::CreateSymlink,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Should succeed - parent directories don't exist but will be created
-        let result = prepare_symlink_creation(&action);
+        let result = prepare_symlink_creation(&action, &config);
         assert!(
             result.is_none(),
             "Expected success, but got error: {:?}",
@@ -4140,9 +5342,10 @@ mod tests {
             action_type: ActionType::CreateSymlink,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Should succeed - existing symlink will be removed
-        let result = prepare_symlink_creation(&action);
+        let result = prepare_symlink_creation(&action, &config);
         assert!(
             result.is_none(),
             "Expected success, but got error: {:?}",
@@ -4176,9 +5379,10 @@ mod tests {
             action_type: ActionType::CreateSymlink,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Should fail - cannot override regular file
-        let result = prepare_symlink_creation(&action);
+        let result = prepare_symlink_creation(&action, &config);
         assert!(
             result.is_some(),
             "Expected failure for existing regular file"
@@ -4223,9 +5427,10 @@ mod tests {
             action_type: ActionType::AdoptFile,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Execute the action
-        let report = execute_real_action(&action);
+        let report = execute_real_action(&action, &config);
 
         // Verify the action was successful
         assert_eq!(report.status, TargetActionReportStatus::Success);
@@ -4257,6 +5462,72 @@ mod tests {
         assert_eq!(
             link_target,
             PathBuf::from("../stow/testpkg/existing_file.txt")
+        );
+    }
+
+    #[test]
+    fn test_move_file_rejects_symlinked_destination_ancestor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let real_dir = temp_dir.path().join("real");
+        let target_dir = temp_dir.path().join("target");
+
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let source_file = source_dir.join("file.txt");
+        fs::write(&source_file, "content").unwrap();
+
+        let symlink_parent = target_dir.join("symlink_parent");
+        fs_utils::create_symlink(&symlink_parent, &real_dir).unwrap();
+
+        let destination = symlink_parent.join("file.txt");
+        let result = move_file(&source_file, &destination);
+
+        assert!(matches!(
+            result,
+            Err(crate::error::FsError::MoveItem { .. })
+        ));
+        assert!(
+            source_file.exists(),
+            "Source file should remain when move is rejected"
+        );
+        assert!(
+            !destination.exists(),
+            "Destination file should not be created"
+        );
+    }
+
+    #[test]
+    fn test_move_directory_rejects_symlinked_destination_ancestor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_dir = temp_dir.path().join("source_dir");
+        let real_dir = temp_dir.path().join("real");
+        let target_dir = temp_dir.path().join("target");
+
+        fs::create_dir_all(source_dir.join("nested")).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::write(source_dir.join("nested").join("file.txt"), "content").unwrap();
+
+        let symlink_parent = target_dir.join("symlink_parent");
+        fs_utils::create_symlink(&symlink_parent, &real_dir).unwrap();
+
+        let destination_dir = symlink_parent.join("adopted");
+        let result = move_directory(&source_dir, &destination_dir);
+
+        assert!(matches!(
+            result,
+            Err(crate::error::FsError::MoveItem { .. })
+        ));
+        assert!(
+            source_dir.exists(),
+            "Source directory should remain when move is rejected"
+        );
+        assert!(
+            !destination_dir.exists(),
+            "Destination directory should not be created"
         );
     }
 

@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 use rustow::cli::Args;
 use rustow::config::{Config, StowMode};
@@ -70,6 +71,7 @@ fn create_test_config(
         packages,
         mode: StowMode::Stow, // Default to Stow mode for these tests
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles,
@@ -80,6 +82,17 @@ fn create_test_config(
         verbosity,                      // Use the passed verbosity
         home_dir: std::env::temp_dir(), // Dummy home dir for tests, not critical for these path tests
     }
+}
+
+fn run_rustow<I, S>(args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(env!("CARGO_BIN_EXE_rustow"))
+        .args(args)
+        .output()
+        .expect("Failed to run rustow binary")
 }
 
 #[test]
@@ -569,6 +582,48 @@ fn test_split_open_folded_tree_for_second_package() {
 }
 
 #[test]
+fn test_split_open_preserves_package_symlink_alias_targets() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    let real_package_dir = stow_dir.join("realpkg");
+    let second_package_dir = stow_dir.join("second");
+    fs::create_dir_all(real_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(second_package_dir.join("bin")).unwrap();
+    fs::write(real_package_dir.join("bin/tool"), "real").unwrap();
+    fs::write(second_package_dir.join("bin/other"), "other").unwrap();
+    rustow::fs_utils::create_symlink(&stow_dir.join("aliaspkg"), Path::new("realpkg")).unwrap();
+
+    let alias_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["aliaspkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&alias_config).unwrap();
+    assert_eq!(
+        fs::read_link(target_dir.join("bin")).unwrap(),
+        PathBuf::from("../stow_dir/aliaspkg/bin")
+    );
+
+    let second_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["second".to_string()],
+        false,
+        0,
+    );
+    let result = stow_packages(&second_config);
+
+    assert!(result.is_ok(), "split-open failed: {:?}", result.err());
+    assert!(target_dir.join("bin").is_dir());
+    assert_eq!(
+        fs::read_link(target_dir.join("bin/tool")).unwrap(),
+        PathBuf::from("../../stow_dir/aliaspkg/bin/tool")
+    );
+    assert!(target_dir.join("bin/other").exists());
+}
+
+#[test]
 fn test_delete_refolds_single_remaining_package_tree() {
     let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
     let package1_dir = stow_dir.join("perl");
@@ -1049,6 +1104,7 @@ fn test_config_integration_verbosity_and_simulate() {
         adopt: false,
         no_folding: false,
         dotfiles: false,
+        compat: false,
         override_conflicts: vec![],
         defer_conflicts: vec![],
         ignore_patterns: vec![],
@@ -1848,6 +1904,7 @@ fn test_delete_mode_nonexistent_target() {
         packages: vec![package_name.to_string()],
         mode: StowMode::Delete,
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles: false,
@@ -1899,6 +1956,7 @@ fn test_delete_mode_non_stow_symlinks() {
         packages: vec![package_name.to_string()],
         mode: StowMode::Delete,
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles: false,
@@ -1985,6 +2043,7 @@ fn test_restow_mode_basic() {
     // Now test restow mode
     let mut restow_config = stow_config.clone();
     restow_config.mode = StowMode::Restow;
+    restow_config.compat = true;
     restow_config.verbosity = 2; // Enable debug output
 
     let restow_result = restow_packages(&restow_config);
@@ -2071,6 +2130,7 @@ fn test_restow_mode_with_dotfiles() {
     // Now test restow mode with dotfiles
     let mut restow_config = stow_config.clone();
     restow_config.mode = StowMode::Restow;
+    restow_config.compat = true;
 
     let restow_result = restow_packages(&restow_config);
     assert!(
@@ -2085,6 +2145,10 @@ fn test_restow_mode_with_dotfiles() {
         "Old .bashrc should be removed after restow"
     );
     assert!(
+        fs::symlink_metadata(target_dir.join(".bashrc")).is_err(),
+        "Old .bashrc symlink should be removed after restow"
+    );
+    assert!(
         target_dir.join(".vimrc").exists(),
         "New .vimrc should exist after restow"
     );
@@ -2095,6 +2159,327 @@ fn test_restow_mode_with_dotfiles() {
             .is_symlink(),
         ".vimrc should be a symlink"
     );
+}
+
+#[test]
+fn test_restow_prunes_obsolete_top_level_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(&package_dir).unwrap();
+    fs::write(package_dir.join("old"), "old").unwrap();
+    fs::write(package_dir.join("current"), "current").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    config.compat = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("old")));
+
+    fs::remove_file(package_dir.join("old")).unwrap();
+    fs::write(package_dir.join("new"), "new").unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("old")).is_err());
+    assert!(target_dir.join("current").exists());
+    assert!(target_dir.join("new").exists());
+}
+
+#[test]
+fn test_restow_prunes_obsolete_nested_symlink_for_each_shared_directory_package_order() {
+    for package_order in [
+        vec!["a".to_string(), "b".to_string()],
+        vec!["b".to_string(), "a".to_string()],
+    ] {
+        let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) =
+            setup_test_environment();
+        let package_a_dir = stow_dir.join("a");
+        let package_b_dir = stow_dir.join("b");
+
+        fs::create_dir_all(package_a_dir.join("config")).unwrap();
+        fs::create_dir_all(package_b_dir.join("config/nvim")).unwrap();
+        fs::write(package_a_dir.join("config/a-current"), "a").unwrap();
+        fs::write(package_b_dir.join("config/nvim/current"), "current").unwrap();
+        fs::write(package_b_dir.join("config/nvim/old"), "old").unwrap();
+
+        let mut config = create_test_config(
+            stow_dir.clone(),
+            target_dir.clone(),
+            package_order.clone(),
+            false,
+            0,
+        );
+        config.no_folding = true;
+        stow_packages(&config).unwrap();
+        assert!(rustow::fs_utils::is_symlink(
+            &target_dir.join("config/nvim/old")
+        ));
+
+        fs::remove_file(package_b_dir.join("config/nvim/old")).unwrap();
+        fs::write(package_b_dir.join("config/nvim/new"), "new").unwrap();
+
+        let mut restow_config = config.clone();
+        restow_config.mode = StowMode::Restow;
+        let result = restow_packages(&restow_config);
+
+        assert!(
+            result.is_ok(),
+            "restow failed for order {:?}: {:?}",
+            package_order,
+            result.err()
+        );
+        assert!(
+            fs::symlink_metadata(target_dir.join("config/nvim/old")).is_err(),
+            "old symlink remained for order {:?}",
+            package_order
+        );
+        assert!(target_dir.join("config/a-current").exists());
+        assert!(target_dir.join("config/nvim/current").exists());
+        assert!(target_dir.join("config/nvim/new").exists());
+    }
+}
+
+#[test]
+fn test_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_removed() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config/nvim")).unwrap();
+    fs::write(package_dir.join("config/nvim/old"), "old").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    config.compat = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+
+    let unrelated_dir = target_dir.join("unrelated");
+    fs::create_dir_all(&unrelated_dir).unwrap();
+    rustow::fs_utils::create_symlink(
+        &unrelated_dir.join("old"),
+        &stow_dir.join("pkg/config/nvim/old"),
+    )
+    .unwrap();
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("config/nvim/old")).is_err());
+    assert!(rustow::fs_utils::is_symlink(&unrelated_dir.join("old")));
+}
+
+#[test]
+fn test_restow_preserves_obsolete_nested_symlink_when_package_subtree_is_removed_without_compat() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config/nvim")).unwrap();
+    fs::write(package_dir.join("config/nvim/old"), "old").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+
+    let unrelated_dir = target_dir.join("unrelated");
+    fs::create_dir_all(&unrelated_dir).unwrap();
+    rustow::fs_utils::create_symlink(
+        &unrelated_dir.join("old"),
+        &stow_dir.join("pkg/config/nvim/old"),
+    )
+    .unwrap();
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+    assert!(rustow::fs_utils::is_symlink(&unrelated_dir.join("old")));
+}
+
+#[test]
+fn test_mixed_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_removed() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let side_dir = stow_dir.join("side");
+    fs::create_dir_all(package_dir.join("config/nvim")).unwrap();
+    fs::create_dir_all(side_dir.join("share")).unwrap();
+    fs::write(package_dir.join("config/nvim/old"), "old").unwrap();
+    fs::write(side_dir.join("share/side"), "side").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    config.compat = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "--no-folding".to_string(),
+        "-p".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-R".to_string(),
+        "pkg".to_string(),
+        "-S".to_string(),
+        "side".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("config/nvim/old")).is_err());
+    assert!(target_dir.join("share/side").exists());
+}
+
+#[test]
+fn test_restow_preserves_ignored_obsolete_nested_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::write(package_dir.join("config/secret"), "secret").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    restow_config.ignore_patterns = vec![regex::Regex::new("secret").unwrap()];
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+}
+
+#[test]
+fn test_restow_preserves_removed_package_top_level_symlink_when_not_compat() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(&package_dir).unwrap();
+    fs::write(package_dir.join("old"), "old").unwrap();
+    fs::write(package_dir.join("current"), "current").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+
+    fs::remove_file(package_dir.join("old")).unwrap();
+    fs::write(package_dir.join("new"), "new").unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("old")).is_ok());
+    assert!(target_dir.join("current").exists());
+    assert!(target_dir.join("new").exists());
+}
+
+#[test]
+fn test_mixed_restow_preserves_ignored_obsolete_nested_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let side_dir = stow_dir.join("side");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::create_dir_all(side_dir.join("share")).unwrap();
+    fs::write(package_dir.join("config/secret"), "secret").unwrap();
+    fs::write(side_dir.join("share/side"), "side").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "--no-folding".to_string(),
+        "--ignore".to_string(),
+        "secret".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-R".to_string(),
+        "pkg".to_string(),
+        "-S".to_string(),
+        "side".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+    assert!(target_dir.join("share/side").exists());
 }
 
 /// Test simulate mode with delete operations
@@ -2133,6 +2518,7 @@ fn test_delete_mode_simulate() {
         packages: vec![package_name.to_string()],
         mode: StowMode::Delete,
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles: false,
@@ -2195,6 +2581,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2215,6 +2602,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2242,6 +2630,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2269,6 +2658,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2282,6 +2672,1599 @@ fn test_cli_integration_modes() {
         target_dir.join("bin/test_script").exists(),
         "Symlink should be recreated via CLI restow"
     );
+}
+
+#[test]
+fn test_cli_mixed_delete_and_stow_operations() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("bin")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_package_dir.join("bin/new_tool"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("bin/old_tool").exists());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed operation failed: {:?}", result.err());
+    assert!(
+        !target_dir.join("bin/old_tool").exists(),
+        "old package should be unstowed"
+    );
+    assert!(
+        target_dir.join("bin/new_tool").exists(),
+        "new package should be stowed"
+    );
+}
+
+#[test]
+fn test_public_run_rejects_ambiguous_mixed_args_without_mutation() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("bin")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_package_dir.join("bin/new_tool"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+
+    let args = Args::parse_from([
+        "rustow",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-D",
+        "oldpkg",
+        "-S",
+        "newpkg",
+    ]);
+    let result = rustow::run(args);
+
+    assert!(matches!(
+        result,
+        Err(rustow::error::RustowError::Config(
+            rustow::error::ConfigError::InvalidOperation(_)
+        ))
+    ));
+    assert!(target_dir.join("bin/old_tool").exists());
+    assert!(!target_dir.join("bin/new_tool").exists());
+}
+
+#[test]
+fn test_public_run_with_empty_operation_groups_rejects_ambiguous_mixed_args_without_mutation() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("bin")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_package_dir.join("bin/new_tool"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+
+    let args = Args::parse_from([
+        "rustow",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-D",
+        "oldpkg",
+        "-S",
+        "newpkg",
+    ]);
+    let result = rustow::run_with_operation_groups(args, Vec::new());
+
+    assert!(matches!(
+        result,
+        Err(rustow::error::RustowError::Config(
+            rustow::error::ConfigError::InvalidOperation(_)
+        ))
+    ));
+    assert!(target_dir.join("bin/old_tool").exists());
+    assert!(!target_dir.join("bin/new_tool").exists());
+}
+
+#[test]
+fn test_cli_mixed_same_package_stow_and_delete_leaves_package_stowed() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/old"), "old").unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("bin/old")));
+
+    fs::remove_file(package_dir.join("bin/old")).unwrap();
+    fs::write(package_dir.join("bin/new"), "new").unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "--no-folding".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-S".to_string(),
+        "pkg".to_string(),
+        "-D".to_string(),
+        "pkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "same-package mixed operation failed: {:?}",
+        result.err()
+    );
+    assert!(fs::symlink_metadata(target_dir.join("bin/old")).is_err());
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(target_dir.join("bin/new").exists());
+}
+
+#[test]
+fn test_cli_mixed_duplicate_stow_groups_are_idempotent() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let old_package_dir = stow_dir.join("oldpkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::create_dir_all(old_package_dir.join("share")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+    fs::write(old_package_dir.join("share/old"), "old").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("share/old").exists());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-S".to_string(),
+        "pkg".to_string(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "pkg".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "duplicate stow mixed operation failed: {:?}",
+        result.err()
+    );
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(!target_dir.join("share/old").exists());
+}
+
+#[test]
+fn test_binary_mixed_same_package_delete_and_stow_prunes_stale_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/old"), "old").unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("bin/old")));
+
+    fs::remove_file(package_dir.join("bin/old")).unwrap();
+    fs::write(package_dir.join("bin/new"), "new").unwrap();
+
+    let output = run_rustow([
+        "--no-folding",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-D",
+        "pkg",
+        "-S",
+        "pkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fs::symlink_metadata(target_dir.join("bin/old")).is_err());
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(target_dir.join("bin/new").exists());
+}
+
+#[test]
+fn test_binary_mixed_delete_and_stow_operations() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("bin")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_package_dir.join("bin/new_tool"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+
+    let output = run_rustow([
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-D",
+        "oldpkg",
+        "-S",
+        "newpkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!target_dir.join("bin/old_tool").exists());
+    assert!(target_dir.join("bin/new_tool").exists());
+}
+
+#[test]
+fn test_cli_mixed_stow_then_delete_replaces_overlapping_target() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("bin")).unwrap();
+    fs::write(old_package_dir.join("bin/tool"), "old").unwrap();
+    fs::write(new_package_dir.join("bin/tool"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("bin/tool").exists());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "GNU mixed stow/delete replacement failed: {:?}",
+        result.err()
+    );
+    assert!(target_dir.join("bin/tool").exists());
+    assert_eq!(
+        fs::read_link(target_dir.join("bin")).unwrap(),
+        PathBuf::from("../stow_dir/newpkg/bin")
+    );
+}
+
+#[test]
+fn test_cli_mixed_stow_conflict_prevents_prior_delete() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("etc")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_package_dir.join("etc/app.conf"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    fs::create_dir_all(target_dir.join("etc")).unwrap();
+    fs::write(target_dir.join("etc/app.conf"), "unmanaged").unwrap();
+    assert!(target_dir.join("bin/old_tool").exists());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_err(),
+        "mixed operation should fail before mutation when later stow conflicts"
+    );
+    assert!(
+        target_dir.join("bin/old_tool").exists(),
+        "old package should remain stowed when later stow phase conflicts"
+    );
+    assert_eq!(
+        fs::read_to_string(target_dir.join("etc/app.conf")).unwrap(),
+        "unmanaged"
+    );
+}
+
+#[test]
+fn test_binary_mixed_simulate_conflict_reports_failure_without_mutation() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("etc")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_package_dir.join("etc/app.conf"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    fs::create_dir_all(target_dir.join("etc")).unwrap();
+    fs::write(target_dir.join("etc/app.conf"), "unmanaged").unwrap();
+
+    let output = run_rustow([
+        "-n",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-D",
+        "oldpkg",
+        "-S",
+        "newpkg",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("CONFLICT"));
+    assert!(target_dir.join("bin/old_tool").exists());
+    assert_eq!(
+        fs::read_to_string(target_dir.join("etc/app.conf")).unwrap(),
+        "unmanaged"
+    );
+}
+
+#[test]
+fn test_cli_restow_conflict_preserves_existing_symlinks() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "old").unwrap();
+
+    let stow_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&stow_config).unwrap();
+    fs::create_dir_all(package_dir.join("etc")).unwrap();
+    fs::write(package_dir.join("etc/app.conf"), "new").unwrap();
+    fs::create_dir_all(target_dir.join("etc")).unwrap();
+    fs::write(target_dir.join("etc/app.conf"), "unmanaged").unwrap();
+
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: true,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["pkg".to_string()],
+    });
+
+    assert!(result.is_err());
+    assert!(target_dir.join("bin/tool").exists());
+    assert_eq!(
+        fs::read_to_string(target_dir.join("etc/app.conf")).unwrap(),
+        "unmanaged"
+    );
+}
+
+#[test]
+fn test_cli_mixed_delete_open_directory_then_stow_file_replacement() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(&new_package_dir).unwrap();
+    fs::write(old_package_dir.join("bin/tool"), "old").unwrap();
+    fs::write(new_package_dir.join("bin"), "new").unwrap();
+
+    let mut old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    old_config.no_folding = true;
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(target_dir.join("bin").is_dir());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "mixed replacement failed: {:?}",
+        result.err()
+    );
+    assert!(
+        fs::read_link(target_dir.join("bin"))
+            .unwrap()
+            .ends_with("stow_dir/newpkg/bin")
+    );
+}
+
+#[test]
+fn test_binary_double_dash_allows_dash_prefixed_package_names() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let package_dir = stow_dir.join("-D");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/dash_tool"), "dash").unwrap();
+
+    let output = run_rustow([
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "--",
+        "-D",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target_dir.join("bin/dash_tool").exists());
+}
+
+#[test]
+fn test_binary_double_dash_preserves_verbose_like_package_names() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let package_dir = stow_dir.join("--verbose=0");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/verbose_tool"), "verbose").unwrap();
+
+    let output = run_rustow([
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "--",
+        "--verbose=0",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target_dir.join("bin/verbose_tool").exists());
+}
+
+#[test]
+fn test_binary_verbose_numeric_level_is_accepted() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let output = run_rustow([
+        "--verbose=2",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "pkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Summary:"));
+}
+
+#[test]
+fn test_binary_verbose_parse_errors_and_help_exit_codes() {
+    let invalid_verbose = run_rustow(["--verbose=6", "pkg"]);
+    assert_eq!(invalid_verbose.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid_verbose.stderr).contains("between 0 and 5"));
+
+    let help_with_invalid_verbose = run_rustow(["--help", "--verbose=6"]);
+    assert_eq!(help_with_invalid_verbose.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help_with_invalid_verbose.stdout).contains("Usage:"));
+
+    let version_with_invalid_verbose = run_rustow(["--version", "-vvvvvv"]);
+    assert_eq!(version_with_invalid_verbose.status.code(), Some(0));
+}
+
+#[test]
+fn test_binary_rejects_operation_flags_as_missing_option_values() {
+    for args in [
+        vec!["-d", "-D", "pkg"],
+        vec!["--target", "--restow", "pkg"],
+        vec!["--ignore", "-S", "pkg"],
+        vec!["-Dt", "--help", "pkg"],
+        vec!["-Dt", "--verbose", "pkg"],
+        vec!["-d", "--simulate", "pkg"],
+        vec!["-d", "-n", "pkg"],
+        vec!["-Sd", "-n", "pkg"],
+        vec!["--target", "--adopt", "pkg"],
+        vec!["-d", "--verbose", "pkg"],
+        vec!["--target", "--verbose", "pkg"],
+        vec!["--ignore", "--verbose", "pkg"],
+        vec!["--defer", "--verbose", "pkg"],
+        vec!["--override", "--verbose", "pkg"],
+        vec!["-Rt", "--simulate", "pkg"],
+    ] {
+        let output = run_rustow(args);
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires a value"));
+    }
+}
+
+#[test]
+fn test_cli_mixed_repeated_mode_switches_are_accepted() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    for package_name in ["oldpkg", "olderpkg", "newpkg"] {
+        let package_dir = stow_dir.join(package_name);
+        fs::create_dir_all(package_dir.join("bin")).unwrap();
+        fs::write(
+            package_dir.join("bin").join(format!("{package_name}_tool")),
+            package_name,
+        )
+        .unwrap();
+    }
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string(), "olderpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("bin/oldpkg_tool").exists());
+    assert!(target_dir.join("bin/olderpkg_tool").exists());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+        "-D".to_string(),
+        "olderpkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "repeated mixed operation modes should be accepted: {:?}",
+        result.err()
+    );
+    assert!(!target_dir.join("bin/oldpkg_tool").exists());
+    assert!(!target_dir.join("bin/olderpkg_tool").exists());
+    assert!(target_dir.join("bin/newpkg_tool").exists());
+}
+
+#[test]
+fn test_cli_mixed_operations_preflight_missing_package_before_delete() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let old_package_dir = stow_dir.join("oldpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("bin/old_tool").exists());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "missingpkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_err(),
+        "mixed operation should fail during preflight"
+    );
+    assert!(
+        target_dir.join("bin/old_tool").exists(),
+        "old package should remain stowed when a later package is missing"
+    );
+}
+
+#[test]
+fn test_cli_clustered_target_option_value_is_not_treated_as_package() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let package_dir = stow_dir.join("oldpkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/old_tool"), "old").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("bin/old_tool").exists());
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-Dt".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "oldpkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "clustered -Dt should not schedule the target path as a package: {:?}",
+        result.err()
+    );
+    assert!(
+        !target_dir.join("bin/old_tool").exists(),
+        "old package should be unstowed"
+    );
+}
+
+#[test]
+fn test_cli_double_dash_allows_dash_prefixed_package_names() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let package_dir = stow_dir.join("-D");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/dash_tool"), "dash").unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "--".to_string(),
+        "-D".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "dash-prefixed package after -- should be stowed: {:?}",
+        result.err()
+    );
+    assert!(target_dir.join("bin/dash_tool").exists());
+}
+
+#[test]
+fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let package_dir = stow_dir.join("realpkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "real").unwrap();
+    rustow::fs_utils::create_symlink(&stow_dir.join("aliaspkg"), Path::new("realpkg")).unwrap();
+
+    let stow_result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["aliaspkg".to_string()],
+    });
+    assert!(
+        stow_result.is_ok(),
+        "alias stow failed: {:?}",
+        stow_result.err()
+    );
+    assert!(target_dir.join("bin/tool").exists());
+    assert_eq!(
+        fs::read_link(target_dir.join("bin")).unwrap(),
+        PathBuf::from("../stow_dir/aliaspkg/bin")
+    );
+
+    let repeat_stow_result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["aliaspkg".to_string()],
+    });
+    assert!(
+        repeat_stow_result.is_ok(),
+        "repeat alias stow failed: {:?}",
+        repeat_stow_result.err()
+    );
+
+    let restow_result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: true,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["aliaspkg".to_string()],
+    });
+    assert!(
+        restow_result.is_ok(),
+        "alias restow failed: {:?}",
+        restow_result.err()
+    );
+    assert_eq!(
+        fs::read_link(target_dir.join("bin")).unwrap(),
+        PathBuf::from("../stow_dir/aliaspkg/bin")
+    );
+
+    let delete_result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: true,
+        restow: false,
+        adopt: false,
+        no_folding: false,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["aliaspkg".to_string()],
+    });
+
+    assert!(
+        delete_result.is_ok(),
+        "alias delete failed: {:?}",
+        delete_result.err()
+    );
+    assert!(!target_dir.join("bin/tool").exists());
+}
+
+#[test]
+fn test_cli_mixed_delete_real_package_and_stow_alias_package() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let package_dir = stow_dir.join("realpkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "real").unwrap();
+    rustow::fs_utils::create_symlink(&stow_dir.join("aliaspkg"), Path::new("realpkg")).unwrap();
+
+    let real_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["realpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&real_config).unwrap();
+    assert_eq!(
+        fs::read_link(target_dir.join("bin")).unwrap(),
+        PathBuf::from("../stow_dir/realpkg/bin")
+    );
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "realpkg".to_string(),
+        "-S".to_string(),
+        "aliaspkg".to_string(),
+    ]);
+
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "mixed alias replacement failed: {:?}",
+        result.err()
+    );
+    assert_eq!(
+        fs::read_link(target_dir.join("bin")).unwrap(),
+        PathBuf::from("../stow_dir/aliaspkg/bin")
+    );
+}
+
+#[test]
+fn test_restow_preserves_unrelated_empty_directories() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&config).unwrap();
+    let unrelated_empty_dir = target_dir.join(".local/state/app/empty");
+    fs::create_dir_all(&unrelated_empty_dir).unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(unrelated_empty_dir.is_dir());
+}
+
+#[test]
+fn test_restow_does_not_refold_directory_with_ignored_descendants() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::write(package_dir.join("config/visible"), "visible").unwrap();
+    fs::write(package_dir.join("config/secret"), "secret").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.ignore_patterns = vec![regex::Regex::new("secret").unwrap()];
+    stow_packages(&config).unwrap();
+    assert!(target_dir.join("config").is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_dir.join("config")));
+    assert!(target_dir.join("config/visible").exists());
+    assert!(!target_dir.join("config/secret").exists());
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(target_dir.join("config").is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_dir.join("config")));
+    assert!(target_dir.join("config/visible").exists());
+    assert!(!target_dir.join("config/secret").exists());
+}
+
+#[test]
+fn test_mixed_restow_does_not_refold_directory_with_ignored_descendants() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let side_dir = stow_dir.join("side");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::create_dir_all(side_dir.join("share")).unwrap();
+    fs::write(package_dir.join("config/visible"), "visible").unwrap();
+    fs::write(package_dir.join("config/secret"), "secret").unwrap();
+    fs::write(side_dir.join("share/side"), "side").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.ignore_patterns = vec![regex::Regex::new("secret").unwrap()];
+    stow_packages(&config).unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "--ignore".to_string(),
+        "secret".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-R".to_string(),
+        "pkg".to_string(),
+        "-S".to_string(),
+        "side".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed restow failed: {:?}", result.err());
+    assert!(target_dir.join("config").is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_dir.join("config")));
+    assert!(target_dir.join("config/visible").exists());
+    assert!(!target_dir.join("config/secret").exists());
+    assert!(target_dir.join("share/side").exists());
+}
+
+#[test]
+fn test_restow_default_preserves_unrelated_symlink_to_package_path() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    let unrelated_dir = target_dir.join("unrelated");
+    fs::create_dir_all(&unrelated_dir).unwrap();
+    rustow::fs_utils::create_symlink(&unrelated_dir.join("tool"), &stow_dir.join("pkg/bin/tool"))
+        .unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(&unrelated_dir.join("tool")));
+}
+
+#[test]
+fn test_restow_does_not_scan_through_folded_directory_symlink_into_package_source() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config/nested")).unwrap();
+    fs::write(package_dir.join("config/nested/file"), "file").unwrap();
+    rustow::fs_utils::create_symlink(
+        &package_dir.join("config/nested/source_link"),
+        &package_dir.join("config/nested/file"),
+    )
+    .unwrap();
+
+    let config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("config")));
+    assert!(rustow::fs_utils::is_symlink(
+        &package_dir.join("config/nested/source_link")
+    ));
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(
+        &package_dir.join("config/nested/source_link")
+    ));
+}
+
+#[test]
+fn test_restow_preserves_unrelated_foldable_open_directory() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let other_dir = stow_dir.join("other");
+    fs::create_dir_all(other_dir.join("bin")).unwrap();
+    fs::write(other_dir.join("bin/other_tool"), "other").unwrap();
+
+    let mut other_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["other".to_string()],
+        false,
+        0,
+    );
+    other_config.no_folding = true;
+    stow_packages(&other_config).unwrap();
+    assert!(target_dir.join("bin").is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_dir.join("bin")));
+
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("share")).unwrap();
+    fs::write(package_dir.join("share/pkg_tool"), "pkg").unwrap();
+    let package_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&package_config).unwrap();
+
+    let mut restow_config = package_config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(target_dir.join("bin").is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_dir.join("bin")));
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("bin/other_tool")
+    ));
+}
+
+#[test]
+fn test_mixed_operations_preserve_unrelated_foldable_open_directory() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let other_dir = stow_dir.join("other");
+    fs::create_dir_all(other_dir.join("bin")).unwrap();
+    fs::write(other_dir.join("bin/other_tool"), "other").unwrap();
+
+    let mut other_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["other".to_string()],
+        false,
+        0,
+    );
+    other_config.no_folding = true;
+    stow_packages(&other_config).unwrap();
+
+    let old_dir = stow_dir.join("oldpkg");
+    let new_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_dir.join("share")).unwrap();
+    fs::create_dir_all(new_dir.join("share")).unwrap();
+    fs::write(old_dir.join("share/old_tool"), "old").unwrap();
+    fs::write(new_dir.join("share/new_tool"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed operation failed: {:?}", result.err());
+    assert!(target_dir.join("bin").is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_dir.join("bin")));
+    assert!(target_dir.join("share/new_tool").exists());
+}
+
+#[test]
+fn test_mixed_refold_preserves_alias_package_path() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let real_dir = stow_dir.join("realpkg");
+    let old_dir = stow_dir.join("oldpkg");
+    let new_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(real_dir.join("bin")).unwrap();
+    fs::create_dir_all(old_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_dir.join("share")).unwrap();
+    fs::write(real_dir.join("bin/tool"), "real").unwrap();
+    fs::write(old_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_dir.join("share/new_tool"), "new").unwrap();
+    rustow::fs_utils::create_symlink(&stow_dir.join("aliaspkg"), Path::new("realpkg")).unwrap();
+
+    let mut alias_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["aliaspkg".to_string()],
+        false,
+        0,
+    );
+    alias_config.no_folding = true;
+    stow_packages(&alias_config).unwrap();
+
+    let mut old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    old_config.no_folding = true;
+    stow_packages(&old_config).unwrap();
+    assert!(target_dir.join("bin").is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_dir.join("bin")));
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(
+        result.is_ok(),
+        "mixed alias refold failed: {:?}",
+        result.err()
+    );
+    assert_eq!(
+        fs::read_link(target_dir.join("bin")).unwrap(),
+        PathBuf::from("../stow_dir/aliaspkg/bin")
+    );
+    assert!(target_dir.join("bin/tool").exists());
+}
+
+#[test]
+fn test_mixed_refold_rejects_package_alias_resolving_outside_stow_dir() {
+    let temp_dir = tempdir().unwrap();
+    let stow_dir = temp_dir.path().join("stow_dir");
+    let target_dir = temp_dir.path().join("target_dir");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(&stow_dir).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(external_dir.join("bin")).unwrap();
+    fs::write(external_dir.join("bin/tool"), "external").unwrap();
+    rustow::fs_utils::create_symlink(&stow_dir.join("evil"), &external_dir).unwrap();
+
+    let old_dir = stow_dir.join("oldpkg");
+    let new_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_dir.join("share")).unwrap();
+    fs::write(old_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_dir.join("share/new_tool"), "new").unwrap();
+
+    let mut old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    old_config.no_folding = true;
+    stow_packages(&old_config).unwrap();
+
+    let target_bin = target_dir.join("bin");
+    rustow::fs_utils::create_symlink(&target_bin.join("tool"), &stow_dir.join("evil/bin/tool"))
+        .unwrap();
+    assert!(target_bin.is_dir());
+    assert!(rustow::fs_utils::is_symlink(&target_bin.join("tool")));
+    assert!(rustow::fs_utils::is_symlink(&target_bin.join("old_tool")));
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed operation failed: {:?}", result.err());
+    assert!(target_bin.is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_bin));
+    assert!(rustow::fs_utils::is_symlink(&target_bin.join("tool")));
+    assert!(target_dir.join("share/new_tool").exists());
+}
+
+#[test]
+fn test_stow_rejects_symlinked_target_ancestor_without_external_mutation() {
+    let (temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::create_dir_all(&external_dir).unwrap();
+    fs::write(package_dir.join("config/tool"), "tool").unwrap();
+    rustow::fs_utils::create_symlink(&target_dir.join("config"), &external_dir).unwrap();
+
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: false,
+        no_folding: true,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["pkg".to_string()],
+    });
+
+    assert!(result.is_err());
+    assert!(!external_dir.join("tool").exists());
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("config")));
+}
+
+#[test]
+fn test_adopt_rejects_symlinked_target_ancestor_without_external_mutation() {
+    let (temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::create_dir_all(&external_dir).unwrap();
+    fs::write(package_dir.join("config/secret"), "package").unwrap();
+    fs::write(external_dir.join("secret"), "external").unwrap();
+    rustow::fs_utils::create_symlink(&target_dir.join("config"), &external_dir).unwrap();
+
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: true,
+        no_folding: true,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["pkg".to_string()],
+    });
+
+    assert!(result.is_err());
+    assert_eq!(
+        fs::read_to_string(external_dir.join("secret")).unwrap(),
+        "external"
+    );
+    assert_eq!(
+        fs::read_to_string(package_dir.join("config/secret")).unwrap(),
+        "package"
+    );
+}
+
+#[test]
+fn test_delete_rejects_symlinked_target_ancestor_without_external_symlink_deletion() {
+    let (temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(package_dir.join("link_parent")).unwrap();
+    fs::create_dir_all(&external_dir).unwrap();
+    fs::write(package_dir.join("link_parent/victim"), "package").unwrap();
+    rustow::fs_utils::create_symlink(&target_dir.join("link_parent"), &external_dir).unwrap();
+    rustow::fs_utils::create_symlink(
+        &external_dir.join("victim"),
+        &package_dir.join("link_parent/victim"),
+    )
+    .unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.mode = StowMode::Delete;
+    let result = delete_packages(&config);
+
+    assert!(result.is_ok());
+    assert!(matches!(
+        result.unwrap()[0].status,
+        TargetActionReportStatus::ConflictPrevented
+    ));
+    assert!(rustow::fs_utils::is_symlink(&external_dir.join("victim")));
+}
+
+#[test]
+fn test_delete_rejects_symlinked_target_ancestor_without_external_directory_deletion() {
+    let (temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(package_dir.join("link_parent/emptydir")).unwrap();
+    fs::create_dir_all(external_dir.join("emptydir")).unwrap();
+    rustow::fs_utils::create_symlink(&target_dir.join("link_parent"), &external_dir).unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.mode = StowMode::Delete;
+    let result = delete_packages(&config);
+
+    assert!(result.is_ok());
+    assert!(matches!(
+        result.unwrap()[0].status,
+        TargetActionReportStatus::ConflictPrevented
+    ));
+    assert!(external_dir.join("emptydir").exists());
+}
+
+#[test]
+fn test_adopt_package_symlink_alias_uses_canonical_destination_and_preserves_alias_link() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let real_package_dir = stow_dir.join("realpkg");
+    fs::create_dir_all(&real_package_dir).unwrap();
+    fs::write(real_package_dir.join("tool"), "package").unwrap();
+    rustow::fs_utils::create_symlink(&stow_dir.join("aliaspkg"), Path::new("realpkg")).unwrap();
+
+    fs::write(target_dir.join("tool"), "target").unwrap();
+
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: true,
+        no_folding: true,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["aliaspkg".to_string()],
+    });
+
+    assert!(result.is_ok(), "alias adopt failed: {:?}", result.err());
+    assert_eq!(
+        fs::read_to_string(real_package_dir.join("tool")).unwrap(),
+        "target"
+    );
+    assert_eq!(
+        fs::read_link(target_dir.join("tool")).unwrap(),
+        PathBuf::from("../stow_dir/aliaspkg/tool")
+    );
+}
+
+#[test]
+fn test_adopt_directory_does_not_traverse_symlinked_child_directory() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+
+    let external_dir = target_dir.join("../external");
+    fs::create_dir_all(&external_dir).unwrap();
+    fs::write(external_dir.join("secret.txt"), "secret").unwrap();
+    let target_config_dir = target_dir.join("config");
+    fs::create_dir_all(&target_config_dir).unwrap();
+    rustow::fs_utils::create_symlink(&target_config_dir.join("external"), &external_dir).unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.adopt = true;
+    config.no_folding = true;
+
+    let result = stow_packages(&config);
+
+    assert!(result.is_ok(), "adopt failed: {:?}", result.err());
+    assert!(external_dir.join("secret.txt").exists());
+    assert!(rustow::fs_utils::is_symlink(
+        &package_dir.join("config/external")
+    ));
+}
+
+#[test]
+fn test_adopt_directory_refuses_symlinked_destination_child_directory() {
+    let (temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+
+    let external_dir = temp_dir.path().join("external_destination");
+    fs::create_dir_all(&external_dir).unwrap();
+    rustow::fs_utils::create_symlink(&package_dir.join("config/cache"), &external_dir).unwrap();
+
+    let target_cache_dir = target_dir.join("config/cache");
+    fs::create_dir_all(&target_cache_dir).unwrap();
+    fs::write(target_cache_dir.join("file"), "target").unwrap();
+
+    let result = rustow::run(Args {
+        target: Some(target_dir.clone()),
+        dir: Some(stow_dir.clone()),
+        stow: false,
+        delete: false,
+        restow: false,
+        adopt: true,
+        no_folding: true,
+        dotfiles: false,
+        override_conflicts: Vec::new(),
+        defer_conflicts: Vec::new(),
+        ignore_patterns: Vec::new(),
+        compat: false,
+        simulate: false,
+        verbose: 0,
+        packages: vec!["pkg".to_string()],
+    });
+
+    assert!(result.is_err());
+    assert!(!external_dir.join("file").exists());
+    assert!(target_cache_dir.join("file").exists());
+    assert!(rustow::fs_utils::is_symlink(
+        &package_dir.join("config/cache")
+    ));
 }
 
 #[test]
@@ -2631,6 +4614,7 @@ fn test_adopt_option_with_existing_file() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
@@ -2702,6 +4686,7 @@ fn test_adopt_option_with_existing_directory() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
@@ -2780,6 +4765,7 @@ fn test_adopt_option_simulation_mode() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: true,
         verbose: 1,
         packages: vec!["testpkg".to_string()],

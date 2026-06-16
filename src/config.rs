@@ -13,12 +13,19 @@ pub enum StowMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct PackageOperation {
+    pub mode: StowMode,
+    pub packages: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub target_dir: PathBuf,
     pub stow_dir: PathBuf,
     pub packages: Vec<String>,
     pub mode: StowMode,
     pub stow: bool,
+    pub compat: bool,
     pub adopt: bool,
     pub no_folding: bool,
     pub dotfiles: bool,
@@ -145,6 +152,7 @@ impl Config {
             packages: args.packages.clone(),
             mode,
             stow: args.stow,
+            compat: args.compat,
             adopt: args.adopt,
             no_folding: args.no_folding,
             dotfiles: args.dotfiles,
@@ -163,7 +171,6 @@ mod tests {
     use super::*;
     use crate::cli::Args;
 
-    use clap::Parser;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
