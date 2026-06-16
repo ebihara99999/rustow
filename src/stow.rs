@@ -1822,8 +1822,55 @@ fn source_directory_can_refold(
         return Ok(false);
     }
 
-    for entry in read_sorted_directory_entries(source_dir)? {
-        let package_relative_path = item_parent.join(entry.file_name());
+    for entry in read_directory_entries(dir_path)? {
+        let path = read_directory_entry(entry, dir_path)?.path();
+        let Ok(target_relative_path) = path.strip_prefix(&config.target_dir) else {
+            return Ok(false);
+        };
+
+        if should_ignore_item(target_relative_path, &ignore_patterns)
+            || should_defer_item(target_relative_path, config)
+        {
+            return Ok(false);
+        }
+
+        if !fs_utils::is_symlink(&path) {
+            return Ok(false);
+        }
+
+        let Some((target_package, target_item_path)) =
+            lexical_stow_symlink_package_and_item_path(&path, &config.stow_dir)?
+        else {
+            return Ok(false);
+        };
+
+        if target_package != package_name {
+            return Ok(false);
+        }
+
+        let expected_item_parent = if item_parent.as_os_str().is_empty() {
+            None
+        } else {
+            Some(item_parent.as_path())
+        };
+        if target_item_path.parent() != expected_item_parent {
+            return Ok(false);
+        }
+
+        if !fs_utils::path_exists(
+            &config
+                .stow_dir
+                .join(&target_package)
+                .join(target_item_path.as_path()),
+        ) {
+            return Ok(false);
+        }
+    }
+
+    for entry in read_directory_entries(source_dir)? {
+        let entry = read_directory_entry(entry, source_dir)?;
+        let entry_file_name = entry.file_name();
+        let package_relative_path = item_parent.join(entry_file_name);
         let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
             package_relative_path.to_str().unwrap_or(""),
             config.dotfiles,
@@ -2183,16 +2230,85 @@ pub fn delete_packages(config: &Config) -> Result<Vec<TargetActionReport>, Rusto
 fn plan_restow_delete_package_actions(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
     let mut all_actions = plan_delete_package_actions(config)?;
     let package_matchers = create_restow_symlink_package_matchers(config)?;
-    collect_matching_stow_symlinks_under_target_dir(
-        &config.target_dir,
-        config,
-        &package_matchers,
-        &mut all_actions,
-    )?;
+    let mut existing_package_canonical_paths = HashMap::new();
+    if config.compat {
+        collect_matching_stow_symlinks_under_target_dir(
+            &config.target_dir,
+            config,
+            &package_matchers,
+            &mut existing_package_canonical_paths,
+            &mut all_actions,
+        )?;
+    } else {
+        collect_matching_stow_symlinks_for_current_package_images(
+            config,
+            &package_matchers,
+            &mut existing_package_canonical_paths,
+            &mut all_actions,
+        )?;
+    }
 
     sort_deletion_actions(&mut all_actions);
     deduplicate_delete_actions(&mut all_actions);
     Ok(all_actions)
+}
+
+fn collect_matching_stow_symlinks_for_current_package_images(
+    config: &Config,
+    package_matchers: &[RestowSymlinkPackageMatcher],
+    existing_package_canonical_paths: &mut HashMap<String, Option<PathBuf>>,
+    actions: &mut Vec<TargetAction>,
+) -> Result<(), RustowError> {
+    let mut candidate_target_dirs = Vec::new();
+
+    for package_matcher in package_matchers {
+        let package_path = validated_package_path(&config.stow_dir, &package_matcher.name)?;
+        let ignore_patterns = &package_matcher.ignore_patterns;
+        let raw_items = load_package_items(&package_path, &package_matcher.name)?;
+
+        for raw_item in raw_items {
+            if raw_item.item_type != fs_utils::RawStowItemType::Directory {
+                continue;
+            }
+
+            let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
+                raw_item.package_relative_path.to_str().unwrap_or(""),
+                config.dotfiles,
+            ));
+
+            if should_ignore_item(&processed_target_relative_path, ignore_patterns) {
+                continue;
+            }
+
+            candidate_target_dirs.push(config.target_dir.join(processed_target_relative_path));
+        }
+    }
+
+    candidate_target_dirs.sort_by(|a, b| path_depth(a).cmp(&path_depth(b)).then_with(|| a.cmp(b)));
+
+    let mut deduplicated_target_dirs: Vec<PathBuf> = Vec::new();
+    for target_dir in candidate_target_dirs {
+        if deduplicated_target_dirs
+            .iter()
+            .any(|scanned| target_dir.starts_with(scanned))
+        {
+            continue;
+        }
+
+        deduplicated_target_dirs.push(target_dir);
+    }
+
+    for target_dir in deduplicated_target_dirs {
+        collect_matching_stow_symlinks_under_target_dir(
+            &target_dir,
+            config,
+            package_matchers,
+            existing_package_canonical_paths,
+            actions,
+        )?;
+    }
+
+    Ok(())
 }
 
 struct RestowSymlinkPackageMatcher {
@@ -2221,6 +2337,7 @@ fn collect_matching_stow_symlinks_under_target_dir(
     target_path: &Path,
     config: &Config,
     package_matchers: &[RestowSymlinkPackageMatcher],
+    existing_package_canonical_paths: &mut HashMap<String, Option<PathBuf>>,
     actions: &mut Vec<TargetAction>,
 ) -> Result<bool, RustowError> {
     if path_has_symlink_ancestor(target_path, &config.target_dir) {
@@ -2228,7 +2345,12 @@ fn collect_matching_stow_symlinks_under_target_dir(
     }
 
     if fs_utils::is_symlink(target_path) {
-        if symlink_matches_any_package_target_path(target_path, config, package_matchers)? {
+        if symlink_matches_any_package_target_path(
+            target_path,
+            config,
+            package_matchers,
+            existing_package_canonical_paths,
+        )? {
             actions.push(create_delete_symlink_action(target_path.to_path_buf()));
             return Ok(true);
         }
@@ -2245,14 +2367,19 @@ fn collect_matching_stow_symlinks_under_target_dir(
     }
 
     let mut contains_package_symlink = false;
-    for entry in read_sorted_directory_entries(target_path)? {
-        let path = entry.path();
+    for entry in read_directory_entries(target_path)? {
+        let path = read_directory_entry(entry, target_path)?.path();
         if path == config.stow_dir || path.starts_with(&config.stow_dir) {
             continue;
         }
 
         if fs_utils::is_symlink(&path) {
-            if symlink_matches_any_package_target_path(&path, config, package_matchers)? {
+            if symlink_matches_any_package_target_path(
+                &path,
+                config,
+                package_matchers,
+                existing_package_canonical_paths,
+            )? {
                 actions.push(create_delete_symlink_action(path));
                 contains_package_symlink = true;
             }
@@ -2261,6 +2388,7 @@ fn collect_matching_stow_symlinks_under_target_dir(
                 &path,
                 config,
                 package_matchers,
+                existing_package_canonical_paths,
                 actions,
             )?
         {
@@ -2276,6 +2404,7 @@ fn symlink_matches_any_package_target_path(
     target_path: &Path,
     config: &Config,
     package_matchers: &[RestowSymlinkPackageMatcher],
+    existing_package_canonical_paths: &mut HashMap<String, Option<PathBuf>>,
 ) -> Result<bool, RustowError> {
     let Some((existing_package_name, item_path)) =
         lexical_stow_symlink_package_and_item_path(target_path, &config.stow_dir)?
@@ -2294,7 +2423,6 @@ fn symlink_matches_any_package_target_path(
         return Ok(false);
     }
 
-    let mut existing_canonical_path: Option<PathBuf> = None;
     for package_matcher in package_matchers {
         if target_relative_path_is_ignored(target_relative_path, &package_matcher.ignore_patterns) {
             continue;
@@ -2304,10 +2432,11 @@ fn symlink_matches_any_package_target_path(
             return Ok(true);
         }
 
-        if existing_canonical_path.is_none() {
-            existing_canonical_path =
-                canonical_package_path(&config.stow_dir, &existing_package_name).ok();
-        }
+        let existing_canonical_path = existing_package_canonical_paths
+            .entry(existing_package_name.clone())
+            .or_insert_with(|| {
+                canonical_package_path(&config.stow_dir, &existing_package_name).ok()
+            });
         if matches!(
             (
                 existing_canonical_path.as_ref(),
@@ -2705,14 +2834,20 @@ fn target_removed_by_delete_phase(target_path: &Path, removed_targets: &HashSet<
 
 /// Sort deletion actions to ensure proper deletion order
 fn sort_deletion_actions(actions: &mut [TargetAction]) {
-    actions.sort_by(|a, b| match (&a.action_type, &b.action_type) {
-        (ActionType::DeleteSymlink, ActionType::DeleteDirectory) => std::cmp::Ordering::Less,
-        (ActionType::DeleteDirectory, ActionType::DeleteSymlink) => std::cmp::Ordering::Greater,
-        (ActionType::DeleteDirectory, ActionType::DeleteDirectory) => {
-            path_depth(&b.target_path).cmp(&path_depth(&a.target_path))
-        },
-        _ => path_depth(&b.target_path).cmp(&path_depth(&a.target_path)),
+    actions.sort_by(|a, b| {
+        deletion_action_rank(&a.action_type)
+            .cmp(&deletion_action_rank(&b.action_type))
+            .then_with(|| path_depth(&b.target_path).cmp(&path_depth(&a.target_path)))
+            .then_with(|| a.target_path.cmp(&b.target_path))
     });
+}
+
+fn deletion_action_rank(action_type: &ActionType) -> u8 {
+    match action_type {
+        ActionType::DeleteSymlink => 0,
+        ActionType::DeleteDirectory => 1,
+        _ => 2,
+    }
 }
 
 fn path_has_symlink_ancestor(path: &Path, root: &Path) -> bool {
@@ -3669,6 +3804,7 @@ mod tests {
             packages: vec!["test_package".to_string()],
             mode: StowMode::Stow,
             stow: false,
+            compat: false,
             adopt: false,
             no_folding: false,
             dotfiles: false,
@@ -4835,6 +4971,56 @@ mod tests {
 
         assert!(matches!(actions[0].action_type, ActionType::DeleteSymlink));
         assert!(matches!(actions[1].action_type, ActionType::DeleteSymlink));
+    }
+
+    #[test]
+    fn test_sort_deletion_actions_orders_equal_depth_by_path() {
+        let mut actions = vec![
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/link-b"),
+                link_target_path: None,
+                action_type: ActionType::DeleteSymlink,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/dir-b"),
+                link_target_path: None,
+                action_type: ActionType::DeleteDirectory,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/link-a"),
+                link_target_path: None,
+                action_type: ActionType::DeleteSymlink,
+                conflict_details: None,
+            },
+            TargetAction {
+                source_item: None,
+                target_path: PathBuf::from("/tmp/dir-a"),
+                link_target_path: None,
+                action_type: ActionType::DeleteDirectory,
+                conflict_details: None,
+            },
+        ];
+
+        sort_deletion_actions(&mut actions);
+
+        let sorted_paths: Vec<PathBuf> = actions
+            .iter()
+            .map(|action| action.target_path.clone())
+            .collect();
+        assert_eq!(
+            sorted_paths,
+            vec![
+                PathBuf::from("/tmp/link-a"),
+                PathBuf::from("/tmp/link-b"),
+                PathBuf::from("/tmp/dir-a"),
+                PathBuf::from("/tmp/dir-b"),
+            ]
+        );
     }
 
     #[test]

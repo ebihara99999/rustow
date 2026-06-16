@@ -71,6 +71,7 @@ fn create_test_config(
         packages,
         mode: StowMode::Stow, // Default to Stow mode for these tests
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles,
@@ -1103,6 +1104,7 @@ fn test_config_integration_verbosity_and_simulate() {
         adopt: false,
         no_folding: false,
         dotfiles: false,
+        compat: false,
         override_conflicts: vec![],
         defer_conflicts: vec![],
         ignore_patterns: vec![],
@@ -1902,6 +1904,7 @@ fn test_delete_mode_nonexistent_target() {
         packages: vec![package_name.to_string()],
         mode: StowMode::Delete,
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles: false,
@@ -1953,6 +1956,7 @@ fn test_delete_mode_non_stow_symlinks() {
         packages: vec![package_name.to_string()],
         mode: StowMode::Delete,
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles: false,
@@ -2039,6 +2043,7 @@ fn test_restow_mode_basic() {
     // Now test restow mode
     let mut restow_config = stow_config.clone();
     restow_config.mode = StowMode::Restow;
+    restow_config.compat = true;
     restow_config.verbosity = 2; // Enable debug output
 
     let restow_result = restow_packages(&restow_config);
@@ -2125,6 +2130,7 @@ fn test_restow_mode_with_dotfiles() {
     // Now test restow mode with dotfiles
     let mut restow_config = stow_config.clone();
     restow_config.mode = StowMode::Restow;
+    restow_config.compat = true;
 
     let restow_result = restow_packages(&restow_config);
     assert!(
@@ -2171,6 +2177,7 @@ fn test_restow_prunes_obsolete_top_level_symlink() {
         0,
     );
     config.no_folding = true;
+    config.compat = true;
     stow_packages(&config).unwrap();
     assert!(rustow::fs_utils::is_symlink(&target_dir.join("old")));
 
@@ -2256,6 +2263,7 @@ fn test_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_removed() 
         0,
     );
     config.no_folding = true;
+    config.compat = true;
     stow_packages(&config).unwrap();
     assert!(rustow::fs_utils::is_symlink(
         &target_dir.join("config/nvim/old")
@@ -2280,6 +2288,46 @@ fn test_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_removed() 
 }
 
 #[test]
+fn test_restow_preserves_obsolete_nested_symlink_when_package_subtree_is_removed_without_compat() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config/nvim")).unwrap();
+    fs::write(package_dir.join("config/nvim/old"), "old").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+
+    let unrelated_dir = target_dir.join("unrelated");
+    fs::create_dir_all(&unrelated_dir).unwrap();
+    rustow::fs_utils::create_symlink(
+        &unrelated_dir.join("old"),
+        &stow_dir.join("pkg/config/nvim/old"),
+    )
+    .unwrap();
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+    assert!(rustow::fs_utils::is_symlink(&unrelated_dir.join("old")));
+}
+
+#[test]
 fn test_mixed_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_removed() {
     let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
     let package_dir = stow_dir.join("pkg");
@@ -2297,6 +2345,7 @@ fn test_mixed_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_remo
         0,
     );
     config.no_folding = true;
+    config.compat = true;
     stow_packages(&config).unwrap();
     assert!(rustow::fs_utils::is_symlink(
         &target_dir.join("config/nvim/old")
@@ -2306,6 +2355,7 @@ fn test_mixed_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_remo
     let parsed_args = Args::parse_from_with_operation_groups(vec![
         "rustow".to_string(),
         "--no-folding".to_string(),
+        "-p".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
         "-t".to_string(),
@@ -2352,6 +2402,37 @@ fn test_restow_preserves_ignored_obsolete_nested_symlink() {
     assert!(rustow::fs_utils::is_symlink(
         &target_dir.join("config/secret")
     ));
+}
+
+#[test]
+fn test_restow_preserves_removed_package_top_level_symlink_when_not_compat() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(&package_dir).unwrap();
+    fs::write(package_dir.join("old"), "old").unwrap();
+    fs::write(package_dir.join("current"), "current").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+
+    fs::remove_file(package_dir.join("old")).unwrap();
+    fs::write(package_dir.join("new"), "new").unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("old")).is_ok());
+    assert!(target_dir.join("current").exists());
+    assert!(target_dir.join("new").exists());
 }
 
 #[test]
@@ -2437,6 +2518,7 @@ fn test_delete_mode_simulate() {
         packages: vec![package_name.to_string()],
         mode: StowMode::Delete,
         stow: false,
+        compat: false,
         adopt: false,
         no_folding: false,
         dotfiles: false,
@@ -2499,6 +2581,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2519,6 +2602,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2546,6 +2630,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2573,6 +2658,7 @@ fn test_cli_integration_modes() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
@@ -2664,6 +2750,48 @@ fn test_public_run_rejects_ambiguous_mixed_args_without_mutation() {
         "newpkg",
     ]);
     let result = rustow::run(args);
+
+    assert!(matches!(
+        result,
+        Err(rustow::error::RustowError::Config(
+            rustow::error::ConfigError::InvalidOperation(_)
+        ))
+    ));
+    assert!(target_dir.join("bin/old_tool").exists());
+    assert!(!target_dir.join("bin/new_tool").exists());
+}
+
+#[test]
+fn test_public_run_with_empty_operation_groups_rejects_ambiguous_mixed_args_without_mutation() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let old_package_dir = stow_dir.join("oldpkg");
+    let new_package_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_package_dir.join("bin")).unwrap();
+    fs::write(old_package_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_package_dir.join("bin/new_tool"), "new").unwrap();
+
+    let old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&old_config).unwrap();
+
+    let args = Args::parse_from([
+        "rustow",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-D",
+        "oldpkg",
+        "-S",
+        "newpkg",
+    ]);
+    let result = rustow::run_with_operation_groups(args, Vec::new());
 
     assert!(matches!(
         result,
@@ -3019,6 +3147,7 @@ fn test_cli_restow_conflict_preserves_existing_symlinks() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
@@ -3175,14 +3304,18 @@ fn test_binary_rejects_operation_flags_as_missing_option_values() {
         vec!["-d", "-D", "pkg"],
         vec!["--target", "--restow", "pkg"],
         vec!["--ignore", "-S", "pkg"],
+        vec!["-Dt", "--help", "pkg"],
+        vec!["-Dt", "--verbose", "pkg"],
         vec!["-d", "--simulate", "pkg"],
         vec!["-d", "-n", "pkg"],
+        vec!["-Sd", "-n", "pkg"],
         vec!["--target", "--adopt", "pkg"],
         vec!["-d", "--verbose", "pkg"],
         vec!["--target", "--verbose", "pkg"],
         vec!["--ignore", "--verbose", "pkg"],
         vec!["--defer", "--verbose", "pkg"],
         vec!["--override", "--verbose", "pkg"],
+        vec!["-Rt", "--simulate", "pkg"],
     ] {
         let output = run_rustow(args);
 
@@ -3372,6 +3505,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
@@ -3399,6 +3533,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
@@ -3421,6 +3556,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
@@ -3447,6 +3583,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
@@ -3908,6 +4045,7 @@ fn test_stow_rejects_symlinked_target_ancestor_without_external_mutation() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
@@ -3941,6 +4079,7 @@ fn test_adopt_rejects_symlinked_target_ancestor_without_external_mutation() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
@@ -4039,6 +4178,7 @@ fn test_adopt_package_symlink_alias_uses_canonical_destination_and_preserves_ali
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
@@ -4113,6 +4253,7 @@ fn test_adopt_directory_refuses_symlinked_destination_child_directory() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
@@ -4473,6 +4614,7 @@ fn test_adopt_option_with_existing_file() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
@@ -4544,6 +4686,7 @@ fn test_adopt_option_with_existing_directory() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
@@ -4622,6 +4765,7 @@ fn test_adopt_option_simulation_mode() {
         override_conflicts: Vec::new(),
         defer_conflicts: Vec::new(),
         ignore_patterns: Vec::new(),
+        compat: false,
         simulate: true,
         verbose: 1,
         packages: vec!["testpkg".to_string()],

@@ -60,6 +60,10 @@ pub struct Args {
     #[clap(long)]
     pub dotfiles: bool,
 
+    /// Search package symlinks using GNU Stow --compat mode
+    #[clap(short = 'p', long)]
+    pub compat: bool,
+
     /// Override existing conflicting symlinks from other packages that match the regex
     #[clap(long = "override", value_parser, allow_hyphen_values = true)]
     pub override_conflicts: Vec<String>,
@@ -269,6 +273,7 @@ fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
 fn validate_separate_option_values(argv: &[OsString]) -> Result<(), clap::Error> {
     let mut option_waiting_for_value: Option<String> = None;
     let mut after_double_dash = false;
+    let mut current_mode = OperationMode::Stow;
 
     for arg in argv.iter().skip(1) {
         let arg = arg.to_string_lossy();
@@ -291,6 +296,15 @@ fn validate_separate_option_values(argv: &[OsString]) -> Result<(), clap::Error>
 
         if is_option_requiring_separate_value(&arg) {
             option_waiting_for_value = Some(arg.into_owned());
+            continue;
+        }
+
+        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
+            if short_option_cluster_consumes_value(&arg, &mut current_mode) {
+                if short_option_cluster_needs_next_value(&arg) {
+                    option_waiting_for_value = Some(arg.into_owned());
+                }
+            }
         }
     }
 
@@ -302,6 +316,7 @@ fn is_reserved_flag_value(value: &str) -> bool {
         value,
         "-S" | "-D"
             | "-R"
+            | "-p"
             | "-h"
             | "-V"
             | "-n"
@@ -311,6 +326,7 @@ fn is_reserved_flag_value(value: &str) -> bool {
             | "--restow"
             | "--help"
             | "--version"
+            | "--compat"
             | "--simulate"
             | "--no"
             | "--adopt"
@@ -328,7 +344,7 @@ fn is_short_flag_cluster(value: &str) -> bool {
 
     value[1..]
         .chars()
-        .all(|flag| matches!(flag, 'S' | 'D' | 'R' | 'h' | 'V' | 'n' | 'v'))
+        .all(|flag| matches!(flag, 'S' | 'D' | 'R' | 'p' | 'h' | 'V' | 'n' | 'v'))
 }
 
 fn missing_value_before_flag_error(option_name: &str, flag: &str) -> clap::Error {
@@ -343,6 +359,7 @@ fn missing_value_before_flag_error(option_name: &str, flag: &str) -> clap::Error
 fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
     let mut expecting_option_value = false;
     let mut after_double_dash = false;
+    let mut current_mode = OperationMode::Stow;
 
     for arg in argv.iter().skip(1) {
         let arg = arg.to_string_lossy();
@@ -375,12 +392,16 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
+            if short_option_cluster_consumes_value(&arg, &mut current_mode) {
+                expecting_option_value = short_option_cluster_needs_next_value(&arg);
+            }
+
             for flag in arg[1..].chars() {
                 if matches!(flag, 'h' | 'V') {
                     return Some(OsString::from(format!("-{flag}")));
                 }
 
-                if matches!(flag, 't' | 'd') {
+                if matches!(flag, 't' | 'd' | 'p') {
                     break;
                 }
             }
@@ -392,7 +413,7 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
 
 fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap::Error> {
     for flag in arg[1..].chars() {
-        if matches!(flag, 't' | 'd') {
+        if matches!(flag, 't' | 'd' | 'p') {
             break;
         }
 
@@ -686,6 +707,18 @@ mod tests {
         let error =
             Args::try_parse_from(["rustow", "--defer", "--verbose", "mypackage"]).unwrap_err();
         assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "-Dt", "--verbose", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "-Dt", "--help", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "-Sd", "-n", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "-Rt", "--simulate", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
     }
 
     #[test]
@@ -775,11 +808,22 @@ mod tests {
             "--adopt",
             "--no-folding",
             "--dotfiles",
+            "--compat",
             "mypackage",
         ]);
         assert!(args.adopt);
         assert!(args.no_folding);
         assert!(args.dotfiles);
+        assert!(args.compat);
+    }
+
+    #[test]
+    fn test_compat_option_is_parsed() {
+        let args = Args::parse_from(["rustow", "--compat", "mypackage"]);
+        assert!(args.compat);
+
+        let args = Args::parse_from(["rustow", "-p", "mypackage"]);
+        assert!(args.compat);
     }
 
     #[test]

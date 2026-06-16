@@ -385,12 +385,12 @@ mod tests {
 
     // --- Tests for IgnorePatterns::load ---
     // Base directory for load tests to avoid polluting the project root.
-    const TEST_LOAD_BASE_DIR: &str = "target/test_ignore_load_data";
     static TEST_LOAD_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn setup_load_test_dir(test_name: &str) -> PathBuf {
         let unique_id = TEST_LOAD_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = PathBuf::from(TEST_LOAD_BASE_DIR)
+        let base = std::env::temp_dir()
+            .join("rustow_test_ignore_load_data")
             .join(std::process::id().to_string())
             .join(format!("{test_name}_{unique_id}"));
         fs::create_dir_all(&base).unwrap();

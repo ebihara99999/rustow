@@ -30,6 +30,9 @@ pub fn run_with_operation_groups(
     operation_groups: Vec<OperationGroup>,
 ) -> Result<(), RustowError> {
     // eprintln!("stderr: Successfully parsed args in lib::run: {:?}", args.clone());
+    if operation_groups.is_empty() {
+        reject_ambiguous_mixed_args(&args)?;
+    }
 
     match Config::from_args(args) {
         Ok(config) => {
