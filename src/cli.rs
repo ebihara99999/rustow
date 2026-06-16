@@ -299,12 +299,13 @@ fn validate_separate_option_values(argv: &[OsString]) -> Result<(), clap::Error>
             continue;
         }
 
-        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
-            if short_option_cluster_consumes_value(&arg, &mut current_mode) {
-                if short_option_cluster_needs_next_value(&arg) {
-                    option_waiting_for_value = Some(arg.into_owned());
-                }
-            }
+        if arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg.len() > 1
+            && short_option_cluster_consumes_value(&arg, &mut current_mode)
+            && short_option_cluster_needs_next_value(&arg)
+        {
+            option_waiting_for_value = Some(arg.into_owned());
         }
     }
 
@@ -401,7 +402,7 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
                     return Some(OsString::from(format!("-{flag}")));
                 }
 
-                if matches!(flag, 't' | 'd' | 'p') {
+                if short_cluster_stops_value_parsing(flag) {
                     break;
                 }
             }
@@ -413,7 +414,7 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
 
 fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap::Error> {
     for flag in arg[1..].chars() {
-        if matches!(flag, 't' | 'd' | 'p') {
+        if short_cluster_stops_value_parsing(flag) {
             break;
         }
 
@@ -423,6 +424,10 @@ fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap
     }
 
     Ok(())
+}
+
+fn short_cluster_stops_value_parsing(flag: char) -> bool {
+    matches!(flag, 't' | 'd')
 }
 
 fn increment_verbose_level(verbosity: &mut u8) -> Result<(), clap::Error> {
@@ -652,6 +657,23 @@ mod tests {
     }
 
     #[test]
+    fn test_verbose_option_cluster_with_compat_before() {
+        let args = Args::parse_from(["rustow", "-pv", "mypackage"]);
+
+        assert!(args.compat);
+        assert_eq!(args.verbose, 1);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_verbose_option_cluster_with_compat_after() {
+        let args = Args::parse_from(["rustow", "-vp", "mypackage"]);
+
+        assert!(args.compat);
+        assert_eq!(args.verbose, 1);
+    }
+
+    #[test]
     fn test_verbose_numeric_out_of_range_reports_range() {
         let error = Args::try_parse_from(["rustow", "--verbose=6", "mypackage"]).unwrap_err();
 
@@ -719,6 +741,12 @@ mod tests {
 
         let error = Args::try_parse_from(["rustow", "-Rt", "--simulate", "mypackage"]).unwrap_err();
         assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "--defer", "--help", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "--override", "-V", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
     }
 
     #[test]
@@ -738,10 +766,40 @@ mod tests {
     }
 
     #[test]
+    fn test_hyphen_prefixed_option_values_for_all_pattern_lists() {
+        let args = Args::parse_from([
+            "rustow",
+            "--ignore=--help",
+            "--override=--verbose=0",
+            "--defer=--version",
+            "--target=--verbose",
+            "mypackage",
+        ]);
+
+        assert_eq!(args.ignore_patterns, vec!["--help"]);
+        assert_eq!(args.override_conflicts, vec!["--verbose=0"]);
+        assert_eq!(args.defer_conflicts, vec!["--version"]);
+        assert_eq!(args.target, Some(PathBuf::from("--verbose")));
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
     fn test_help_takes_precedence_over_invalid_verbose() {
         let error = Args::try_parse_from(["rustow", "--help", "--verbose=6"]).unwrap_err();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn test_help_takes_precedence_after_packages() {
+        let error = Args::try_parse_from(["rustow", "mypackage", "--help"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+
+        let error = Args::try_parse_from(["rustow", "mypackage", "-h"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+
+        let error = Args::try_parse_from(["rustow", "mypackage", "-V"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 
     #[test]
@@ -978,6 +1036,42 @@ mod tests {
                 packages: vec!["old".to_string()],
             }]
         );
+    }
+
+    #[test]
+    fn test_short_cluster_with_value_flag_stops_verbosity_counting() {
+        let args = Args::parse_from(["rustow", "-tv", "mypackage"]);
+        assert_eq!(args.target, Some(PathBuf::from("v")));
+        assert_eq!(args.verbose, 0);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_short_cluster_mode_value_attached_to_target() {
+        let parsed_args = Args::parse_from_with_operation_groups(["rustow", "-Dt/tmp/stow", "pkg"]);
+
+        assert_eq!(
+            parsed_args.operation_groups,
+            vec![OperationGroup {
+                mode: OperationMode::Delete,
+                packages: vec!["pkg".to_string()],
+            }]
+        );
+        assert_eq!(parsed_args.args.target, Some(PathBuf::from("/tmp/stow")));
+    }
+
+    #[test]
+    fn test_short_cluster_mode_before_dir_value() {
+        let parsed_args = Args::parse_from_with_operation_groups(["rustow", "-Sd/tmp/stow", "pkg"]);
+
+        assert_eq!(
+            parsed_args.operation_groups,
+            vec![OperationGroup {
+                mode: OperationMode::Stow,
+                packages: vec!["pkg".to_string()],
+            }]
+        );
+        assert_eq!(parsed_args.args.dir, Some(PathBuf::from("/tmp/stow")));
     }
 
     #[test]

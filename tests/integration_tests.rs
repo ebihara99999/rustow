@@ -516,6 +516,77 @@ fn test_default_tree_folding_creates_directory_symlink() {
 }
 
 #[test]
+fn test_no_folding_keeps_directory_open() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name = "no_fold_pkg";
+    let package_dir = stow_dir.join(package_name);
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "#!/bin/sh\n").unwrap();
+
+    let folded_target_dir = target_dir.join("folded");
+    let open_target_dir = target_dir.join("open");
+    fs::create_dir_all(&folded_target_dir).unwrap();
+    fs::create_dir_all(&open_target_dir).unwrap();
+
+    let folded_config = create_test_config(
+        stow_dir.clone(),
+        folded_target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0,
+    );
+    let folded_reports = stow_packages(&folded_config).unwrap();
+    assert!(
+        folded_reports
+            .iter()
+            .any(|report| report.original_action.target_path == folded_target_dir.join("bin")),
+        "Expected an action for folded target path"
+    );
+    assert!(
+        fs::symlink_metadata(folded_target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bin should be folded to symlink with default options"
+    );
+
+    let mut open_config = create_test_config(
+        stow_dir.clone(),
+        open_target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0,
+    );
+    open_config.no_folding = true;
+    let open_reports = stow_packages(&open_config).unwrap();
+    assert!(
+        open_reports
+            .iter()
+            .any(|report| report.original_action.target_path == open_target_dir.join("bin")),
+        "Expected an action for open target path"
+    );
+    assert!(
+        open_target_dir.join("bin").is_dir(),
+        "bin should remain a directory"
+    );
+    assert!(
+        !fs::symlink_metadata(open_target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bin should not be a symlink when --no-folding is enabled"
+    );
+
+    assert!(
+        fs::symlink_metadata(open_target_dir.join("bin/tool"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "Nested target should still be symlinked"
+    );
+}
+
+#[test]
 fn test_split_open_folded_tree_for_second_package() {
     let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
     let package1_dir = stow_dir.join("perl");
@@ -578,6 +649,153 @@ fn test_split_open_folded_tree_for_second_package() {
             .file_type()
             .is_symlink(),
         "new package entry should be linked"
+    );
+}
+
+#[test]
+fn test_no_folding_split_open_with_existing_folded_tree() {
+    let (_temp_dir, stow_dir, target_dir) = setup_test_environment();
+    let package1_dir = stow_dir.join("perl");
+    let package2_dir = stow_dir.join("emacs");
+    fs::create_dir_all(package1_dir.join("bin")).unwrap();
+    fs::create_dir_all(package2_dir.join("bin")).unwrap();
+    fs::write(package1_dir.join("bin/perl"), "perl").unwrap();
+    fs::write(package2_dir.join("bin/emacs"), "emacs").unwrap();
+
+    let package1_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["perl".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&package1_config).unwrap();
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "first package should fold bin"
+    );
+
+    let mut package2_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["emacs".to_string()],
+        false,
+        0,
+    );
+    package2_config.no_folding = true;
+    let reports = stow_packages(&package2_config).unwrap();
+
+    assert!(
+        reports.iter().any(|report| {
+            report.original_action.target_path == target_dir.join("bin")
+                && report.original_action.action_type == ActionType::DeleteSymlink
+        }),
+        "split-open should delete the old folded bin symlink"
+    );
+    assert!(
+        target_dir.join("bin").is_dir()
+            && !fs::symlink_metadata(target_dir.join("bin"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+        "bin should become a real directory after split-open"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/perl"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "old package entry should be relinked"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/emacs"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "new package entry should be linked"
+    );
+}
+
+#[test]
+fn test_no_folding_split_open_preserves_package_alias_target() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let real_package_dir = stow_dir.join("realpkg");
+    let alias_package_dir = stow_dir.join("aliaspkg");
+    let second_package_dir = stow_dir.join("second");
+
+    fs::create_dir_all(real_package_dir.join("bin")).unwrap();
+    fs::create_dir_all(second_package_dir.join("bin")).unwrap();
+    fs::write(real_package_dir.join("bin/tool"), "tool").unwrap();
+    fs::write(second_package_dir.join("bin/config"), "config").unwrap();
+
+    rustow::fs_utils::create_symlink(&alias_package_dir, Path::new("realpkg")).unwrap();
+
+    let alias_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["aliaspkg".to_string()],
+        false,
+        0,
+    );
+    stow_packages(&alias_config).unwrap();
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "alias package first stow should fold bin"
+    );
+
+    let mut split_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["second".to_string()],
+        false,
+        0,
+    );
+    split_config.no_folding = true;
+    let reports = stow_packages(&split_config).unwrap();
+
+    assert!(
+        reports.iter().any(|report| {
+            report.original_action.target_path == target_dir.join("bin")
+                && report.original_action.action_type == ActionType::DeleteSymlink
+        }),
+        "split-open should delete folded bin symlink"
+    );
+    assert!(
+        target_dir.join("bin").is_dir(),
+        "bin should become a real directory after split-open"
+    );
+    assert!(
+        !fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bin should be directory with --no-folding"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/tool"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "existing alias-managed file should keep symlink target"
+    );
+    assert!(
+        fs::read_link(target_dir.join("bin/tool"))
+            .unwrap()
+            .ends_with("aliaspkg/bin/tool"),
+        "alias symlink target should remain package alias"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/config"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "new package file should be linked"
     );
 }
 
@@ -1741,8 +1959,8 @@ fn test_execute_actions_basic_creation() {
         "Target nested_file_sim.txt should not exist in simulate mode"
     );
 
-    // TODO: Add Scenario 4 (which is more specific about --no-folding if it differs)
-    // For now, Scenario 3 covers parent dir creation implicitly handled by CreateSymlink's logic.
+    // Scenario 4: --no-folding compatibility differences are covered by
+    // test_no_folding_keeps_directory_open.
 }
 
 // Add more tests as needed:
@@ -2939,6 +3157,116 @@ fn test_binary_mixed_same_package_delete_and_stow_prunes_stale_symlink() {
 }
 
 #[test]
+fn test_binary_no_folding_keeps_directory_open() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let output = run_rustow([
+        "--no-folding",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "pkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        target_dir.join("bin").is_dir(),
+        "bin should remain a directory"
+    );
+    assert!(
+        !fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bin should not be a symlink when --no-folding is enabled"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/tool"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bin/tool should be symlinked"
+    );
+}
+
+#[test]
+fn test_binary_no_folding_split_open_with_existing_folded_tree() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+
+    let package1_dir = stow_dir.join("perl");
+    let package2_dir = stow_dir.join("emacs");
+    fs::create_dir_all(package1_dir.join("bin")).unwrap();
+    fs::create_dir_all(package2_dir.join("bin")).unwrap();
+    fs::write(package1_dir.join("bin/perl"), "perl").unwrap();
+    fs::write(package2_dir.join("bin/emacs"), "emacs").unwrap();
+
+    let first = run_rustow([
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "perl",
+    ]);
+    assert!(
+        first.status.success(),
+        "initial rustow failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "first package should fold bin"
+    );
+
+    let second = run_rustow([
+        "--no-folding",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "emacs",
+    ]);
+    assert!(
+        second.status.success(),
+        "second rustow failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    assert!(
+        target_dir.join("bin").is_dir()
+            && !fs::symlink_metadata(target_dir.join("bin"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+        "bin should become a real directory after split-open"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/perl"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "old package entry should be relinked"
+    );
+    assert!(
+        fs::symlink_metadata(target_dir.join("bin/emacs"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "new package entry should be linked"
+    );
+}
+
+#[test]
 fn test_binary_mixed_delete_and_stow_operations() {
     let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
     let old_package_dir = stow_dir.join("oldpkg");
@@ -3285,6 +3613,31 @@ fn test_binary_verbose_numeric_level_is_accepted() {
 }
 
 #[test]
+fn test_binary_compat_verbosity_cluster_preserves_verbosity() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let output = run_rustow([
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-pv",
+        "pkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Summary:"));
+    assert!(target_dir.join("bin/tool").exists());
+}
+
+#[test]
 fn test_binary_verbose_parse_errors_and_help_exit_codes() {
     let invalid_verbose = run_rustow(["--verbose=6", "pkg"]);
     assert_eq!(invalid_verbose.status.code(), Some(2));
@@ -3296,6 +3649,25 @@ fn test_binary_verbose_parse_errors_and_help_exit_codes() {
 
     let version_with_invalid_verbose = run_rustow(["--version", "-vvvvvv"]);
     assert_eq!(version_with_invalid_verbose.status.code(), Some(0));
+}
+
+#[test]
+fn test_binary_help_and_version_keep_precedence_after_packages() {
+    let help_output = run_rustow(["pkg", "--help"]);
+    assert_eq!(help_output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help_output.stdout).contains("Usage:"));
+
+    let version_output = run_rustow(["pkg", "-V"]);
+    assert_eq!(version_output.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&version_output.stdout).is_empty());
+
+    let help_with_extra_arg_output = run_rustow(["pkg", "--help", "extra"]);
+    assert_eq!(help_with_extra_arg_output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help_with_extra_arg_output.stdout).contains("Usage:"));
+
+    let version_with_extra_arg_output = run_rustow(["pkg", "--version", "extra"]);
+    assert_eq!(version_with_extra_arg_output.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&version_with_extra_arg_output.stdout).is_empty());
 }
 
 #[test]
