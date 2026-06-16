@@ -2322,6 +2322,85 @@ fn test_mixed_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_remo
     assert!(target_dir.join("share/side").exists());
 }
 
+#[test]
+fn test_restow_preserves_ignored_obsolete_nested_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::write(package_dir.join("config/secret"), "secret").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    restow_config.ignore_patterns = vec![regex::Regex::new("secret").unwrap()];
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+}
+
+#[test]
+fn test_mixed_restow_preserves_ignored_obsolete_nested_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let side_dir = stow_dir.join("side");
+    fs::create_dir_all(package_dir.join("config")).unwrap();
+    fs::create_dir_all(side_dir.join("share")).unwrap();
+    fs::write(package_dir.join("config/secret"), "secret").unwrap();
+    fs::write(side_dir.join("share/side"), "side").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "--no-folding".to_string(),
+        "--ignore".to_string(),
+        "secret".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-R".to_string(),
+        "pkg".to_string(),
+        "-S".to_string(),
+        "side".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed restow failed: {:?}", result.err());
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/secret")
+    ));
+    assert!(target_dir.join("share/side").exists());
+}
+
 /// Test simulate mode with delete operations
 #[test]
 fn test_delete_mode_simulate() {
@@ -3099,6 +3178,11 @@ fn test_binary_rejects_operation_flags_as_missing_option_values() {
         vec!["-d", "--simulate", "pkg"],
         vec!["-d", "-n", "pkg"],
         vec!["--target", "--adopt", "pkg"],
+        vec!["-d", "--verbose", "pkg"],
+        vec!["--target", "--verbose", "pkg"],
+        vec!["--ignore", "--verbose", "pkg"],
+        vec!["--defer", "--verbose", "pkg"],
+        vec!["--override", "--verbose", "pkg"],
     ] {
         let output = run_rustow(args);
 

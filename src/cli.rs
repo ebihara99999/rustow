@@ -316,6 +316,7 @@ fn is_reserved_flag_value(value: &str) -> bool {
             | "--adopt"
             | "--no-folding"
             | "--dotfiles"
+            | "--verbose"
     ) || value.starts_with("--verbose=")
         || is_short_flag_cluster(value)
 }
@@ -642,11 +643,13 @@ mod tests {
             "rustow",
             "--dir=--verbose=0",
             "--ignore=--verbose=1",
+            "--target=--verbose",
             "mypackage",
         ]);
 
         assert_eq!(args.dir, Some(PathBuf::from("--verbose=0")));
         assert_eq!(args.ignore_patterns, vec!["--verbose=1"]);
+        assert_eq!(args.target, Some(PathBuf::from("--verbose")));
         assert_eq!(args.verbose, 0);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
@@ -671,6 +674,17 @@ mod tests {
 
         let error =
             Args::try_parse_from(["rustow", "--target", "--adopt", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "-d", "--verbose", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error =
+            Args::try_parse_from(["rustow", "--target", "--verbose", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error =
+            Args::try_parse_from(["rustow", "--defer", "--verbose", "mypackage"]).unwrap_err();
         assert!(error.to_string().contains("requires a value"));
     }
 

@@ -569,6 +569,27 @@ fn read_sorted_directory_entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, 
     Ok(entries)
 }
 
+fn read_directory_entries(path: &Path) -> Result<std::fs::ReadDir, RustowError> {
+    std::fs::read_dir(path).map_err(|e| {
+        RustowError::Fs(FsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    })
+}
+
+fn read_directory_entry(
+    entry: std::io::Result<std::fs::DirEntry>,
+    path: &Path,
+) -> Result<std::fs::DirEntry, RustowError> {
+    entry.map_err(|e| {
+        RustowError::Fs(FsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    })
+}
+
 fn stow_item_type_from_file_type(file_type: std::fs::FileType) -> Option<StowItemType> {
     if file_type.is_symlink() {
         Some(StowItemType::Symlink)
@@ -2161,10 +2182,11 @@ pub fn delete_packages(config: &Config) -> Result<Vec<TargetActionReport>, Rusto
 
 fn plan_restow_delete_package_actions(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
     let mut all_actions = plan_delete_package_actions(config)?;
+    let package_matchers = create_restow_symlink_package_matchers(config)?;
     collect_matching_stow_symlinks_under_target_dir(
         &config.target_dir,
         config,
-        &config.packages,
+        &package_matchers,
         &mut all_actions,
     )?;
 
@@ -2173,10 +2195,32 @@ fn plan_restow_delete_package_actions(config: &Config) -> Result<Vec<TargetActio
     Ok(all_actions)
 }
 
+struct RestowSymlinkPackageMatcher {
+    name: String,
+    canonical_path: Option<PathBuf>,
+    ignore_patterns: IgnorePatterns,
+}
+
+fn create_restow_symlink_package_matchers(
+    config: &Config,
+) -> Result<Vec<RestowSymlinkPackageMatcher>, RustowError> {
+    config
+        .packages
+        .iter()
+        .map(|package_name| {
+            Ok(RestowSymlinkPackageMatcher {
+                name: package_name.clone(),
+                canonical_path: canonical_package_path(&config.stow_dir, package_name).ok(),
+                ignore_patterns: load_ignore_patterns_for_package(package_name, config)?,
+            })
+        })
+        .collect()
+}
+
 fn collect_matching_stow_symlinks_under_target_dir(
     target_path: &Path,
     config: &Config,
-    package_names: &[String],
+    package_matchers: &[RestowSymlinkPackageMatcher],
     actions: &mut Vec<TargetAction>,
 ) -> Result<bool, RustowError> {
     if path_has_symlink_ancestor(target_path, &config.target_dir) {
@@ -2184,7 +2228,7 @@ fn collect_matching_stow_symlinks_under_target_dir(
     }
 
     if fs_utils::is_symlink(target_path) {
-        if symlink_matches_any_package_target_path(target_path, config, package_names)? {
+        if symlink_matches_any_package_target_path(target_path, config, package_matchers)? {
             actions.push(create_delete_symlink_action(target_path.to_path_buf()));
             return Ok(true);
         }
@@ -2208,7 +2252,7 @@ fn collect_matching_stow_symlinks_under_target_dir(
         }
 
         if fs_utils::is_symlink(&path) {
-            if symlink_matches_any_package_target_path(&path, config, package_names)? {
+            if symlink_matches_any_package_target_path(&path, config, package_matchers)? {
                 actions.push(create_delete_symlink_action(path));
                 contains_package_symlink = true;
             }
@@ -2216,7 +2260,7 @@ fn collect_matching_stow_symlinks_under_target_dir(
             && collect_matching_stow_symlinks_under_target_dir(
                 &path,
                 config,
-                package_names,
+                package_matchers,
                 actions,
             )?
         {
@@ -2231,7 +2275,7 @@ fn collect_matching_stow_symlinks_under_target_dir(
 fn symlink_matches_any_package_target_path(
     target_path: &Path,
     config: &Config,
-    package_names: &[String],
+    package_matchers: &[RestowSymlinkPackageMatcher],
 ) -> Result<bool, RustowError> {
     let Some((existing_package_name, item_path)) =
         lexical_stow_symlink_package_and_item_path(target_path, &config.stow_dir)?
@@ -2250,13 +2294,39 @@ fn symlink_matches_any_package_target_path(
         return Ok(false);
     }
 
-    for package_name in package_names {
-        if is_same_package_for_deletion(&existing_package_name, package_name, config) {
+    let mut existing_canonical_path: Option<PathBuf> = None;
+    for package_matcher in package_matchers {
+        if target_relative_path_is_ignored(target_relative_path, &package_matcher.ignore_patterns) {
+            continue;
+        }
+
+        if existing_package_name == package_matcher.name {
+            return Ok(true);
+        }
+
+        if existing_canonical_path.is_none() {
+            existing_canonical_path =
+                canonical_package_path(&config.stow_dir, &existing_package_name).ok();
+        }
+        if matches!(
+            (
+                existing_canonical_path.as_ref(),
+                package_matcher.canonical_path.as_ref(),
+            ),
+            (Some(existing_path), Some(requested_path)) if existing_path == requested_path
+        ) {
             return Ok(true);
         }
     }
 
     Ok(false)
+}
+
+fn target_relative_path_is_ignored(
+    target_relative_path: &Path,
+    ignore_patterns: &IgnorePatterns,
+) -> bool {
+    should_ignore_item(target_relative_path, ignore_patterns)
 }
 
 pub fn restow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
@@ -2618,9 +2688,13 @@ fn planned_directory_will_be_empty(
         return Ok(false);
     }
 
-    Ok(read_sorted_directory_entries(directory_target)?
-        .into_iter()
-        .all(|entry| removed_targets.contains(&entry.path())))
+    for entry in read_directory_entries(directory_target)? {
+        if !removed_targets.contains(&read_directory_entry(entry, directory_target)?.path()) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 fn target_removed_by_delete_phase(target_path: &Path, removed_targets: &HashSet<PathBuf>) -> bool {
@@ -2693,7 +2767,16 @@ fn normalize_path_components(path: &Path) -> PathBuf {
 
 /// Check if a directory is empty
 fn is_directory_empty(dir_path: &Path) -> Result<bool, RustowError> {
-    Ok(read_sorted_directory_entries(dir_path)?.is_empty())
+    Ok(read_directory_entries(dir_path)?
+        .next()
+        .transpose()
+        .map_err(|e| {
+            RustowError::Fs(FsError::Io {
+                path: dir_path.to_path_buf(),
+                source: e,
+            })
+        })?
+        .is_none())
 }
 
 /// Create a delete symlink action
