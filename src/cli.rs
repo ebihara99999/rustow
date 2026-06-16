@@ -299,12 +299,13 @@ fn validate_separate_option_values(argv: &[OsString]) -> Result<(), clap::Error>
             continue;
         }
 
-        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
-            if short_option_cluster_consumes_value(&arg, &mut current_mode) {
-                if short_option_cluster_needs_next_value(&arg) {
-                    option_waiting_for_value = Some(arg.into_owned());
-                }
-            }
+        if arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg.len() > 1
+            && short_option_cluster_consumes_value(&arg, &mut current_mode)
+            && short_option_cluster_needs_next_value(&arg)
+        {
+            option_waiting_for_value = Some(arg.into_owned());
         }
     }
 
