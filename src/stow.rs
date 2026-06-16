@@ -412,12 +412,38 @@ fn plan_stow_action_for_item(
         };
 
     Ok(TargetAction {
-        source_item: Some(stow_item.clone()),
+        source_item: Some(source_item_for_action(
+            stow_item,
+            &action_type,
+            config,
+            package_name,
+        )?),
         target_path: target_path_abs.to_path_buf(),
         link_target_path: final_link_target,
         action_type,
         conflict_details,
     })
+}
+
+fn source_item_for_action(
+    stow_item: &StowItem,
+    action_type: &ActionType,
+    config: &Config,
+    package_name: &str,
+) -> Result<StowItem, RustowError> {
+    let mut source_item = stow_item.clone();
+
+    if config.adopt
+        && matches!(
+            action_type,
+            ActionType::AdoptFile | ActionType::AdoptDirectory
+        )
+    {
+        source_item.source_path = canonical_package_path(&config.stow_dir, package_name)?
+            .join(&stow_item.package_relative_path);
+    }
+
+    Ok(source_item)
 }
 
 /// Handle conflicts when target path already exists
@@ -426,7 +452,20 @@ fn check_directory_for_non_stow_files(
     target_path_abs: &Path,
     config: &Config,
 ) -> Result<bool, RustowError> {
-    for entry in read_sorted_directory_entries(target_path_abs)? {
+    let entries = std::fs::read_dir(target_path_abs).map_err(|e| {
+        RustowError::Fs(FsError::Io {
+            path: target_path_abs.to_path_buf(),
+            source: e,
+        })
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            RustowError::Fs(FsError::Io {
+                path: target_path_abs.to_path_buf(),
+                source: e,
+            })
+        })?;
         let entry_path = entry.path();
         if is_non_stow_entry(&entry_path, &config.stow_dir) {
             return Ok(true);
@@ -680,6 +719,12 @@ fn plan_split_open_actions_if_needed(
     else {
         return Ok(None);
     };
+    let (existing_package_name, existing_item_path) =
+        lexical_stow_symlink_package_and_item_path(target_path_abs, &config.stow_dir)?
+            .unwrap_or((existing_package_name, existing_item_path));
+    if !package_is_valid_refold_source(&existing_package_name, config)? {
+        return Ok(None);
+    }
 
     if is_same_package_and_item(
         &existing_package_name,
@@ -1149,8 +1194,9 @@ struct ParentConflictInfo {
 
 #[derive(Debug)]
 enum ParentConflictType {
-    ParentIsFile,
-    ParentIsConflictTarget,
+    File,
+    SymlinkAncestor,
+    ConflictTarget,
 }
 
 /// Check if a specific parent path has conflicts
@@ -1158,10 +1204,19 @@ fn check_parent_path_conflicts(
     parent_path: &Path,
     all_actions: &[TargetAction],
 ) -> Option<ParentConflictInfo> {
+    if fs_utils::is_symlink(parent_path)
+        && !parent_symlink_is_opened_by_plan(parent_path, all_actions)
+    {
+        return Some(ParentConflictInfo {
+            conflict_type: ParentConflictType::SymlinkAncestor,
+            parent_path: parent_path.to_path_buf(),
+        });
+    }
+
     // Check if parent path is a file (conflicts with directory requirement)
     if fs_utils::path_exists(parent_path) && !fs_utils::is_directory(parent_path) {
         return Some(ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: parent_path.to_path_buf(),
         });
     }
@@ -1169,12 +1224,23 @@ fn check_parent_path_conflicts(
     // Check if parent path is target of another conflicting action
     if is_parent_target_of_conflict(parent_path, all_actions) {
         return Some(ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsConflictTarget,
+            conflict_type: ParentConflictType::ConflictTarget,
             parent_path: parent_path.to_path_buf(),
         });
     }
 
     None
+}
+
+fn parent_symlink_is_opened_by_plan(parent_path: &Path, all_actions: &[TargetAction]) -> bool {
+    let has_delete_symlink = all_actions.iter().any(|action| {
+        action.target_path == parent_path && action.action_type == ActionType::DeleteSymlink
+    });
+    let has_create_directory = all_actions.iter().any(|action| {
+        action.target_path == parent_path && action.action_type == ActionType::CreateDirectory
+    });
+
+    has_delete_symlink && has_create_directory
 }
 
 /// Find parent conflicts for an action
@@ -1203,7 +1269,7 @@ fn find_parent_conflict(
 /// Generate conflict message based on conflict type and action
 fn generate_conflict_message(conflict_info: &ParentConflictInfo, action: &TargetAction) -> String {
     match conflict_info.conflict_type {
-        ParentConflictType::ParentIsFile => {
+        ParentConflictType::File => {
             let item_name = action
                 .source_item
                 .as_ref()
@@ -1215,7 +1281,13 @@ fn generate_conflict_message(conflict_info: &ParentConflictInfo, action: &Target
                 conflict_info.parent_path, item_name
             )
         },
-        ParentConflictType::ParentIsConflictTarget => {
+        ParentConflictType::SymlinkAncestor => {
+            format!(
+                "Parent path {:?} is a symlink; refusing to traverse symlinked target ancestors.",
+                conflict_info.parent_path
+            )
+        },
+        ParentConflictType::ConflictTarget => {
             format!(
                 "Parent path {:?} is part of a conflicting item tree.",
                 conflict_info.parent_path
@@ -1270,7 +1342,7 @@ fn execute_actions(
         let report = if config.simulate {
             execute_simulate_action(action)
         } else {
-            execute_real_action(action)
+            execute_real_action(action, config)
         };
         reports.push(report);
     }
@@ -1319,15 +1391,15 @@ fn execute_simulate_action(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute an action for real
-fn execute_real_action(action: &TargetAction) -> TargetActionReport {
+fn execute_real_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     match action.action_type {
         ActionType::Conflict => execute_conflict_action(action),
-        ActionType::CreateDirectory => execute_create_directory_action(action),
-        ActionType::CreateSymlink => execute_create_symlink_action(action),
+        ActionType::CreateDirectory => execute_create_directory_action(action, config),
+        ActionType::CreateSymlink => execute_create_symlink_action(action, config),
         ActionType::DeleteSymlink => execute_delete_symlink_action(action),
         ActionType::DeleteDirectory => execute_delete_directory_action(action),
-        ActionType::AdoptFile => execute_adopt_file_action(action),
-        ActionType::AdoptDirectory => execute_adopt_directory_action(action),
+        ActionType::AdoptFile => execute_adopt_file_action(action, config),
+        ActionType::AdoptDirectory => execute_adopt_directory_action(action, config),
         ActionType::Skip => execute_skip_action(action),
     }
 }
@@ -1346,7 +1418,11 @@ fn execute_conflict_action(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute a create directory action
-fn execute_create_directory_action(action: &TargetAction) -> TargetActionReport {
+fn execute_create_directory_action(action: &TargetAction, config: &Config) -> TargetActionReport {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, true) {
+        return error_report;
+    }
+
     match fs_utils::create_dir_all(&action.target_path) {
         Ok(_) => TargetActionReport {
             original_action: action.clone(),
@@ -1386,6 +1462,43 @@ fn ensure_parent_directory_exists(action: &TargetAction) -> Option<TargetActionR
             }
         }
     }
+    None
+}
+
+fn ensure_target_path_ancestors_not_symlink(
+    action: &TargetAction,
+    config: &Config,
+    include_target: bool,
+) -> Option<TargetActionReport> {
+    let symlink_path =
+        target_symlink_ancestor_path(&action.target_path, &config.target_dir, include_target)?;
+
+    Some(TargetActionReport {
+        original_action: action.clone(),
+        status: TargetActionReportStatus::Failure(format!(
+            "Refusing to traverse symlinked target ancestor {:?}",
+            symlink_path
+        )),
+        message: Some(format!(
+            "Target path {:?} contains symlinked ancestor {:?}",
+            action.target_path, symlink_path
+        )),
+    })
+}
+
+fn target_symlink_ancestor_path(path: &Path, root: &Path, include_target: bool) -> Option<PathBuf> {
+    let relative_path = path.strip_prefix(root).ok()?;
+    let mut current = root.to_path_buf();
+    let mut components = relative_path.components().peekable();
+
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        let is_target = components.peek().is_none();
+        if (include_target || !is_target) && fs_utils::is_symlink(&current) {
+            return Some(current);
+        }
+    }
+
     None
 }
 
@@ -1446,7 +1559,11 @@ fn create_symlink_with_target(action: &TargetAction, link_target: &Path) -> Targ
 }
 
 /// Prepare for symlink creation by ensuring prerequisites are met
-fn prepare_symlink_creation(action: &TargetAction) -> Option<TargetActionReport> {
+fn prepare_symlink_creation(action: &TargetAction, config: &Config) -> Option<TargetActionReport> {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return Some(error_report);
+    }
+
     // Ensure parent directory exists
     if let Some(error_report) = ensure_parent_directory_exists(action) {
         return Some(error_report);
@@ -1461,11 +1578,11 @@ fn prepare_symlink_creation(action: &TargetAction) -> Option<TargetActionReport>
 }
 
 /// Execute a create symlink action
-fn execute_create_symlink_action(action: &TargetAction) -> TargetActionReport {
+fn execute_create_symlink_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     match &action.link_target_path {
         Some(link_target) => {
             // Prepare for symlink creation
-            if let Some(error_report) = prepare_symlink_creation(action) {
+            if let Some(error_report) = prepare_symlink_creation(action, config) {
                 return error_report;
             }
 
@@ -2036,15 +2153,14 @@ pub fn delete_packages(config: &Config) -> Result<Vec<TargetActionReport>, Rusto
 
 fn plan_restow_delete_package_actions(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
     let mut all_actions = plan_delete_package_actions(config)?;
-    let mut scanned_directory_targets = Vec::new();
+    collect_stow_symlinks_in_target_root(config, &config.packages, &mut all_actions)?;
 
     for package_name in &config.packages {
-        collect_stow_symlinks_in_target_root(config, package_name, &mut all_actions)?;
-
         let ignore_patterns = load_ignore_patterns_for_package(package_name, config)?;
         let package_path = validated_package_path(&config.stow_dir, package_name)?;
         let raw_items = load_package_items(&package_path, package_name)?;
         let mut directory_targets = Vec::new();
+        let mut scanned_directory_targets = Vec::new();
         for raw_item in raw_items {
             if raw_item.item_type != fs_utils::RawStowItemType::Directory {
                 continue;
@@ -2085,7 +2201,7 @@ fn plan_restow_delete_package_actions(config: &Config) -> Result<Vec<TargetActio
 
 fn collect_stow_symlinks_in_target_root(
     config: &Config,
-    package_name: &str,
+    package_names: &[String],
     actions: &mut Vec<TargetAction>,
 ) -> Result<(), RustowError> {
     if !fs_utils::path_exists(&config.target_dir) {
@@ -2098,8 +2214,15 @@ fn collect_stow_symlinks_in_target_root(
             continue;
         }
 
-        if fs_utils::is_symlink(&path) && symlink_belongs_to_package(&path, config, package_name)? {
-            actions.push(create_delete_symlink_action(path));
+        if !fs_utils::is_symlink(&path) {
+            continue;
+        }
+
+        for package_name in package_names {
+            if symlink_belongs_to_package(&path, config, package_name)? {
+                actions.push(create_delete_symlink_action(path));
+                break;
+            }
         }
     }
 
@@ -2280,13 +2403,15 @@ fn normalize_mixed_package_sets(
         })
         .cloned()
         .collect();
-    let normalized_stow = stow_packages
-        .iter()
-        .filter(|package_name| {
-            !restow_set.contains(*package_name) && !delete_set.contains(*package_name)
-        })
-        .cloned()
-        .collect();
+    let mut normalized_stow = Vec::new();
+    for package_name in stow_packages {
+        if !restow_set.contains(package_name)
+            && !delete_set.contains(package_name)
+            && !normalized_stow.contains(package_name)
+        {
+            normalized_stow.push(package_name.clone());
+        }
+    }
 
     (normalized_delete, normalized_stow, normalized_restow)
 }
@@ -3052,7 +3177,7 @@ fn create_skip_action_for_missing_target(
 }
 
 /// Execute an adopt file action (move file from target to stow dir, then create symlink)
-fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
+fn execute_adopt_file_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     // Extract source item information
     let source_item = match &action.source_item {
         Some(item) => item,
@@ -3079,6 +3204,15 @@ fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
                 action.target_path
             )),
         };
+    }
+
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
+    if let Some(error_report) = ensure_adopt_destination_ancestors_not_symlink(action, source_item)
+    {
+        return error_report;
     }
 
     // Ensure the package directory exists
@@ -3109,23 +3243,31 @@ fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
 
     // Create symlink from target to the adopted file
     match &action.link_target_path {
-        Some(link_target) => match fs_utils::create_symlink(&action.target_path, link_target) {
-            Ok(_) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Success,
-                message: Some(format!(
-                    "Successfully adopted file {:?} and created symlink",
-                    action.target_path
-                )),
-            },
-            Err(e) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Failure(e.to_string()),
-                message: Some(format!(
-                    "Adopted file but failed to create symlink {:?} -> {:?}: {}",
-                    action.target_path, link_target, e
-                )),
-            },
+        Some(link_target) => {
+            if let Some(error_report) =
+                ensure_target_path_ancestors_not_symlink(action, config, false)
+            {
+                return error_report;
+            }
+
+            match fs_utils::create_symlink(&action.target_path, link_target) {
+                Ok(_) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Success,
+                    message: Some(format!(
+                        "Successfully adopted file {:?} and created symlink",
+                        action.target_path
+                    )),
+                },
+                Err(e) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Failure(e.to_string()),
+                    message: Some(format!(
+                        "Adopted file but failed to create symlink {:?} -> {:?}: {}",
+                        action.target_path, link_target, e
+                    )),
+                },
+            }
         },
         None => TargetActionReport {
             original_action: action.clone(),
@@ -3140,7 +3282,7 @@ fn execute_adopt_file_action(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute an adopt directory action (move directory from target to stow dir, then create symlink)
-fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
+fn execute_adopt_directory_action(action: &TargetAction, config: &Config) -> TargetActionReport {
     // Extract source item information
     let source_item = match &action.source_item {
         Some(item) => item,
@@ -3168,6 +3310,15 @@ fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
                 action.target_path
             )),
         };
+    }
+
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
+    if let Some(error_report) = ensure_adopt_destination_ancestors_not_symlink(action, source_item)
+    {
+        return error_report;
     }
 
     if fs_utils::is_symlink(&action.target_path) {
@@ -3211,23 +3362,31 @@ fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
 
     // Create symlink from target to the adopted directory
     match &action.link_target_path {
-        Some(link_target) => match fs_utils::create_symlink(&action.target_path, link_target) {
-            Ok(_) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Success,
-                message: Some(format!(
-                    "Successfully adopted directory {:?} and created symlink",
-                    action.target_path
-                )),
-            },
-            Err(e) => TargetActionReport {
-                original_action: action.clone(),
-                status: TargetActionReportStatus::Failure(e.to_string()),
-                message: Some(format!(
-                    "Adopted directory but failed to create symlink {:?} -> {:?}: {}",
-                    action.target_path, link_target, e
-                )),
-            },
+        Some(link_target) => {
+            if let Some(error_report) =
+                ensure_target_path_ancestors_not_symlink(action, config, false)
+            {
+                return error_report;
+            }
+
+            match fs_utils::create_symlink(&action.target_path, link_target) {
+                Ok(_) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Success,
+                    message: Some(format!(
+                        "Successfully adopted directory {:?} and created symlink",
+                        action.target_path
+                    )),
+                },
+                Err(e) => TargetActionReport {
+                    original_action: action.clone(),
+                    status: TargetActionReportStatus::Failure(e.to_string()),
+                    message: Some(format!(
+                        "Adopted directory but failed to create symlink {:?} -> {:?}: {}",
+                        action.target_path, link_target, e
+                    )),
+                },
+            }
         },
         None => TargetActionReport {
             original_action: action.clone(),
@@ -3239,6 +3398,26 @@ fn execute_adopt_directory_action(action: &TargetAction) -> TargetActionReport {
             ),
         },
     }
+}
+
+fn ensure_adopt_destination_ancestors_not_symlink(
+    action: &TargetAction,
+    source_item: &StowItem,
+) -> Option<TargetActionReport> {
+    let Err(error) =
+        ensure_destination_ancestors_not_symlink(&action.target_path, &source_item.source_path)
+    else {
+        return None;
+    };
+
+    Some(TargetActionReport {
+        original_action: action.clone(),
+        status: TargetActionReportStatus::Failure(error.to_string()),
+        message: Some(format!(
+            "Failed to move target {:?} to package path {:?}: {}",
+            action.target_path, source_item.source_path, error
+        )),
+    })
 }
 
 /// Move a file from source to destination
@@ -4031,7 +4210,7 @@ mod tests {
         let conflict_info = result.unwrap();
         assert!(matches!(
             conflict_info.conflict_type,
-            ParentConflictType::ParentIsFile
+            ParentConflictType::File
         ));
         assert_eq!(conflict_info.parent_path, parent_file);
     }
@@ -4058,7 +4237,7 @@ mod tests {
         let conflict_info = result.unwrap();
         assert!(matches!(
             conflict_info.conflict_type,
-            ParentConflictType::ParentIsConflictTarget
+            ParentConflictType::ConflictTarget
         ));
         assert_eq!(conflict_info.parent_path, parent_dir);
     }
@@ -4092,7 +4271,7 @@ mod tests {
         let parent_file = target_dir.join("parent_file.txt");
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: parent_file.clone(),
         };
 
@@ -4125,7 +4304,7 @@ mod tests {
         let parent_dir = target_dir.join("parent_dir");
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsConflictTarget,
+            conflict_type: ParentConflictType::ConflictTarget,
             parent_path: parent_dir.clone(),
         };
 
@@ -4150,7 +4329,7 @@ mod tests {
         let parent_file = target_dir.join("parent_file.txt");
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: parent_file.clone(),
         };
 
@@ -4178,7 +4357,7 @@ mod tests {
         fs::create_dir_all(&stow_dir).unwrap();
 
         let conflict_info = ParentConflictInfo {
-            conflict_type: ParentConflictType::ParentIsFile,
+            conflict_type: ParentConflictType::File,
             parent_path: target_dir.join("parent"),
         };
 
@@ -4845,7 +5024,7 @@ mod tests {
         assert_eq!(*index, 0);
         assert!(matches!(
             conflict_info.conflict_type,
-            ParentConflictType::ParentIsFile
+            ParentConflictType::File
         ));
         assert_eq!(conflict_info.parent_path, target_dir.join("parent"));
     }
@@ -4871,9 +5050,10 @@ mod tests {
             action_type: ActionType::CreateSymlink,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Should succeed - parent directories don't exist but will be created
-        let result = prepare_symlink_creation(&action);
+        let result = prepare_symlink_creation(&action, &config);
         assert!(
             result.is_none(),
             "Expected success, but got error: {:?}",
@@ -4914,9 +5094,10 @@ mod tests {
             action_type: ActionType::CreateSymlink,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Should succeed - existing symlink will be removed
-        let result = prepare_symlink_creation(&action);
+        let result = prepare_symlink_creation(&action, &config);
         assert!(
             result.is_none(),
             "Expected success, but got error: {:?}",
@@ -4950,9 +5131,10 @@ mod tests {
             action_type: ActionType::CreateSymlink,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Should fail - cannot override regular file
-        let result = prepare_symlink_creation(&action);
+        let result = prepare_symlink_creation(&action, &config);
         assert!(
             result.is_some(),
             "Expected failure for existing regular file"
@@ -4997,9 +5179,10 @@ mod tests {
             action_type: ActionType::AdoptFile,
             conflict_details: None,
         };
+        let config = create_test_config(&target_dir, &stow_dir);
 
         // Execute the action
-        let report = execute_real_action(&action);
+        let report = execute_real_action(&action, &config);
 
         // Verify the action was successful
         assert_eq!(report.status, TargetActionReportStatus::Success);

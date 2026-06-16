@@ -76,7 +76,7 @@ pub struct Args {
     #[clap(short = 'n', long, alias = "no")]
     pub simulate: bool,
 
-    /// Set verbosity level (e.g., -v, -vv, -vvv)
+    /// Set verbosity level (repeat -v or use --verbose=LEVEL, 0-5)
     #[clap(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -109,6 +109,7 @@ impl Args {
             return <Self as Parser>::try_parse_from([program, help_or_version]);
         }
 
+        validate_separate_option_values(&argv)?;
         let verbose = parse_verbose_level(&argv)?;
         let mut args = <Self as Parser>::try_parse_from(normalize_verbose_args(&argv))?;
         args.verbose = verbose;
@@ -263,6 +264,61 @@ fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
     }
 
     Ok(verbosity)
+}
+
+fn validate_separate_option_values(argv: &[OsString]) -> Result<(), clap::Error> {
+    let mut option_waiting_for_value: Option<String> = None;
+    let mut after_double_dash = false;
+
+    for arg in argv.iter().skip(1) {
+        let arg = arg.to_string_lossy();
+
+        if after_double_dash {
+            break;
+        }
+
+        if let Some(option_name) = option_waiting_for_value.take() {
+            if is_reserved_flag_value(&arg) {
+                return Err(missing_value_before_flag_error(&option_name, &arg));
+            }
+            continue;
+        }
+
+        if arg == "--" {
+            after_double_dash = true;
+            continue;
+        }
+
+        if is_option_requiring_separate_value(&arg) {
+            option_waiting_for_value = Some(arg.into_owned());
+        }
+    }
+
+    Ok(())
+}
+
+fn is_reserved_flag_value(value: &str) -> bool {
+    matches!(
+        value,
+        "-S" | "-D"
+            | "-R"
+            | "-h"
+            | "-V"
+            | "--stow"
+            | "--delete"
+            | "--restow"
+            | "--help"
+            | "--version"
+    )
+}
+
+fn missing_value_before_flag_error(option_name: &str, flag: &str) -> clap::Error {
+    clap::Error::raw(
+        clap::error::ErrorKind::InvalidValue,
+        format!(
+            "option '{option_name}' requires a value; '{flag}' is an operation/help/version flag. Use '{option_name}={flag}' to pass it as a literal value."
+        ),
+    )
 }
 
 fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
@@ -576,6 +632,28 @@ mod tests {
         assert_eq!(args.dir, Some(PathBuf::from("--verbose=0")));
         assert_eq!(args.ignore_patterns, vec!["--verbose=1"]);
         assert_eq!(args.verbose, 0);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_operation_flags_are_rejected_as_missing_separate_option_values() {
+        let error = Args::try_parse_from(["rustow", "-d", "-D", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error =
+            Args::try_parse_from(["rustow", "--target", "--restow", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "--ignore", "-S", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn test_reserved_flags_can_be_passed_as_explicit_hyphen_values() {
+        let args = Args::parse_from(["rustow", "--dir=-D", "--ignore=-S", "mypackage"]);
+
+        assert_eq!(args.dir, Some(PathBuf::from("-D")));
+        assert_eq!(args.ignore_patterns, vec!["-S"]);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 
