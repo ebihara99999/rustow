@@ -8,7 +8,7 @@ pub mod stow;
 
 use crate::cli::Args;
 use crate::config::{Config, StowMode};
-use crate::error::RustowError;
+use crate::error::{RustowError, StowError};
 use crate::stow::{delete_packages, restow_packages, stow_packages};
 
 /// Runs the rustow application logic.
@@ -27,6 +27,32 @@ pub fn run(args: Args) -> Result<(), RustowError> {
 
             // Process reports for logging/output
             process_reports(&reports, &config);
+
+            if !config.simulate {
+                let conflict_count = reports
+                    .iter()
+                    .filter(|r| {
+                        matches!(
+                            r.status,
+                            crate::stow::TargetActionReportStatus::ConflictPrevented
+                        )
+                    })
+                    .count();
+                let failure_count = reports
+                    .iter()
+                    .filter(|r| {
+                        matches!(r.status, crate::stow::TargetActionReportStatus::Failure(_))
+                    })
+                    .count();
+
+                if conflict_count > 0 || failure_count > 0 {
+                    return Err(RustowError::Stow(StowError::OperationFailed(format!(
+                        "Execution stopped with {} conflicts and {} failures",
+                        conflict_count, failure_count
+                    ))));
+                }
+            }
+
             Ok(())
         },
         Err(e) => {

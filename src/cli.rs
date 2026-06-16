@@ -11,7 +11,7 @@ pub struct Args {
     pub target: Option<PathBuf>,
 
     /// Directory containing stow packages
-    #[clap(short, long, value_parser, env = "STOW_DIR")]
+    #[clap(short, long, value_parser)]
     pub dir: Option<PathBuf>,
 
     /// Stow the specified packages (default action)
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_stow_dir_from_env() {
-        // This test verifies that the Args struct is configured to read STOW_DIR from environment
+        // STOW_DIR is resolved by Config, not by the CLI parser.
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
 
         // Set STOW_DIR environment variable
@@ -204,9 +204,8 @@ mod tests {
             std::env::set_var("STOW_DIR", "/env/stow/path");
         }
 
-        // Test that when no -d option is provided, dir is read from STOW_DIR env var
         let args = Args::parse_from(["rustow", "mypackage"]);
-        assert_eq!(args.dir, Some(PathBuf::from("/env/stow/path")));
+        assert!(args.dir.is_none());
     }
 
     #[test]

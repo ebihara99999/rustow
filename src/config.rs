@@ -165,14 +165,21 @@ mod tests {
 
     use clap::Parser;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
     fn basic_args_for_config_test(package_name: &str) -> Args {
         Args::parse_from(["rustow", package_name])
     }
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn test_config_from_basic_args_defaults() {
+        let _lock = env_lock();
         let temp_stow_parent = tempdir().unwrap();
         let current_dir_original = env::current_dir().unwrap();
         env::set_current_dir(temp_stow_parent.path()).unwrap();
@@ -209,6 +216,7 @@ mod tests {
 
     #[test]
     fn test_stow_dir_from_option() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let specified_stow_dir = temp_base.path().join("my_stow");
         fs::create_dir_all(&specified_stow_dir).unwrap();
@@ -227,6 +235,7 @@ mod tests {
 
     #[test]
     fn test_stow_dir_from_env_var() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let env_stow_dir_name = "env_stow_val";
         let env_stow_dir = temp_base.path().join(env_stow_dir_name);
@@ -266,6 +275,7 @@ mod tests {
 
     #[test]
     fn test_target_dir_from_option() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let specified_target_dir = temp_base.path().join("my_target");
         fs::create_dir_all(&specified_target_dir).unwrap();
@@ -289,6 +299,7 @@ mod tests {
 
     #[test]
     fn test_stow_dir_canonicalization_failure() {
+        let _lock = env_lock();
         let non_existent_stow_dir = PathBuf::from("/path/that/definitely/does/not/exist/stow");
         let args = Args::parse_from([
             "rustow",
@@ -308,6 +319,7 @@ mod tests {
 
     #[test]
     fn test_target_dir_canonicalization_failure() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let valid_stow_dir = temp_base.path().join("valid_stow_target_fail");
         fs::create_dir_all(&valid_stow_dir).unwrap();
@@ -333,6 +345,7 @@ mod tests {
 
     #[test]
     fn test_stow_mode_delete() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let dummy_stow = temp_base.path().join("s");
         fs::create_dir_all(&dummy_stow).unwrap();
@@ -353,6 +366,7 @@ mod tests {
 
     #[test]
     fn test_stow_mode_restow() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let dummy_stow = temp_base.path().join("s_res");
         fs::create_dir_all(&dummy_stow).unwrap();
@@ -373,6 +387,7 @@ mod tests {
 
     #[test]
     fn test_override_defer_regex_compilation_success() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_regex");
         fs::create_dir_all(&stow_dir).unwrap();
@@ -407,6 +422,7 @@ mod tests {
 
     #[test]
     fn test_override_regex_compilation_failure() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_regex_fail_ov");
         fs::create_dir_all(&stow_dir).unwrap();
@@ -436,6 +452,7 @@ mod tests {
 
     #[test]
     fn test_defer_regex_compilation_failure() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_regex_fail_def");
         fs::create_dir_all(&stow_dir).unwrap();
@@ -465,6 +482,7 @@ mod tests {
 
     #[test]
     fn test_stow_mode_explicit_stow() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let dummy_stow = temp_base.path().join("s_explicit");
         fs::create_dir_all(&dummy_stow).unwrap();
@@ -487,6 +505,7 @@ mod tests {
 
     #[test]
     fn test_ignore_patterns_compilation_success() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_ignore");
         fs::create_dir_all(&stow_dir).unwrap();
@@ -520,6 +539,7 @@ mod tests {
 
     #[test]
     fn test_ignore_patterns_compilation_failure() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_ignore_fail");
         fs::create_dir_all(&stow_dir).unwrap();
@@ -549,6 +569,7 @@ mod tests {
 
     #[test]
     fn test_stow_with_ignore_and_other_options() {
+        let _lock = env_lock();
         let temp_base = tempdir().unwrap();
         let stow_dir = temp_base.path().join("s_combined");
         fs::create_dir_all(&stow_dir).unwrap();
