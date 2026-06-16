@@ -741,6 +741,12 @@ mod tests {
 
         let error = Args::try_parse_from(["rustow", "-Rt", "--simulate", "mypackage"]).unwrap_err();
         assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "--defer", "--help", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "--override", "-V", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
     }
 
     #[test]
@@ -756,6 +762,24 @@ mod tests {
         assert_eq!(args.dir, Some(PathBuf::from("-D")));
         assert_eq!(args.ignore_patterns, vec!["-S"]);
         assert_eq!(args.defer_conflicts, vec!["--simulate"]);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_hyphen_prefixed_option_values_for_all_pattern_lists() {
+        let args = Args::parse_from([
+            "rustow",
+            "--ignore=--help",
+            "--override=--verbose=0",
+            "--defer=--version",
+            "--target=--verbose",
+            "mypackage",
+        ]);
+
+        assert_eq!(args.ignore_patterns, vec!["--help"]);
+        assert_eq!(args.override_conflicts, vec!["--verbose=0"]);
+        assert_eq!(args.defer_conflicts, vec!["--version"]);
+        assert_eq!(args.target, Some(PathBuf::from("--verbose")));
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 
@@ -1034,6 +1058,20 @@ mod tests {
             }]
         );
         assert_eq!(parsed_args.args.target, Some(PathBuf::from("/tmp/stow")));
+    }
+
+    #[test]
+    fn test_short_cluster_mode_before_dir_value() {
+        let parsed_args = Args::parse_from_with_operation_groups(["rustow", "-Sd/tmp/stow", "pkg"]);
+
+        assert_eq!(
+            parsed_args.operation_groups,
+            vec![OperationGroup {
+                mode: OperationMode::Stow,
+                packages: vec!["pkg".to_string()],
+            }]
+        );
+        assert_eq!(parsed_args.args.dir, Some(PathBuf::from("/tmp/stow")));
     }
 
     #[test]
