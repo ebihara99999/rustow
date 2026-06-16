@@ -304,12 +304,30 @@ fn is_reserved_flag_value(value: &str) -> bool {
             | "-R"
             | "-h"
             | "-V"
+            | "-n"
+            | "-v"
             | "--stow"
             | "--delete"
             | "--restow"
             | "--help"
             | "--version"
-    )
+            | "--simulate"
+            | "--no"
+            | "--adopt"
+            | "--no-folding"
+            | "--dotfiles"
+    ) || value.starts_with("--verbose=")
+        || is_short_flag_cluster(value)
+}
+
+fn is_short_flag_cluster(value: &str) -> bool {
+    if !value.starts_with('-') || value.starts_with("--") || value.len() <= 1 {
+        return false;
+    }
+
+    value[1..]
+        .chars()
+        .all(|flag| matches!(flag, 'S' | 'D' | 'R' | 'h' | 'V' | 'n' | 'v'))
 }
 
 fn missing_value_before_flag_error(option_name: &str, flag: &str) -> clap::Error {
@@ -622,10 +640,8 @@ mod tests {
     fn test_hyphen_prefixed_option_values_are_preserved() {
         let args = Args::parse_from([
             "rustow",
-            "-d",
-            "--verbose=0",
-            "--ignore",
-            "--verbose=1",
+            "--dir=--verbose=0",
+            "--ignore=--verbose=1",
             "mypackage",
         ]);
 
@@ -646,14 +662,31 @@ mod tests {
 
         let error = Args::try_parse_from(["rustow", "--ignore", "-S", "mypackage"]).unwrap_err();
         assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "-d", "--simulate", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error = Args::try_parse_from(["rustow", "-d", "-n", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
+
+        let error =
+            Args::try_parse_from(["rustow", "--target", "--adopt", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("requires a value"));
     }
 
     #[test]
     fn test_reserved_flags_can_be_passed_as_explicit_hyphen_values() {
-        let args = Args::parse_from(["rustow", "--dir=-D", "--ignore=-S", "mypackage"]);
+        let args = Args::parse_from([
+            "rustow",
+            "--dir=-D",
+            "--ignore=-S",
+            "--defer=--simulate",
+            "mypackage",
+        ]);
 
         assert_eq!(args.dir, Some(PathBuf::from("-D")));
         assert_eq!(args.ignore_patterns, vec!["-S"]);
+        assert_eq!(args.defer_conflicts, vec!["--simulate"]);
         assert_eq!(args.packages, vec!["mypackage"]);
     }
 

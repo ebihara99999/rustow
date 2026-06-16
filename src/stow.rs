@@ -1396,8 +1396,8 @@ fn execute_real_action(action: &TargetAction, config: &Config) -> TargetActionRe
         ActionType::Conflict => execute_conflict_action(action),
         ActionType::CreateDirectory => execute_create_directory_action(action, config),
         ActionType::CreateSymlink => execute_create_symlink_action(action, config),
-        ActionType::DeleteSymlink => execute_delete_symlink_action(action),
-        ActionType::DeleteDirectory => execute_delete_directory_action(action),
+        ActionType::DeleteSymlink => execute_delete_symlink_action(action, config),
+        ActionType::DeleteDirectory => execute_delete_directory_action(action, config),
         ActionType::AdoptFile => execute_adopt_file_action(action, config),
         ActionType::AdoptDirectory => execute_adopt_directory_action(action, config),
         ActionType::Skip => execute_skip_action(action),
@@ -1603,7 +1603,11 @@ fn execute_create_symlink_action(action: &TargetAction, config: &Config) -> Targ
 }
 
 /// Execute a delete symlink action
-fn execute_delete_symlink_action(action: &TargetAction) -> TargetActionReport {
+fn execute_delete_symlink_action(action: &TargetAction, config: &Config) -> TargetActionReport {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
     match fs_utils::delete_symlink(&action.target_path) {
         Ok(_) => TargetActionReport {
             original_action: action.clone(),
@@ -1679,7 +1683,11 @@ fn perform_directory_deletion(action: &TargetAction) -> TargetActionReport {
 }
 
 /// Execute a delete directory action
-fn execute_delete_directory_action(action: &TargetAction) -> TargetActionReport {
+fn execute_delete_directory_action(action: &TargetAction, config: &Config) -> TargetActionReport {
+    if let Some(error_report) = ensure_target_path_ancestors_not_symlink(action, config, false) {
+        return error_report;
+    }
+
     // Check if directory exists first
     if let Some(skip_report) = check_directory_exists_for_deletion(action) {
         return skip_report;
@@ -2153,86 +2161,22 @@ pub fn delete_packages(config: &Config) -> Result<Vec<TargetActionReport>, Rusto
 
 fn plan_restow_delete_package_actions(config: &Config) -> Result<Vec<TargetAction>, RustowError> {
     let mut all_actions = plan_delete_package_actions(config)?;
-    collect_stow_symlinks_in_target_root(config, &config.packages, &mut all_actions)?;
-
-    for package_name in &config.packages {
-        let ignore_patterns = load_ignore_patterns_for_package(package_name, config)?;
-        let package_path = validated_package_path(&config.stow_dir, package_name)?;
-        let raw_items = load_package_items(&package_path, package_name)?;
-        let mut directory_targets = Vec::new();
-        let mut scanned_directory_targets = Vec::new();
-        for raw_item in raw_items {
-            if raw_item.item_type != fs_utils::RawStowItemType::Directory {
-                continue;
-            }
-
-            let processed_target_relative_path = PathBuf::from(dotfiles::process_item_name(
-                raw_item.package_relative_path.to_str().unwrap_or(""),
-                config.dotfiles,
-            ));
-            if should_ignore_item(&processed_target_relative_path, &ignore_patterns) {
-                continue;
-            }
-
-            let target_dir = config.target_dir.join(processed_target_relative_path);
-            directory_targets.push(target_dir);
-        }
-
-        directory_targets.sort_by_key(|path| path_depth(path));
-        for target_dir in directory_targets {
-            if directory_target_has_seen_ancestor(&target_dir, &scanned_directory_targets) {
-                continue;
-            }
-
-            collect_stow_symlinks_under_image_dir(
-                &target_dir,
-                config,
-                package_name,
-                &mut all_actions,
-            )?;
-            scanned_directory_targets.push(target_dir);
-        }
-    }
+    collect_matching_stow_symlinks_under_target_dir(
+        &config.target_dir,
+        config,
+        &config.packages,
+        &mut all_actions,
+    )?;
 
     sort_deletion_actions(&mut all_actions);
     deduplicate_delete_actions(&mut all_actions);
     Ok(all_actions)
 }
 
-fn collect_stow_symlinks_in_target_root(
-    config: &Config,
-    package_names: &[String],
-    actions: &mut Vec<TargetAction>,
-) -> Result<(), RustowError> {
-    if !fs_utils::path_exists(&config.target_dir) {
-        return Ok(());
-    }
-
-    for entry in read_sorted_directory_entries(&config.target_dir)? {
-        let path = entry.path();
-        if path == config.stow_dir || path.starts_with(&config.stow_dir) {
-            continue;
-        }
-
-        if !fs_utils::is_symlink(&path) {
-            continue;
-        }
-
-        for package_name in package_names {
-            if symlink_belongs_to_package(&path, config, package_name)? {
-                actions.push(create_delete_symlink_action(path));
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn collect_stow_symlinks_under_image_dir(
+fn collect_matching_stow_symlinks_under_target_dir(
     target_path: &Path,
     config: &Config,
-    package_name: &str,
+    package_names: &[String],
     actions: &mut Vec<TargetAction>,
 ) -> Result<bool, RustowError> {
     if path_has_symlink_ancestor(target_path, &config.target_dir) {
@@ -2240,7 +2184,7 @@ fn collect_stow_symlinks_under_image_dir(
     }
 
     if fs_utils::is_symlink(target_path) {
-        if symlink_belongs_to_package(target_path, config, package_name)? {
+        if symlink_matches_any_package_target_path(target_path, config, package_names)? {
             actions.push(create_delete_symlink_action(target_path.to_path_buf()));
             return Ok(true);
         }
@@ -2264,12 +2208,17 @@ fn collect_stow_symlinks_under_image_dir(
         }
 
         if fs_utils::is_symlink(&path) {
-            if symlink_belongs_to_package(&path, config, package_name)? {
+            if symlink_matches_any_package_target_path(&path, config, package_names)? {
                 actions.push(create_delete_symlink_action(path));
                 contains_package_symlink = true;
             }
         } else if fs_utils::is_directory(&path)
-            && collect_stow_symlinks_under_image_dir(&path, config, package_name, actions)?
+            && collect_matching_stow_symlinks_under_target_dir(
+                &path,
+                config,
+                package_names,
+                actions,
+            )?
         {
             actions.push(create_delete_directory_action(path));
             contains_package_symlink = true;
@@ -2279,28 +2228,35 @@ fn collect_stow_symlinks_under_image_dir(
     Ok(contains_package_symlink)
 }
 
-fn directory_target_has_seen_ancestor(target_path: &Path, seen_targets: &[PathBuf]) -> bool {
-    seen_targets
-        .iter()
-        .any(|seen_target| target_path.starts_with(seen_target))
-}
-
-fn symlink_belongs_to_package(
+fn symlink_matches_any_package_target_path(
     target_path: &Path,
     config: &Config,
-    package_name: &str,
+    package_names: &[String],
 ) -> Result<bool, RustowError> {
-    let Some((existing_package_name, _)) =
+    let Some((existing_package_name, item_path)) =
         lexical_stow_symlink_package_and_item_path(target_path, &config.stow_dir)?
     else {
         return Ok(false);
     };
 
-    Ok(is_same_package_for_deletion(
-        &existing_package_name,
-        package_name,
-        config,
-    ))
+    let Ok(target_relative_path) = target_path.strip_prefix(&config.target_dir) else {
+        return Ok(false);
+    };
+    let processed_item_path = PathBuf::from(dotfiles::process_item_name(
+        item_path.to_str().unwrap_or(""),
+        config.dotfiles,
+    ));
+    if processed_item_path != target_relative_path {
+        return Ok(false);
+    }
+
+    for package_name in package_names {
+        if is_same_package_for_deletion(&existing_package_name, package_name, config) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 pub fn restow_packages(config: &Config) -> Result<Vec<TargetActionReport>, RustowError> {
@@ -2953,13 +2909,36 @@ fn process_item_for_deletion(
     let target_path_abs = config.target_dir.join(&processed_target_relative_path);
     let stow_item = create_stow_item_from_raw(raw_item, processed_target_relative_path);
 
-    let action = if fs_utils::path_exists(&target_path_abs) {
+    let action = if let Some(conflict) =
+        create_conflict_for_symlinked_target_ancestor(&stow_item, &target_path_abs, config)
+    {
+        conflict
+    } else if fs_utils::path_exists(&target_path_abs) {
         plan_deletion_for_existing_target(&stow_item, &target_path_abs, config, package_name)?
     } else {
         create_skip_action_for_missing_target(stow_item, target_path_abs)
     };
 
     Ok(Some(action))
+}
+
+fn create_conflict_for_symlinked_target_ancestor(
+    stow_item: &StowItem,
+    target_path_abs: &Path,
+    config: &Config,
+) -> Option<TargetAction> {
+    let symlink_path = target_symlink_ancestor_path(target_path_abs, &config.target_dir, false)?;
+
+    Some(TargetAction {
+        source_item: Some(stow_item.clone()),
+        target_path: target_path_abs.to_path_buf(),
+        link_target_path: None,
+        action_type: ActionType::Conflict,
+        conflict_details: Some(format!(
+            "Refusing to delete through symlinked target ancestor {:?}",
+            symlink_path
+        )),
+    })
 }
 
 /// Prepare paths for ignore pattern checking

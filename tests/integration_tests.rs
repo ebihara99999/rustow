@@ -2241,6 +2241,87 @@ fn test_restow_prunes_obsolete_nested_symlink_for_each_shared_directory_package_
     }
 }
 
+#[test]
+fn test_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_removed() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("config/nvim")).unwrap();
+    fs::write(package_dir.join("config/nvim/old"), "old").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+
+    let unrelated_dir = target_dir.join("unrelated");
+    fs::create_dir_all(&unrelated_dir).unwrap();
+    rustow::fs_utils::create_symlink(
+        &unrelated_dir.join("old"),
+        &stow_dir.join("pkg/config/nvim/old"),
+    )
+    .unwrap();
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("config/nvim/old")).is_err());
+    assert!(rustow::fs_utils::is_symlink(&unrelated_dir.join("old")));
+}
+
+#[test]
+fn test_mixed_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_removed() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let side_dir = stow_dir.join("side");
+    fs::create_dir_all(package_dir.join("config/nvim")).unwrap();
+    fs::create_dir_all(side_dir.join("share")).unwrap();
+    fs::write(package_dir.join("config/nvim/old"), "old").unwrap();
+    fs::write(side_dir.join("share/side"), "side").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(
+        &target_dir.join("config/nvim/old")
+    ));
+    fs::remove_dir_all(package_dir.join("config")).unwrap();
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "--no-folding".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-R".to_string(),
+        "pkg".to_string(),
+        "-S".to_string(),
+        "side".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("config/nvim/old")).is_err());
+    assert!(target_dir.join("share/side").exists());
+}
+
 /// Test simulate mode with delete operations
 #[test]
 fn test_delete_mode_simulate() {
@@ -3015,6 +3096,9 @@ fn test_binary_rejects_operation_flags_as_missing_option_values() {
         vec!["-d", "-D", "pkg"],
         vec!["--target", "--restow", "pkg"],
         vec!["--ignore", "-S", "pkg"],
+        vec!["-d", "--simulate", "pkg"],
+        vec!["-d", "-n", "pkg"],
+        vec!["--target", "--adopt", "pkg"],
     ] {
         let output = run_rustow(args);
 
@@ -3787,6 +3871,66 @@ fn test_adopt_rejects_symlinked_target_ancestor_without_external_mutation() {
         fs::read_to_string(package_dir.join("config/secret")).unwrap(),
         "package"
     );
+}
+
+#[test]
+fn test_delete_rejects_symlinked_target_ancestor_without_external_symlink_deletion() {
+    let (temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(package_dir.join("link_parent")).unwrap();
+    fs::create_dir_all(&external_dir).unwrap();
+    fs::write(package_dir.join("link_parent/victim"), "package").unwrap();
+    rustow::fs_utils::create_symlink(&target_dir.join("link_parent"), &external_dir).unwrap();
+    rustow::fs_utils::create_symlink(
+        &external_dir.join("victim"),
+        &package_dir.join("link_parent/victim"),
+    )
+    .unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.mode = StowMode::Delete;
+    let result = delete_packages(&config);
+
+    assert!(result.is_ok());
+    assert!(matches!(
+        result.unwrap()[0].status,
+        TargetActionReportStatus::ConflictPrevented
+    ));
+    assert!(rustow::fs_utils::is_symlink(&external_dir.join("victim")));
+}
+
+#[test]
+fn test_delete_rejects_symlinked_target_ancestor_without_external_directory_deletion() {
+    let (temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(package_dir.join("link_parent/emptydir")).unwrap();
+    fs::create_dir_all(external_dir.join("emptydir")).unwrap();
+    rustow::fs_utils::create_symlink(&target_dir.join("link_parent"), &external_dir).unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.mode = StowMode::Delete;
+    let result = delete_packages(&config);
+
+    assert!(result.is_ok());
+    assert!(matches!(
+        result.unwrap()[0].status,
+        TargetActionReportStatus::ConflictPrevented
+    ));
+    assert!(external_dir.join("emptydir").exists());
 }
 
 #[test]
