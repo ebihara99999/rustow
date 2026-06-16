@@ -3652,6 +3652,25 @@ fn test_binary_verbose_parse_errors_and_help_exit_codes() {
 }
 
 #[test]
+fn test_binary_help_and_version_keep_precedence_after_packages() {
+    let help_output = run_rustow(["pkg", "--help"]);
+    assert_eq!(help_output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help_output.stdout).contains("Usage:"));
+
+    let version_output = run_rustow(["pkg", "-V"]);
+    assert_eq!(version_output.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&version_output.stdout).is_empty());
+
+    let help_with_extra_arg_output = run_rustow(["pkg", "--help", "extra"]);
+    assert_eq!(help_with_extra_arg_output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help_with_extra_arg_output.stdout).contains("Usage:"));
+
+    let version_with_extra_arg_output = run_rustow(["pkg", "--version", "extra"]);
+    assert_eq!(version_with_extra_arg_output.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&version_with_extra_arg_output.stdout).is_empty());
+}
+
+#[test]
 fn test_binary_rejects_operation_flags_as_missing_option_values() {
     for args in [
         vec!["-d", "-D", "pkg"],
