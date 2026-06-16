@@ -13,6 +13,12 @@ pub enum StowMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct PackageOperation {
+    pub mode: StowMode,
+    pub packages: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub target_dir: PathBuf,
     pub stow_dir: PathBuf,
@@ -163,7 +169,6 @@ mod tests {
     use super::*;
     use crate::cli::Args;
 
-    use clap::Parser;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;

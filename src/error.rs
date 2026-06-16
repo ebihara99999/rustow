@@ -36,6 +36,8 @@ pub enum ConfigError {
     InvalidRegexPattern(String),
     #[error("Invalid verbosity level: {0}")]
     InvalidVerbosityLevel(u8),
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
 }
 
 #[allow(dead_code)]
