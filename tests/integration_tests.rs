@@ -2097,6 +2097,10 @@ fn test_restow_mode_with_dotfiles() {
         "Old .bashrc should be removed after restow"
     );
     assert!(
+        fs::symlink_metadata(target_dir.join(".bashrc")).is_err(),
+        "Old .bashrc symlink should be removed after restow"
+    );
+    assert!(
         target_dir.join(".vimrc").exists(),
         "New .vimrc should exist after restow"
     );
@@ -2107,6 +2111,38 @@ fn test_restow_mode_with_dotfiles() {
             .is_symlink(),
         ".vimrc should be a symlink"
     );
+}
+
+#[test]
+fn test_restow_prunes_obsolete_top_level_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(&package_dir).unwrap();
+    fs::write(package_dir.join("old"), "old").unwrap();
+    fs::write(package_dir.join("current"), "current").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("old")));
+
+    fs::remove_file(package_dir.join("old")).unwrap();
+    fs::write(package_dir.join("new"), "new").unwrap();
+
+    let mut restow_config = config.clone();
+    restow_config.mode = StowMode::Restow;
+    let result = restow_packages(&restow_config);
+
+    assert!(result.is_ok(), "restow failed: {:?}", result.err());
+    assert!(fs::symlink_metadata(target_dir.join("old")).is_err());
+    assert!(target_dir.join("current").exists());
+    assert!(target_dir.join("new").exists());
 }
 
 /// Test simulate mode with delete operations
@@ -2388,10 +2424,26 @@ fn test_cli_mixed_same_package_stow_and_delete_leaves_package_stowed() {
     let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
     let package_dir = stow_dir.join("pkg");
     fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/old"), "old").unwrap();
     fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("bin/old")));
+
+    fs::remove_file(package_dir.join("bin/old")).unwrap();
+    fs::write(package_dir.join("bin/new"), "new").unwrap();
 
     let parsed_args = Args::parse_from_with_operation_groups(vec![
         "rustow".to_string(),
+        "--no-folding".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
         "-t".to_string(),
@@ -2409,7 +2461,53 @@ fn test_cli_mixed_same_package_stow_and_delete_leaves_package_stowed() {
         "same-package mixed operation failed: {:?}",
         result.err()
     );
+    assert!(fs::symlink_metadata(target_dir.join("bin/old")).is_err());
     assert!(target_dir.join("bin/tool").exists());
+    assert!(target_dir.join("bin/new").exists());
+}
+
+#[test]
+fn test_binary_mixed_same_package_delete_and_stow_prunes_stale_symlink() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/old"), "old").unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let mut config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["pkg".to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+    stow_packages(&config).unwrap();
+    assert!(rustow::fs_utils::is_symlink(&target_dir.join("bin/old")));
+
+    fs::remove_file(package_dir.join("bin/old")).unwrap();
+    fs::write(package_dir.join("bin/new"), "new").unwrap();
+
+    let output = run_rustow([
+        "--no-folding",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-D",
+        "pkg",
+        "-S",
+        "pkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fs::symlink_metadata(target_dir.join("bin/old")).is_err());
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(target_dir.join("bin/new").exists());
 }
 
 #[test]
@@ -3408,6 +3506,62 @@ fn test_mixed_refold_preserves_alias_package_path() {
         PathBuf::from("../stow_dir/aliaspkg/bin")
     );
     assert!(target_dir.join("bin/tool").exists());
+}
+
+#[test]
+fn test_mixed_refold_rejects_package_alias_resolving_outside_stow_dir() {
+    let temp_dir = tempdir().unwrap();
+    let stow_dir = temp_dir.path().join("stow_dir");
+    let target_dir = temp_dir.path().join("target_dir");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(&stow_dir).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(external_dir.join("bin")).unwrap();
+    fs::write(external_dir.join("bin/tool"), "external").unwrap();
+    rustow::fs_utils::create_symlink(&stow_dir.join("evil"), &external_dir).unwrap();
+
+    let old_dir = stow_dir.join("oldpkg");
+    let new_dir = stow_dir.join("newpkg");
+    fs::create_dir_all(old_dir.join("bin")).unwrap();
+    fs::create_dir_all(new_dir.join("share")).unwrap();
+    fs::write(old_dir.join("bin/old_tool"), "old").unwrap();
+    fs::write(new_dir.join("share/new_tool"), "new").unwrap();
+
+    let mut old_config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec!["oldpkg".to_string()],
+        false,
+        0,
+    );
+    old_config.no_folding = true;
+    stow_packages(&old_config).unwrap();
+
+    let target_bin = target_dir.join("bin");
+    rustow::fs_utils::create_symlink(&target_bin.join("tool"), &stow_dir.join("evil/bin/tool"))
+        .unwrap();
+    assert!(target_bin.is_dir());
+    assert!(rustow::fs_utils::is_symlink(&target_bin.join("tool")));
+    assert!(rustow::fs_utils::is_symlink(&target_bin.join("old_tool")));
+
+    let parsed_args = Args::parse_from_with_operation_groups(vec![
+        "rustow".to_string(),
+        "-d".to_string(),
+        stow_dir.to_string_lossy().into_owned(),
+        "-t".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+        "-D".to_string(),
+        "oldpkg".to_string(),
+        "-S".to_string(),
+        "newpkg".to_string(),
+    ]);
+    let result = rustow::run_with_operation_groups(parsed_args.args, parsed_args.operation_groups);
+
+    assert!(result.is_ok(), "mixed operation failed: {:?}", result.err());
+    assert!(target_bin.is_dir());
+    assert!(!rustow::fs_utils::is_symlink(&target_bin));
+    assert!(rustow::fs_utils::is_symlink(&target_bin.join("tool")));
+    assert!(target_dir.join("share/new_tool").exists());
 }
 
 #[test]
