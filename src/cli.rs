@@ -402,7 +402,7 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
                     return Some(OsString::from(format!("-{flag}")));
                 }
 
-                if matches!(flag, 't' | 'd' | 'p') {
+                if short_cluster_stops_value_parsing(flag) {
                     break;
                 }
             }
@@ -414,7 +414,7 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
 
 fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap::Error> {
     for flag in arg[1..].chars() {
-        if matches!(flag, 't' | 'd' | 'p') {
+        if short_cluster_stops_value_parsing(flag) {
             break;
         }
 
@@ -424,6 +424,10 @@ fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap
     }
 
     Ok(())
+}
+
+fn short_cluster_stops_value_parsing(flag: char) -> bool {
+    matches!(flag, 't' | 'd')
 }
 
 fn increment_verbose_level(verbosity: &mut u8) -> Result<(), clap::Error> {
@@ -650,6 +654,23 @@ mod tests {
         assert_eq!(args_long_zero.verbose, 0);
         assert!(Args::try_parse_from(["rustow", "--verbose=invalid", "mypackage"]).is_err());
         assert!(Args::try_parse_from(["rustow", "--verbose=6", "mypackage"]).is_err());
+    }
+
+    #[test]
+    fn test_verbose_option_cluster_with_compat_before() {
+        let args = Args::parse_from(["rustow", "-pv", "mypackage"]);
+
+        assert!(args.compat);
+        assert_eq!(args.verbose, 1);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_verbose_option_cluster_with_compat_after() {
+        let args = Args::parse_from(["rustow", "-vp", "mypackage"]);
+
+        assert!(args.compat);
+        assert_eq!(args.verbose, 1);
     }
 
     #[test]

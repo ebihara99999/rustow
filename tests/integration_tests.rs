@@ -3613,6 +3613,31 @@ fn test_binary_verbose_numeric_level_is_accepted() {
 }
 
 #[test]
+fn test_binary_compat_verbosity_cluster_preserves_verbosity() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+
+    let output = run_rustow([
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "-pv",
+        "pkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Summary:"));
+    assert!(target_dir.join("bin/tool").exists());
+}
+
+#[test]
 fn test_binary_verbose_parse_errors_and_help_exit_codes() {
     let invalid_verbose = run_rustow(["--verbose=6", "pkg"]);
     assert_eq!(invalid_verbose.status.code(), Some(2));
