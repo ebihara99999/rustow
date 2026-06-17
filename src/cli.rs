@@ -230,6 +230,7 @@ impl Args {
                 path_displays: Vec::new(),
             });
         }
+        validate_cli_args_before_resource_files(&argv)?;
         let merged = merge_stowrc_args(&argv)?;
         let args = parse_args_from_argv(&merged.argv)?;
         let path_displays = effective_path_displays(merged.path_displays, &argv);
@@ -258,6 +259,86 @@ fn parse_args_from_argv(argv: &[OsString]) -> Result<Args, clap::Error> {
     let mut args = <Args as Parser>::try_parse_from(normalize_verbose_args(argv))?;
     args.verbose = verbose;
     Ok(args)
+}
+
+fn validate_cli_args_before_resource_files(argv: &[OsString]) -> Result<(), clap::Error> {
+    validate_cli_option_tokens(argv)?;
+    match parse_args_from_argv(argv) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayVersion
+                    | clap::error::ErrorKind::MissingRequiredArgument
+            ) =>
+        {
+            Ok(())
+        },
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_cli_option_tokens(argv: &[OsString]) -> Result<(), clap::Error> {
+    let mut expecting_option_value = false;
+    let mut after_double_dash = false;
+
+    for arg in argv.iter().skip(1) {
+        let arg = arg.to_string_lossy();
+
+        if after_double_dash {
+            continue;
+        }
+
+        if expecting_option_value {
+            expecting_option_value = false;
+            continue;
+        }
+
+        if arg == "--" {
+            after_double_dash = true;
+            continue;
+        }
+
+        if let Some(long_token) = arg.strip_prefix("--") {
+            let (key, has_attached_value) = long_token
+                .split_once('=')
+                .map_or((long_token, false), |(key, _)| (key, true));
+            if !is_known_long_option(key) {
+                return Err(unknown_option_error(&arg));
+            }
+            if map_long_value_option(key).is_some() {
+                expecting_option_value = !has_attached_value;
+            }
+            continue;
+        }
+
+        if arg.starts_with('-') && arg.len() > 1 {
+            let mut flags = arg[1..].chars().peekable();
+            while let Some(flag) = flags.next() {
+                if !is_known_short_option(flag) {
+                    return Err(unknown_option_error(&format!("-{flag}")));
+                }
+                if matches!(flag, 't' | 'd') {
+                    expecting_option_value = flags.peek().is_none();
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn unknown_option_error(option: &str) -> clap::Error {
+    clap::Error::raw(
+        clap::error::ErrorKind::UnknownArgument,
+        format!("unexpected argument '{option}'"),
+    )
+}
+
+fn is_known_long_option(option: &str) -> bool {
+    map_long_value_option(option).is_some() || map_long_bool_option(option)
 }
 
 #[derive(Debug)]
@@ -945,16 +1026,12 @@ fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
         token_started = true;
     }
 
+    if in_single_quote || in_double_quote {
+        return Ok(Vec::new());
+    }
+
     if token_started {
         tokens.push(token);
-    }
-
-    if in_single_quote {
-        return Err("unterminated single quote in resource file".to_string());
-    }
-
-    if in_double_quote {
-        return Err("unterminated double quote in resource file".to_string());
     }
 
     Ok(tokens)
@@ -1429,7 +1506,6 @@ fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
 fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
     let mut expecting_option_value = false;
     let mut after_double_dash = false;
-    let mut current_mode = OperationMode::Stow;
     let mut saw_help = false;
     let mut saw_version = false;
 
@@ -1450,41 +1526,56 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
             continue;
         }
 
-        if is_option_requiring_separate_value(&arg) {
-            expecting_option_value = true;
-            continue;
-        }
-
-        if arg == "--help" {
-            saw_help = true;
-            continue;
-        }
-
-        if arg == "--version" {
-            saw_version = true;
-            continue;
-        }
-
-        if arg.starts_with("--") {
-            continue;
+        if let Some(long_token) = arg.strip_prefix("--") {
+            let (key, has_attached_value) = long_token
+                .split_once('=')
+                .map_or((long_token, false), |(key, _)| (key, true));
+            if key == "help" {
+                if has_attached_value {
+                    return None;
+                }
+                saw_help = true;
+                continue;
+            }
+            if key == "version" {
+                if has_attached_value {
+                    return None;
+                }
+                saw_version = true;
+                continue;
+            }
+            if map_long_value_option(key).is_some() {
+                expecting_option_value = !has_attached_value;
+                continue;
+            }
+            if key == "verbose" || map_long_bool_option(key) {
+                if has_attached_value && key != "verbose" {
+                    return None;
+                }
+                continue;
+            }
+            return None;
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
-            if short_option_cluster_consumes_value(&arg, &mut current_mode) {
-                expecting_option_value = short_option_cluster_needs_next_value(&arg);
-            }
+            let mut flags = arg[1..].chars().peekable();
+            while let Some(flag) = flags.next() {
+                if !is_known_short_option(flag) {
+                    return None;
+                }
 
-            for flag in arg[1..].chars() {
                 if flag == 'h' {
                     saw_help = true;
                 } else if flag == 'V' {
                     saw_version = true;
                 }
 
-                if short_cluster_stops_value_parsing(flag) {
+                if matches!(flag, 't' | 'd') {
+                    expecting_option_value = flags.peek().is_none();
                     break;
                 }
             }
+            continue;
         }
     }
 
@@ -1495,6 +1586,13 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
     } else {
         None
     }
+}
+
+fn is_known_short_option(flag: char) -> bool {
+    matches!(
+        flag,
+        'h' | 'V' | 'S' | 'D' | 'R' | 'p' | 'n' | 'v' | 't' | 'd'
+    )
 }
 
 fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap::Error> {
@@ -2663,6 +2761,64 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_cli_option_takes_precedence_over_malformed_stowrc() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "--target\n");
+
+        let error =
+            Args::try_parse_runtime_from_with_operation_groups(["rustow", "--bad-option", "pkg"])
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("--bad-option"));
+        assert!(!error.to_string().contains("resource file option"));
+    }
+
+    #[test]
+    fn test_invalid_cli_option_takes_precedence_over_undefined_stowrc_env() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+        unsafe {
+            std::env::remove_var("RUSTOW_UNDEFINED_STOWRC_VAR");
+        }
+
+        write_file(&cwd.join(".stowrc"), "--dir=$RUSTOW_UNDEFINED_STOWRC_VAR\n");
+
+        let error =
+            Args::try_parse_runtime_from_with_operation_groups(["rustow", "--bad-option", "pkg"])
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("--bad-option"));
+        assert!(
+            !error
+                .to_string()
+                .contains("undefined environment variable $RUSTOW_UNDEFINED_STOWRC_VAR")
+        );
+    }
+
+    #[test]
+    fn test_invalid_short_clusters_with_help_or_version_do_not_display_help() {
+        let _lock = process_env_lock();
+
+        for cluster in ["-xh", "-hx", "-xV", "-Vx"] {
+            let error =
+                Args::try_parse_runtime_from_with_operation_groups(["rustow", cluster, "pkg"])
+                    .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+            assert!(error.to_string().contains("-x"));
+        }
+    }
+
+    #[test]
     fn test_stowrc_ignores_mode_flags_and_package_names() {
         let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
@@ -2833,6 +2989,21 @@ mod tests {
                 "--target".to_string(),
                 "".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_stowrc_unterminated_quotes_match_gnu_shellwords() {
+        let _lock = process_env_lock();
+        assert!(
+            tokenize_stowrc_line(r#"before "unterminated"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            tokenize_stowrc_line("before 'unterminated")
+                .unwrap()
+                .is_empty()
         );
     }
 
