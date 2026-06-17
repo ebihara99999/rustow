@@ -1001,9 +1001,7 @@ fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
                 token_started = true;
                 continue;
             }
-            token.push('\\');
-            token_started = true;
-            continue;
+            return Ok(Vec::new());
         }
 
         if ch == '\'' && !in_double_quote {
@@ -3049,6 +3047,12 @@ mod tests {
             tokenize_stowrc_line(r#"# --dir=/shellwords-token"#).unwrap(),
             vec!["#".to_string(), "--dir=/shellwords-token".to_string()]
         );
+    }
+
+    #[test]
+    fn test_stowrc_trailing_backslash_matches_gnu_shellwords() {
+        let _lock = process_env_lock();
+        assert!(tokenize_stowrc_line(r"--dir=/ignored\").unwrap().is_empty());
     }
 
     #[test]

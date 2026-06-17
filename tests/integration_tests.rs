@@ -3810,6 +3810,28 @@ fn test_binary_stowrc_rejects_missing_value_without_consuming_cli_package() {
 }
 
 #[test]
+fn test_binary_stowrc_trailing_backslash_line_is_ignored() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(cwd.join("pkg/bin")).unwrap();
+    fs::write(cwd.join("pkg/bin/tool"), "tool").unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=/definitely-not-used\\\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    let output = run_rustow_with(["--simulate", "pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr);
+    assert!(!stderr.contains("definitely-not-used"));
+    assert!(!stderr.contains("Invalid stow directory"));
+}
+
+#[test]
 fn test_binary_help_ignores_malformed_stowrc() {
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let home_dir = temp_dir.path().join("home");
