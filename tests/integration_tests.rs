@@ -95,6 +95,19 @@ where
         .expect("Failed to run rustow binary")
 }
 
+fn run_rustow_with<I, S>(args: I, cwd: &Path, envs: &[(&str, &str)]) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(env!("CARGO_BIN_EXE_rustow"))
+        .args(args)
+        .current_dir(cwd)
+        .envs(envs.iter().copied())
+        .output()
+        .expect("Failed to run rustow binary")
+}
+
 #[test]
 fn test_basic_stow_operation_without_dotfiles() {
     let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
@@ -3668,6 +3681,132 @@ fn test_binary_help_and_version_keep_precedence_after_packages() {
     let version_with_extra_arg_output = run_rustow(["pkg", "--version", "extra"]);
     assert_eq!(version_with_extra_arg_output.status.code(), Some(0));
     assert!(!String::from_utf8_lossy(&version_with_extra_arg_output.stdout).is_empty());
+}
+
+#[test]
+fn test_binary_stowrc_options_from_current_and_home_are_prepared() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_local = temp_dir.path().join("local_stow");
+    let stow_home = temp_dir.path().join("home_stow");
+    let target_local = temp_dir.path().join("target_local");
+    let target_home = temp_dir.path().join("target_home");
+    let package_local = stow_local.join("pkg");
+    let package_home = stow_home.join("pkg");
+
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(package_local.join("bin")).unwrap();
+    fs::create_dir_all(package_home.join("bin")).unwrap();
+    fs::create_dir_all(&target_local).unwrap();
+    fs::create_dir_all(&target_home).unwrap();
+    fs::write(package_local.join("bin/tool"), "local").unwrap();
+    fs::write(package_home.join("bin/tool"), "home").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    fs::write(
+        cwd.join(".stowrc"),
+        format!(
+            "--dir={}\n--target={}\n",
+            stow_local.to_string_lossy(),
+            target_local.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        home_dir.join(".stowrc"),
+        format!(
+            "--dir={}\n--target={}\n",
+            stow_home.to_string_lossy(),
+            target_home.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        target_home.join("bin").exists(),
+        "home stowrc should be applied after local"
+    );
+    assert!(
+        !target_local.join("bin").exists(),
+        "home stowrc should override local target"
+    );
+
+    let output_with_cli_override = run_rustow_with(
+        [
+            "-d",
+            stow_local.to_string_lossy().as_ref(),
+            "-t",
+            target_local.to_string_lossy().as_ref(),
+            "pkg",
+        ],
+        &cwd,
+        &envs,
+    );
+    assert_eq!(
+        output_with_cli_override.status.code(),
+        Some(0),
+        "rustow with cli override should succeed: {}",
+        String::from_utf8_lossy(&output_with_cli_override.stderr)
+    );
+    assert!(
+        target_local.join("bin").exists(),
+        "cli flags should override resource files"
+    );
+}
+
+#[test]
+fn test_binary_stowrc_expansion_and_quote_handling() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = temp_dir.path().join("stow");
+    let target_dir = home_dir.join("target");
+    let package_dir = stow_dir.join("quotedpkg");
+
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin").join("tool"), "tool").unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::write(
+        cwd.join(".stowrc"),
+        format!(
+            "--dir=\"{}\"\n--target=\"$HOME/{}\"\n",
+            stow_dir.to_string_lossy(),
+            target_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    let output = run_rustow_with(["quotedpkg"], &cwd, &envs);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "rustow with quoted stowrc expansion should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        target_dir.join("bin").join("tool").exists(),
+        "expanded target should be honored"
+    );
 }
 
 #[test]

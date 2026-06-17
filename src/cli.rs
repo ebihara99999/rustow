@@ -1739,6 +1739,32 @@ mod tests {
     }
 
     #[test]
+    fn test_stowrc_parse_local_file_with_quoted_value() {
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let stow_dir = temp_dir.path().join("stow").join("quotedpkg");
+        let target_dir = home_dir.join("target");
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _home_guard = EnvVarGuard::new("HOME", home_dir.to_str().unwrap());
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(
+            &cwd.join(".stowrc"),
+            &format!(
+                "--dir=\"{}\"\n--target=\"$HOME/target\"\n",
+                stow_dir.to_string_lossy()
+            ),
+        );
+
+        let args = Args::parse_from(["rustow", "quotedpkg"]);
+        assert_eq!(args.dir, Some(stow_dir.clone()));
+        assert_eq!(args.target, Some(target_dir));
+    }
+
+    #[test]
     fn test_stowrc_tokenization_handles_quotes_and_comments() {
         assert_eq!(
             tokenize_stowrc_line(r#"--ignore='one # two' "three four" # comment"#),
