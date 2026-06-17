@@ -3857,6 +3857,21 @@ fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
     let output = run_rustow_with(["pkg"], &cwd, &envs);
     assert_eq!(output.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-value-from-env"));
+
+    let stow_dir = temp_dir.path().join("stow");
+    fs::create_dir_all(stow_dir.join("pkg")).unwrap();
+    fs::write(
+        cwd.join(".stowrc"),
+        format!(
+            "--dir={}\n--target=$RUSTOW_SECRET_PATH/missing\n",
+            stow_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-value-from-env"));
 }
 
 #[test]

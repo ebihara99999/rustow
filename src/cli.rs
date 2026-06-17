@@ -5,6 +5,7 @@ use std::ffi::{CStr, CString};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::{env, fs, io::ErrorKind, path::Path};
 
 const MAX_VERBOSITY: u8 = 5;
@@ -205,7 +206,7 @@ struct StowrcToken {
 
 #[derive(Debug, Clone)]
 struct StowrcTokenOrigin {
-    path: PathBuf,
+    path: Arc<PathBuf>,
     line: usize,
 }
 
@@ -267,9 +268,10 @@ fn read_stowrc_file(path: &Path) -> Result<Vec<StowrcToken>, clap::Error> {
     };
 
     let mut tokens = Vec::new();
+    let path = Arc::new(path.to_path_buf());
     for (index, line) in contents.lines().enumerate() {
         let origin = StowrcTokenOrigin {
-            path: path.to_path_buf(),
+            path: path.clone(),
             line: index + 1,
         };
         let line_tokens = tokenize_stowrc_line(line).map_err(|err| {
@@ -316,13 +318,14 @@ impl ResourceValueOption {
 struct ResourcePathValue {
     index: usize,
     option_name: ResourceValueOption,
+    value_start: usize,
 }
 
 #[derive(Debug)]
 struct ParsedResourceOption {
     tokens: Vec<OsString>,
     expecting_value: Option<ResourceValueOption>,
-    path_value: Option<(usize, ResourceValueOption)>,
+    path_value: Option<ResourcePathValue>,
 }
 
 fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>, clap::Error> {
@@ -342,6 +345,7 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>
                 path_values.push(ResourcePathValue {
                     index: normalized.len(),
                     option_name: pending.option_name,
+                    value_start: 0,
                 });
                 normalized.push(OsString::from(token_value));
             } else {
@@ -370,10 +374,11 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>
             if let Some(parsed) = parse_long_stowrc_option(&token_value) {
                 let base_index = normalized.len();
                 normalized.extend(parsed.tokens);
-                if let Some((relative_index, option_name)) = parsed.path_value {
+                if let Some(path_value) = parsed.path_value {
                     path_values.push(ResourcePathValue {
-                        index: base_index + relative_index,
-                        option_name,
+                        index: base_index + path_value.index,
+                        option_name: path_value.option_name,
+                        value_start: path_value.value_start,
                     });
                 }
                 if let Some(option_name) = parsed.expecting_value {
@@ -391,10 +396,11 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>
             if let Some(parsed) = parse_short_stowrc_option(&token_value) {
                 let base_index = normalized.len();
                 normalized.extend(parsed.tokens);
-                if let Some((relative_index, option_name)) = parsed.path_value {
+                if let Some(path_value) = parsed.path_value {
                     path_values.push(ResourcePathValue {
-                        index: base_index + relative_index,
-                        option_name,
+                        index: base_index + path_value.index,
+                        option_name: path_value.option_name,
+                        value_start: path_value.value_start,
                     });
                 }
                 expecting_value = parsed
@@ -427,13 +433,17 @@ fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
         return None;
     }
 
-    if let Some((key, value)) = long_token.split_once('=') {
+    if let Some((key, _value)) = long_token.split_once('=') {
         if let Some(option_name) = map_long_value_option(key) {
             if option_name.is_path_option() {
                 return Some(ParsedResourceOption {
-                    tokens: vec![OsString::from(format!("--{}", key)), OsString::from(value)],
+                    tokens: vec![OsString::from(token)],
                     expecting_value: None,
-                    path_value: Some((1, option_name)),
+                    path_value: Some(ResourcePathValue {
+                        index: 0,
+                        option_name,
+                        value_start: key.len() + 3,
+                    }),
                 });
             }
             return Some(ParsedResourceOption {
@@ -545,9 +555,13 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                     format!("-{}{}", bool_flags.iter().collect::<String>(), chars[i])
                 };
                 return Some(ParsedResourceOption {
-                    tokens: vec![OsString::from(prefix), token_remainder.into()],
+                    tokens: vec![OsString::from(format!("{}{}", prefix, token_remainder))],
                     expecting_value: None,
-                    path_value: Some((1, option_name)),
+                    path_value: Some(ResourcePathValue {
+                        index: 0,
+                        option_name,
+                        value_start: prefix.len(),
+                    }),
                 });
             },
             'p' | 'v' | 'h' | 'V' | 'n' => {
@@ -646,15 +660,21 @@ fn expand_path_value(
     raw_value: &str,
     option_name: ResourceValueOption,
 ) -> Result<String, clap::Error> {
-    let home_dir = current_user_home_dir();
+    let env_expanded = expand_environment_value(raw_value, option_name)?;
+    Ok(expand_tilde_value(&env_expanded))
+}
+
+fn expand_environment_value(
+    raw_value: &str,
+    option_name: ResourceValueOption,
+) -> Result<String, clap::Error> {
     let mut output = String::new();
     let mut chars = raw_value.chars().peekable();
-    let mut is_start = true;
 
     while let Some(ch) = chars.next() {
         if ch == '\\' {
             if let Some(next) = chars.next() {
-                if next == '$' || next == '~' {
+                if next == '$' {
                     output.push(next);
                 } else {
                     output.push('\\');
@@ -663,33 +683,6 @@ fn expand_path_value(
             } else {
                 output.push('\\');
             }
-            is_start = false;
-            continue;
-        }
-
-        if ch == '~' && is_start {
-            let mut user = String::new();
-            while let Some(next) = chars.peek().copied() {
-                if next == '/' {
-                    break;
-                }
-                user.push(next);
-                chars.next();
-            }
-
-            if user.is_empty() {
-                if let Some(home_dir) = &home_dir {
-                    output.push_str(&home_dir.to_string_lossy());
-                } else {
-                    output.push('~');
-                }
-            } else if let Some(user_home) = home_dir_for_user(&user) {
-                output.push_str(&user_home.to_string_lossy());
-            } else {
-                // GNU Stow's Perl tilde expansion substitutes undef here, which
-                // effectively removes the unknown user part of the path.
-            }
-            is_start = false;
             continue;
         }
 
@@ -697,16 +690,25 @@ fn expand_path_value(
             if let Some('{') = chars.peek().copied() {
                 chars.next();
                 let mut variable = String::new();
+                let mut closed = false;
                 for next in chars.by_ref() {
                     if next == '}' {
+                        closed = true;
                         break;
                     }
                     variable.push(next);
                 }
+                if !closed || !is_gnu_braced_env_name(&variable) {
+                    output.push_str("${");
+                    output.push_str(&variable);
+                    if closed {
+                        output.push('}');
+                    }
+                    continue;
+                }
                 let value = env::var(&variable)
                     .map_err(|_| undefined_env_var_error(&variable, option_name))?;
                 output.push_str(&value);
-                is_start = false;
                 continue;
             }
 
@@ -726,21 +728,48 @@ fn expand_path_value(
                     let value = env::var(&variable)
                         .map_err(|_| undefined_env_var_error(&variable, option_name))?;
                     output.push_str(&value);
-                    is_start = false;
                     continue;
                 }
             }
 
             output.push('$');
-            is_start = false;
             continue;
         }
 
         output.push(ch);
-        is_start = false;
     }
 
     Ok(output)
+}
+
+fn expand_tilde_value(value: &str) -> String {
+    let tilde_expanded = if let Some(rest) = value.strip_prefix('~') {
+        let user_end = rest.find('/').unwrap_or(rest.len());
+        let user = &rest[..user_end];
+        let suffix = &rest[user_end..];
+        let mut output = String::new();
+
+        if user.is_empty() {
+            if let Some(home_dir) = current_user_home_dir() {
+                output.push_str(&home_dir.to_string_lossy());
+            } else {
+                output.push('~');
+            }
+        } else if let Some(user_home) = home_dir_for_user(user) {
+            output.push_str(&user_home.to_string_lossy());
+        } else {
+            // GNU Stow's Perl tilde expansion substitutes undef here, which
+            // effectively removes the unknown user part of the path.
+        }
+
+        output.push_str(suffix);
+
+        output
+    } else {
+        value.to_string()
+    };
+
+    tilde_expanded.replace("\\~", "~")
 }
 
 fn expand_final_resource_path_values(
@@ -760,8 +789,17 @@ fn expand_final_resource_path_values(
 
         if should_expand {
             let raw_value = normalized[path_value.index].to_string_lossy();
-            normalized[path_value.index] =
-                expand_path_value(&raw_value, path_value.option_name)?.into();
+            let expanded = if path_value.value_start == 0 {
+                expand_path_value(&raw_value, path_value.option_name)?
+            } else {
+                let (prefix, raw_value) = raw_value.split_at(path_value.value_start);
+                format!(
+                    "{}{}",
+                    prefix,
+                    expand_path_value(raw_value, path_value.option_name)?
+                )
+            };
+            normalized[path_value.index] = expanded.into();
         }
     }
 
@@ -910,11 +948,18 @@ where
 }
 
 fn is_valid_var_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
+    is_valid_var_char(ch)
 }
 
 fn is_valid_var_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn is_gnu_braced_env_name(variable: &str) -> bool {
+    !variable.is_empty()
+        && variable
+            .chars()
+            .all(|ch| is_valid_var_char(ch) || ch.is_ascii_whitespace())
 }
 
 fn normalize_verbose_args(argv: &[OsString]) -> Vec<OsString> {
@@ -2309,11 +2354,12 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
 
         let home_guard = EnvVarGuard::new("HOME", home_dir.to_str().unwrap());
+        let _target_guard = EnvVarGuard::new("RUSTOW_TARGET_FROM_ENV", "~/env_target");
         let _cwd_guard = CurrentDirGuard::set(&cwd);
 
         write_file(
             &cwd.join(".stowrc"),
-            "--dir=\"$HOME/.stowrc dir\"\n--target=~/.stowrc_target\n",
+            "--dir=\"$HOME/.stowrc dir\"\n--target=$RUSTOW_TARGET_FROM_ENV\n",
         );
 
         let args = Args::parse_from(["rustow", "pkg"]);
@@ -2327,7 +2373,7 @@ mod tests {
         assert_eq!(
             args.target,
             Some(PathBuf::from(format!(
-                "{}/.stowrc_target",
+                "{}/env_target",
                 home_dir.to_string_lossy()
             )))
         );
@@ -2418,10 +2464,15 @@ mod tests {
     fn test_expand_path_value_supports_braced_and_unbraced_env_vars() {
         let _lock = process_env_lock();
         let _home_guard = EnvVarGuard::new("HOME_STOW", "/home/example");
+        let _number_guard = EnvVarGuard::new("1", "one");
 
         assert_eq!(
             expand_path_value(r"$HOME_STOW/.stowrc", ResourceValueOption::Dir).unwrap(),
             "/home/example/.stowrc".to_string()
+        );
+        assert_eq!(
+            expand_path_value(r"$1/.stowrc", ResourceValueOption::Dir).unwrap(),
+            "one/.stowrc".to_string()
         );
         assert_eq!(
             expand_path_value(
@@ -2430,6 +2481,27 @@ mod tests {
             )
             .unwrap(),
             "/home/example/nested//home/example".to_string()
+        );
+    }
+
+    #[test]
+    fn test_expand_path_value_leaves_non_gnu_braced_env_literals() {
+        let _lock = process_env_lock();
+        unsafe {
+            std::env::remove_var("MISSING");
+        }
+
+        assert_eq!(
+            expand_path_value(r"${MISSING:-/tmp}", ResourceValueOption::Dir).unwrap(),
+            "${MISSING:-/tmp}".to_string()
+        );
+        assert_eq!(
+            expand_path_value(r"${}/path", ResourceValueOption::Dir).unwrap(),
+            "${}/path".to_string()
+        );
+        assert_eq!(
+            expand_path_value(r"${MISSING/path", ResourceValueOption::Dir).unwrap(),
+            "${MISSING/path".to_string()
         );
     }
 
@@ -2475,6 +2547,31 @@ mod tests {
             args.target,
             Some(PathBuf::from(format!("{}/t", home_dir.to_string_lossy())))
         );
+    }
+
+    #[test]
+    fn test_stowrc_path_options_preserve_attached_hyphen_values() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(
+            &cwd.join(".stowrc"),
+            "--dir=-D\n--target=--verbose\n--ignore=from-rc\n",
+        );
+
+        let args = Args::parse_from(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(PathBuf::from("-D")));
+        assert_eq!(args.target, Some(PathBuf::from("--verbose")));
+        assert_eq!(args.ignore_patterns, vec!["from-rc"]);
+
+        write_file(&cwd.join(".stowrc"), "-d-D\n-t--help\n");
+        let args = Args::parse_from(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(PathBuf::from("-D")));
+        assert_eq!(args.target, Some(PathBuf::from("--help")));
     }
 
     #[cfg(unix)]

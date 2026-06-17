@@ -65,15 +65,21 @@ impl Config {
             fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| match e {
                 RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidStowDir(format!(
-                        "Failed to canonicalize stow directory: {}",
+                        "Failed to canonicalize stow directory '{}': {}",
+                        redact_env_values(&stow_dir_path_unresolved),
                         source
                     )))
                 },
-                RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidStowDir(
-                    format!("Failed to canonicalize stow directory: {}", fs_error),
-                )),
+                RustowError::Fs(fs_error) => {
+                    RustowError::Config(ConfigError::InvalidStowDir(format!(
+                        "Failed to canonicalize stow directory '{}': {}",
+                        redact_env_values(&stow_dir_path_unresolved),
+                        fs_error
+                    )))
+                },
                 _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
-                    "An unexpected error occurred while canonicalizing stow directory: {}",
+                    "An unexpected error occurred while canonicalizing stow directory '{}': {}",
+                    redact_env_values(&stow_dir_path_unresolved),
                     e
                 ))),
             })?;
@@ -91,15 +97,21 @@ impl Config {
             .map_err(|e| match e {
                 RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                        "Failed to canonicalize target directory: {}",
+                        "Failed to canonicalize target directory '{}': {}",
+                        redact_env_values(&target_dir_path_unresolved),
                         source
                     )))
                 },
-                RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidTargetDir(
-                    format!("Failed to canonicalize target directory: {}", fs_error),
-                )),
+                RustowError::Fs(fs_error) => {
+                    RustowError::Config(ConfigError::InvalidTargetDir(format!(
+                        "Failed to canonicalize target directory '{}': {}",
+                        redact_env_values(&target_dir_path_unresolved),
+                        fs_error
+                    )))
+                },
                 _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                    "An unexpected error occurred while canonicalizing target directory: {}",
+                    "An unexpected error occurred while canonicalizing target directory '{}': {}",
+                    redact_env_values(&target_dir_path_unresolved),
                     e
                 ))),
             })?;
@@ -166,6 +178,22 @@ impl Config {
             home_dir,
         })
     }
+}
+
+fn redact_env_values(path: &std::path::Path) -> String {
+    let mut display = path.display().to_string();
+    let mut env_values = env::vars_os().collect::<Vec<_>>();
+    env_values.sort_by_key(|(_, value)| std::cmp::Reverse(value.len()));
+
+    for (key, value) in env_values {
+        let key = key.to_string_lossy();
+        let value = value.to_string_lossy();
+        if key.is_empty() || value.len() < 4 {
+            continue;
+        }
+        display = display.replace(value.as_ref(), &format!("${}", key));
+    }
+    display
 }
 
 #[cfg(test)]
@@ -315,10 +343,14 @@ mod tests {
             "pkg",
         ]);
         let config_result = Config::from_args(args);
+        unsafe {
+            std::env::remove_var("RUSTOW_SECRET_CONFIG_PATH");
+        }
         assert!(config_result.is_err());
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
                 assert!(msg.contains("Failed to canonicalize stow directory"));
+                assert!(msg.contains("/path/that/definitely/does/not/exist/stow"));
             },
             e => panic!("Unexpected error type: {:?}", e),
         }
@@ -345,6 +377,27 @@ mod tests {
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidTargetDir(msg)) => {
                 assert!(msg.contains("Failed to canonicalize target directory"));
+                assert!(msg.contains("/path/that/equally/does/not/exist/target"));
+            },
+            e => panic!("Unexpected error type: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_canonicalization_failure_redacts_env_values() {
+        let _lock = env_lock();
+        let secret_root = "/tmp/rustow-secret-value";
+        unsafe {
+            std::env::set_var("RUSTOW_SECRET_CONFIG_PATH", secret_root);
+        }
+
+        let args = Args::parse_from(["rustow", "-d", &format!("{}/missing", secret_root), "pkg"]);
+        let config_result = Config::from_args(args);
+        assert!(config_result.is_err());
+        match config_result.err().unwrap() {
+            RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
+                assert!(!msg.contains(secret_root));
+                assert!(msg.contains("$RUSTOW_SECRET_CONFIG_PATH/missing"));
             },
             e => panic!("Unexpected error type: {:?}", e),
         }
