@@ -5,6 +5,8 @@ pub mod error;
 pub mod fs_utils;
 pub mod ignore;
 pub mod stow;
+#[cfg(test)]
+mod test_sync;
 
 use rustow::cli::Args;
 

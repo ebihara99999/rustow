@@ -172,7 +172,6 @@ mod tests {
     use crate::cli::Args;
 
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
     fn basic_args_for_config_test(package_name: &str) -> Args {
@@ -180,8 +179,7 @@ mod tests {
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+        crate::test_sync::global_process_env_lock()
     }
 
     #[test]

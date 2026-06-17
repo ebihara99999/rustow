@@ -964,6 +964,10 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
+    fn process_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_sync::global_process_env_lock()
+    }
+
     // Helper function to ensure STOW_DIR is cleared before and after tests that use it.
     // This is to prevent interference between tests when run in parallel.
     struct StowDirEnvGuard {
@@ -1014,7 +1018,13 @@ mod tests {
 
     impl Drop for CurrentDirGuard {
         fn drop(&mut self) {
-            std::env::set_current_dir(&self.original).expect("failed to restore current directory");
+            if let Err(err) = std::env::set_current_dir(&self.original) {
+                eprintln!(
+                    "warning: failed to restore current directory {}: {}",
+                    self.original.display(),
+                    err
+                );
+            }
         }
     }
 
@@ -1338,6 +1348,7 @@ mod tests {
 
     #[test]
     fn test_stow_dir_from_env() {
+        let _lock = process_env_lock();
         // STOW_DIR is resolved by Config, not by the CLI parser.
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
         // Set STOW_DIR environment variable
@@ -1351,6 +1362,7 @@ mod tests {
 
     #[test]
     fn test_stow_dir_no_env_no_option() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
 
         // Double-check that STOW_DIR is actually cleared
@@ -1369,6 +1381,7 @@ mod tests {
 
     #[test]
     fn test_stow_dir_from_option_overrides_env() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear initially
         unsafe {
             std::env::set_var("STOW_DIR", "/env/stow/path");
@@ -1629,6 +1642,7 @@ mod tests {
 
     #[test]
     fn test_stowrc_options_from_current_and_home_are_prepared() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
         let home_dir = temp_dir.path().join("home");
@@ -1673,6 +1687,7 @@ mod tests {
 
     #[test]
     fn test_stowrc_ignores_mode_flags_and_package_names() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
         let cwd = temp_dir.path().join("cwd");
@@ -1698,6 +1713,7 @@ mod tests {
 
     #[test]
     fn test_stowrc_expands_path_tokens_in_env_and_tilde() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
         let home_dir = temp_dir.path().join("home");
@@ -1740,6 +1756,7 @@ mod tests {
 
     #[test]
     fn test_stowrc_parse_local_file_with_quoted_value() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
         let home_dir = temp_dir.path().join("home");
@@ -1782,6 +1799,7 @@ mod tests {
 
     #[test]
     fn test_expand_path_value_supports_braced_and_unbraced_env_vars() {
+        let _lock = process_env_lock();
         let _home_guard = EnvVarGuard::new("HOME_STOW", "/home/example");
 
         assert_eq!(
@@ -1796,6 +1814,7 @@ mod tests {
 
     #[test]
     fn test_expand_path_value_preserves_escaped_markers() {
+        let _lock = process_env_lock();
         let _home_guard = EnvVarGuard::new("HOME_STOW", "/home/example");
 
         assert_eq!(
@@ -1814,6 +1833,7 @@ mod tests {
 
     #[test]
     fn test_stowrc_short_option_cluster_parsing_expands_attached_path_values() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
         let home_dir = temp_dir.path().join("home");
