@@ -108,8 +108,14 @@ impl Config {
                             stow_dir_display
                         )))
                     })?.to_path_buf();
-                let display = display_parent(&stow_dir_display)
-                    .unwrap_or_else(|| crate::cli::path_display(&path, path_displays));
+                let display = display_parent(&stow_dir_display).unwrap_or_else(|| {
+                    let unresolved_display = stow_dir_path_unresolved.display().to_string();
+                    if stow_dir_display == unresolved_display {
+                        crate::cli::path_display(&path, path_displays)
+                    } else {
+                        format!("{}{}..", stow_dir_display, std::path::MAIN_SEPARATOR)
+                    }
+                });
                 (path, display)
             },
         };
