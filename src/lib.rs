@@ -33,6 +33,10 @@ pub fn run_parsed(parsed_args: ParsedArgs) -> Result<(), RustowError> {
     )
 }
 
+/// Runs runtime-parsed arguments and returns errors redacted for diagnostics.
+///
+/// Resource-file path values expanded from environment variables or tildes may
+/// be represented with their original display strings in returned errors.
 #[doc(hidden)]
 pub fn run_runtime_parsed(parsed_args: RuntimeParsedArgs) -> Result<(), RustowError> {
     let (parsed_args, path_displays) = parsed_args.into_parts();

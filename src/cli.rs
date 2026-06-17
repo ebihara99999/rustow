@@ -867,7 +867,10 @@ fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
 fn map_long_bool_option(token: &str) -> bool {
     matches!(
         token,
-        "compat"
+        "stow"
+            | "delete"
+            | "restow"
+            | "compat"
             | "adopt"
             | "no-folding"
             | "dotfiles"
@@ -1772,6 +1775,7 @@ fn short_option_cluster_needs_next_value(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs::{self, File};
     use std::io::Write;
     #[cfg(unix)]
@@ -1887,6 +1891,42 @@ mod tests {
         Args::parse_runtime_from_with_operation_groups(itr).parsed_args
     }
 
+    #[test]
+    fn test_compat_option_tables_cover_clap_options() {
+        let command = <Args as clap::CommandFactory>::command();
+        let mut long_options = BTreeSet::new();
+        let mut short_options = BTreeSet::new();
+
+        for arg in command.get_arguments() {
+            if let Some(options) = arg.get_long_and_visible_aliases() {
+                long_options.extend(options.into_iter().map(str::to_string));
+            }
+            if let Some(options) = arg.get_aliases() {
+                long_options.extend(options.into_iter().map(str::to_string));
+            }
+            if let Some(options) = arg.get_short_and_visible_aliases() {
+                short_options.extend(options);
+            }
+        }
+        long_options.extend(["help".to_string(), "version".to_string()]);
+        short_options.extend(['h', 'V']);
+
+        for option in long_options {
+            assert!(
+                is_known_long_option(&option),
+                "compat parser must know --{}",
+                option
+            );
+        }
+        for option in short_options {
+            assert!(
+                is_known_short_option(option),
+                "compat parser must know -{}",
+                option
+            );
+        }
+    }
+
     impl Drop for StowDirEnvGuard {
         fn drop(&mut self) {
             // Restore original value if it existed, otherwise ensure it's cleared
@@ -1920,6 +1960,28 @@ mod tests {
         assert!(args.delete);
         assert!(!args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
+    fn test_runtime_long_mode_options_are_valid_cli_options() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        let parsed_args =
+            Args::parse_runtime_from_with_operation_groups(["rustow", "--delete", "mypackage"]);
+
+        assert!(parsed_args.parsed_args.args.delete);
+        assert_eq!(
+            parsed_args.parsed_args.operation_groups,
+            vec![OperationGroup {
+                mode: OperationMode::Delete,
+                packages: vec!["mypackage".to_string()],
+            }]
+        );
     }
 
     #[test]
