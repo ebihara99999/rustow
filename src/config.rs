@@ -1,5 +1,5 @@
 use crate::cli::Args;
-use crate::error::{ConfigError, Result as RustowResult, RustowError};
+use crate::error::{ConfigError, FsError, Result as RustowResult, RustowError};
 use crate::fs_utils; // Import fs_utils
 use regex::Regex;
 use std::env;
@@ -63,16 +63,17 @@ impl Config {
         };
         let stow_dir: PathBuf =
             fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| match e {
-                RustowError::Fs(fs_error) => {
+                RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidStowDir(format!(
-                        "Failed to canonicalize stow directory '{}': {}",
-                        stow_dir_path_unresolved.display(),
-                        fs_error
+                        "Failed to canonicalize stow directory: {}",
+                        source
                     )))
                 },
+                RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidStowDir(
+                    format!("Failed to canonicalize stow directory: {}", fs_error),
+                )),
                 _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
-                    "An unexpected error occurred while canonicalizing stow directory '{}': {}",
-                    stow_dir_path_unresolved.display(),
+                    "An unexpected error occurred while canonicalizing stow directory: {}",
                     e
                 ))),
             })?;
@@ -88,16 +89,17 @@ impl Config {
         };
         let target_dir: PathBuf = fs_utils::canonicalize_path(&target_dir_path_unresolved)
             .map_err(|e| match e {
-                RustowError::Fs(fs_error) => {
+                RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                        "Failed to canonicalize target directory '{}': {}",
-                        target_dir_path_unresolved.display(),
-                        fs_error
+                        "Failed to canonicalize target directory: {}",
+                        source
                     )))
                 },
+                RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidTargetDir(
+                    format!("Failed to canonicalize target directory: {}", fs_error),
+                )),
                 _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                    "An unexpected error occurred while canonicalizing target directory '{}': {}",
-                    target_dir_path_unresolved.display(),
+                    "An unexpected error occurred while canonicalizing target directory: {}",
                     e
                 ))),
             })?;
