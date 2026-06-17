@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, builder::TypedValueParser};
 use std::ffi::OsString;
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
@@ -74,11 +74,21 @@ impl std::fmt::Debug for RuntimeParsedArgs {
 pub struct Args {
     // Ensure this is pub
     /// Target directory for symlinks
-    #[clap(short, long, value_parser, allow_hyphen_values = true)]
+    #[clap(
+        short,
+        long,
+        value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from),
+        allow_hyphen_values = true
+    )]
     pub target: Option<PathBuf>,
 
     /// Directory containing stow packages
-    #[clap(short, long, value_parser, allow_hyphen_values = true)]
+    #[clap(
+        short,
+        long,
+        value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from),
+        allow_hyphen_values = true
+    )]
     pub dir: Option<PathBuf>,
 
     /// Stow the specified packages (default action)
@@ -141,11 +151,7 @@ impl Args {
         T: Into<OsString> + Clone,
     {
         let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
-        if help_or_version_arg(&argv).is_some() {
-            return parse_args_from_argv(&argv);
-        }
-        let merged = merge_stowrc_args(&argv)?;
-        parse_args_from_argv(&merged.argv)
+        parse_args_from_argv(&argv)
     }
 
     pub fn parse_from<I, T>(itr: I) -> Self
@@ -188,7 +194,14 @@ impl Args {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        Ok(Self::try_parse_runtime_from_with_operation_groups(itr)?.parsed_args)
+        let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        let args = parse_args_from_argv(&argv)?;
+        let operation_groups = parse_operation_groups(&argv);
+
+        Ok(ParsedArgs {
+            args,
+            operation_groups,
+        })
     }
 
     #[doc(hidden)]
@@ -234,7 +247,6 @@ fn parse_args_from_argv(argv: &[OsString]) -> Result<Args, clap::Error> {
         return <Args as Parser>::try_parse_from([program, help_or_version]);
     }
 
-    validate_separate_option_values(argv)?;
     let verbose = parse_verbose_level(argv)?;
     let mut args = <Args as Parser>::try_parse_from(normalize_verbose_args(argv))?;
     args.verbose = verbose;
@@ -975,7 +987,7 @@ struct ExpandedEnvironmentValue {
 
 fn expand_environment_value(
     raw_value: &str,
-    option_name: ResourceValueOption,
+    _option_name: ResourceValueOption,
 ) -> Result<ExpandedEnvironmentValue, clap::Error> {
     let mut output = String::new();
     let mut display = String::new();
@@ -1024,8 +1036,7 @@ fn expand_environment_value(
                     }
                     continue;
                 }
-                let value = env::var(&variable)
-                    .map_err(|_| undefined_env_var_error(&variable, option_name))?;
+                let value = env::var(&variable).unwrap_or_default();
                 output.push_str(&value);
                 display.push_str(&format!("${{{}}}", variable));
                 changed_display = true;
@@ -1045,8 +1056,7 @@ fn expand_environment_value(
                         }
                     }
 
-                    let value = env::var(&variable)
-                        .map_err(|_| undefined_env_var_error(&variable, option_name))?;
+                    let value = env::var(&variable).unwrap_or_default();
                     output.push_str(&value);
                     display.push_str(&format!("${}", variable));
                     changed_display = true;
@@ -1164,17 +1174,6 @@ fn stowrc_missing_value_error(pending: &PendingResourceValue) -> clap::Error {
             pending.option_name.option_name(),
             pending.origin.path.display(),
             pending.origin.line
-        ),
-    )
-}
-
-fn undefined_env_var_error(variable: &str, option_name: ResourceValueOption) -> clap::Error {
-    clap::Error::raw(
-        clap::error::ErrorKind::InvalidValue,
-        format!(
-            "{} option references undefined environment variable ${}; aborting",
-            option_name.option_name(),
-            variable
         ),
     )
 }
@@ -1400,93 +1399,6 @@ fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
     }
 
     Ok(verbosity)
-}
-
-fn validate_separate_option_values(argv: &[OsString]) -> Result<(), clap::Error> {
-    let mut option_waiting_for_value: Option<String> = None;
-    let mut after_double_dash = false;
-    let mut current_mode = OperationMode::Stow;
-
-    for arg in argv.iter().skip(1) {
-        let arg = arg.to_string_lossy();
-
-        if after_double_dash {
-            break;
-        }
-
-        if let Some(option_name) = option_waiting_for_value.take() {
-            if is_reserved_flag_value(&arg) {
-                return Err(missing_value_before_flag_error(&option_name, &arg));
-            }
-            continue;
-        }
-
-        if arg == "--" {
-            after_double_dash = true;
-            continue;
-        }
-
-        if is_option_requiring_separate_value(&arg) {
-            option_waiting_for_value = Some(arg.into_owned());
-            continue;
-        }
-
-        if arg.starts_with('-')
-            && !arg.starts_with("--")
-            && arg.len() > 1
-            && short_option_cluster_consumes_value(&arg, &mut current_mode)
-            && short_option_cluster_needs_next_value(&arg)
-        {
-            option_waiting_for_value = Some(arg.into_owned());
-        }
-    }
-
-    Ok(())
-}
-
-fn is_reserved_flag_value(value: &str) -> bool {
-    matches!(
-        value,
-        "-S" | "-D"
-            | "-R"
-            | "-p"
-            | "-h"
-            | "-V"
-            | "-n"
-            | "-v"
-            | "--stow"
-            | "--delete"
-            | "--restow"
-            | "--help"
-            | "--version"
-            | "--compat"
-            | "--simulate"
-            | "--no"
-            | "--adopt"
-            | "--no-folding"
-            | "--dotfiles"
-            | "--verbose"
-    ) || value.starts_with("--verbose=")
-        || is_short_flag_cluster(value)
-}
-
-fn is_short_flag_cluster(value: &str) -> bool {
-    if !value.starts_with('-') || value.starts_with("--") || value.len() <= 1 {
-        return false;
-    }
-
-    value[1..]
-        .chars()
-        .all(|flag| matches!(flag, 'S' | 'D' | 'R' | 'p' | 'h' | 'V' | 'n' | 'v'))
-}
-
-fn missing_value_before_flag_error(option_name: &str, flag: &str) -> clap::Error {
-    clap::Error::raw(
-        clap::error::ErrorKind::InvalidValue,
-        format!(
-            "option '{option_name}' requires a value; '{flag}' is an operation/help/version flag. Use '{option_name}={flag}' to pass it as a literal value."
-        ),
-    )
 }
 
 fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
@@ -1783,6 +1695,33 @@ mod tests {
         path.to_path_buf()
     }
 
+    fn parse_runtime_args<I, T>(itr: I) -> Args
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Args::parse_runtime_from_with_operation_groups(itr)
+            .parsed_args
+            .args
+    }
+
+    fn try_parse_runtime_args<I, T>(itr: I) -> Result<Args, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Args::try_parse_runtime_from_with_operation_groups(itr)
+            .map(|parsed| parsed.parsed_args.args)
+    }
+
+    fn parse_runtime_with_operation_groups<I, T>(itr: I) -> ParsedArgs
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Args::parse_runtime_from_with_operation_groups(itr).parsed_args
+    }
+
     impl Drop for StowDirEnvGuard {
         fn drop(&mut self) {
             // Restore original value if it existed, otherwise ensure it's cleared
@@ -1906,56 +1845,68 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_flags_are_rejected_as_missing_separate_option_values() {
+    fn test_hyphen_prefixed_separate_option_values_are_preserved() {
         let _lock = process_env_lock();
-        let error = Args::try_parse_from(["rustow", "-d", "-D", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-d", "-D", "mypackage"]);
+        assert_eq!(args.dir, Some(PathBuf::from("-D")));
+        assert!(!args.delete);
 
-        let error =
-            Args::try_parse_from(["rustow", "--target", "--restow", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "--target", "--restow", "mypackage"]);
+        assert_eq!(args.target, Some(PathBuf::from("--restow")));
+        assert!(!args.restow);
 
-        let error = Args::try_parse_from(["rustow", "--ignore", "-S", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "--ignore", "-S", "mypackage"]);
+        assert_eq!(args.ignore_patterns, vec!["-S"]);
+        assert!(!args.stow);
 
-        let error = Args::try_parse_from(["rustow", "-d", "--simulate", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-d", "--simulate", "mypackage"]);
+        assert_eq!(args.dir, Some(PathBuf::from("--simulate")));
+        assert!(!args.simulate);
 
-        let error = Args::try_parse_from(["rustow", "-d", "-n", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-d", "-n", "mypackage"]);
+        assert_eq!(args.dir, Some(PathBuf::from("-n")));
+        assert!(!args.simulate);
 
-        let error =
-            Args::try_parse_from(["rustow", "--target", "--adopt", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "--target", "--adopt", "mypackage"]);
+        assert_eq!(args.target, Some(PathBuf::from("--adopt")));
+        assert!(!args.adopt);
 
-        let error = Args::try_parse_from(["rustow", "-d", "--verbose", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-d", "--verbose", "mypackage"]);
+        assert_eq!(args.dir, Some(PathBuf::from("--verbose")));
+        assert_eq!(args.verbose, 0);
 
-        let error =
-            Args::try_parse_from(["rustow", "--target", "--verbose", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "--target", "--verbose", "mypackage"]);
+        assert_eq!(args.target, Some(PathBuf::from("--verbose")));
+        assert_eq!(args.verbose, 0);
 
-        let error =
-            Args::try_parse_from(["rustow", "--defer", "--verbose", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "--defer", "--verbose", "mypackage"]);
+        assert_eq!(args.defer_conflicts, vec!["--verbose"]);
+        assert_eq!(args.verbose, 0);
 
-        let error = Args::try_parse_from(["rustow", "-Dt", "--verbose", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-Dt", "--verbose", "mypackage"]);
+        assert!(args.delete);
+        assert_eq!(args.target, Some(PathBuf::from("--verbose")));
+        assert_eq!(args.verbose, 0);
 
-        let error = Args::try_parse_from(["rustow", "-Dt", "--help", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-Dt", "--help", "mypackage"]);
+        assert!(args.delete);
+        assert_eq!(args.target, Some(PathBuf::from("--help")));
 
-        let error = Args::try_parse_from(["rustow", "-Sd", "-n", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-Sd", "-n", "mypackage"]);
+        assert!(args.stow);
+        assert_eq!(args.dir, Some(PathBuf::from("-n")));
+        assert!(!args.simulate);
 
-        let error = Args::try_parse_from(["rustow", "-Rt", "--simulate", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "-Rt", "--simulate", "mypackage"]);
+        assert!(args.restow);
+        assert_eq!(args.target, Some(PathBuf::from("--simulate")));
+        assert!(!args.simulate);
 
-        let error = Args::try_parse_from(["rustow", "--defer", "--help", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "--defer", "--help", "mypackage"]);
+        assert_eq!(args.defer_conflicts, vec!["--help"]);
 
-        let error = Args::try_parse_from(["rustow", "--override", "-V", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("requires a value"));
+        let args = Args::parse_from(["rustow", "--override", "-V", "mypackage"]);
+        assert_eq!(args.override_conflicts, vec!["-V"]);
     }
 
     #[test]
@@ -2437,13 +2388,18 @@ mod tests {
             "--dir=~/.stowrc_home_dir\n--ignore=home\n--target=~/home_target\n",
         );
 
-        let args = Args::parse_from(["rustow", "my-package"]);
+        let pure_args = Args::parse_from(["rustow", "my-package"]);
+        assert_eq!(pure_args.dir, None);
+        assert_eq!(pure_args.target, None);
+        assert!(pure_args.ignore_patterns.is_empty());
+
+        let args = parse_runtime_args(["rustow", "my-package"]);
         assert_eq!(args.dir, Some(PathBuf::from("/local")));
         assert_eq!(args.target, Some(PathBuf::from("/local_target")));
         assert_eq!(args.ignore_patterns, vec!["home", "local"]);
         assert_eq!(args.packages, vec!["my-package"]);
 
-        let args_override = Args::parse_from(["rustow", "--dir", "/cli-dir", "my-package"]);
+        let args_override = parse_runtime_args(["rustow", "--dir", "/cli-dir", "my-package"]);
         assert_eq!(args_override.dir, Some(PathBuf::from("/cli-dir")));
         drop(home_guard);
     }
@@ -2462,7 +2418,7 @@ mod tests {
             "--ignore=before\n--\n--dir=/after\n--target=/after\n--ignore=after\n",
         );
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, None);
         assert_eq!(args.target, None);
         assert_eq!(args.ignore_patterns, vec!["before"]);
@@ -2480,7 +2436,7 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "--target\n");
 
-        let error = Args::try_parse_from(["rustow", "pkg"]).unwrap_err();
+        let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2490,7 +2446,24 @@ mod tests {
     }
 
     #[test]
-    fn test_stowrc_undefined_env_in_final_path_errors() {
+    fn test_public_parse_from_ignores_stowrc_resource_files() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "--target\n--dir=/from-stowrc\n");
+
+        let args = Args::parse_from(["rustow", "pkg"]);
+        assert_eq!(args.dir, None);
+        assert_eq!(args.target, None);
+        assert_eq!(args.packages, vec!["pkg"]);
+    }
+
+    #[test]
+    fn test_stowrc_undefined_env_in_final_path_expands_to_empty() {
         let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
@@ -2503,16 +2476,12 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "--dir=$RUSTOW_UNDEFINED_STOWRC_VAR\n");
 
-        let error = Args::try_parse_from(["rustow", "pkg"]).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("undefined environment variable $RUSTOW_UNDEFINED_STOWRC_VAR")
-        );
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(PathBuf::from("")));
     }
 
     #[test]
-    fn test_stowrc_overridden_undefined_env_is_not_expanded() {
+    fn test_stowrc_lower_priority_undefined_env_does_not_override_later_path() {
         let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
@@ -2532,12 +2501,12 @@ mod tests {
         );
         write_file(&cwd.join(".stowrc"), "--dir=/local\n");
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, Some(PathBuf::from("/local")));
     }
 
     #[test]
-    fn test_stowrc_final_undefined_env_errors_even_when_cli_overrides() {
+    fn test_stowrc_final_undefined_env_allows_cli_override() {
         let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
@@ -2553,12 +2522,8 @@ mod tests {
             "--dir=$RUSTOW_CLI_OVERRIDE_UNDEFINED\n",
         );
 
-        let error = Args::try_parse_from(["rustow", "--dir", "/cli-dir", "pkg"]).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("undefined environment variable $RUSTOW_CLI_OVERRIDE_UNDEFINED")
-        );
+        let args = parse_runtime_args(["rustow", "--dir", "/cli-dir", "pkg"]);
+        assert_eq!(args.dir, Some(PathBuf::from("/cli-dir")));
     }
 
     #[test]
@@ -2579,7 +2544,7 @@ mod tests {
         write_file(&fallback_home.join(".stowrc"), "--dir=/from-logdir\n");
         write_file(&cwd.join(".stowrc"), "--target=/from-current\n");
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, None);
         assert_eq!(args.target, Some(PathBuf::from("/from-current")));
     }
@@ -2608,7 +2573,7 @@ mod tests {
         write_file(&stowrc, "--dir=/unreadable\n");
         fs::set_permissions(&stowrc, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, None);
 
         fs::set_permissions(&stowrc, fs::Permissions::from_mode(0o600)).unwrap();
@@ -2623,7 +2588,7 @@ mod tests {
         fs::create_dir_all(cwd.join(".stowrc")).unwrap();
         let _cwd_guard = CurrentDirGuard::set(&cwd);
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, None);
     }
 
@@ -2638,7 +2603,8 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "--target\n");
 
-        let error = Args::try_parse_from(["rustow", "--help"]).unwrap_err();
+        let error =
+            Args::try_parse_runtime_from_with_operation_groups(["rustow", "--help"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
@@ -2653,12 +2619,12 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "-D\npkg-from-rc\n--ignore=from-rc\n");
 
-        let args = Args::parse_from(["rustow", "cli-pkg"]);
+        let args = parse_runtime_args(["rustow", "cli-pkg"]);
         assert!(!args.delete);
         assert_eq!(args.ignore_patterns, vec!["from-rc"]);
         assert_eq!(args.packages, vec!["cli-pkg"]);
 
-        let grouped = Args::parse_from_with_operation_groups(["rustow", "cli-pkg"]);
+        let grouped = parse_runtime_with_operation_groups(["rustow", "cli-pkg"]);
         assert_eq!(
             grouped.operation_groups,
             vec![OperationGroup {
@@ -2687,7 +2653,7 @@ mod tests {
             "--dir=\"$HOME/.stowrc dir\"\n--target=$RUSTOW_TARGET_FROM_ENV\n",
         );
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(
             args.dir,
             Some(PathBuf::from(format!(
@@ -2704,7 +2670,7 @@ mod tests {
         );
 
         write_file(&cwd.join(".stowrc"), "--dir=\\\\$HOME/.stowrc_noparse\n");
-        let with_escaped_home = Args::parse_from(["rustow", "pkg"]);
+        let with_escaped_home = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(
             with_escaped_home.dir,
             Some(PathBuf::from("$HOME/.stowrc_noparse"))
@@ -2759,7 +2725,7 @@ mod tests {
             ),
         );
 
-        let args = Args::parse_from(["rustow", "quotedpkg"]);
+        let args = parse_runtime_args(["rustow", "quotedpkg"]);
         assert_eq!(args.dir, Some(stow_dir.clone()));
         assert_eq!(args.target, Some(target_dir));
     }
@@ -2888,7 +2854,7 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "--dir=\\$HOME/d\n--target=\\~/t\n");
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(
             args.dir,
             Some(PathBuf::from(format!("{}/d", home_dir.to_string_lossy())))
@@ -2913,13 +2879,13 @@ mod tests {
             "--dir=-D\n--target=--verbose\n--ignore=from-rc\n",
         );
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, Some(PathBuf::from("-D")));
         assert_eq!(args.target, Some(PathBuf::from("--verbose")));
         assert_eq!(args.ignore_patterns, vec!["from-rc"]);
 
         write_file(&cwd.join(".stowrc"), "-d-D\n-t--help\n");
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, Some(PathBuf::from("-D")));
         assert_eq!(args.target, Some(PathBuf::from("--help")));
     }
@@ -2938,7 +2904,7 @@ mod tests {
             "--dir\n-D\n--target\n--verbose\n--ignore\n--foo\n--defer\n--bar\n--override\n--baz\n",
         );
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, Some(PathBuf::from("-D")));
         assert_eq!(args.target, Some(PathBuf::from("--verbose")));
         assert_eq!(args.ignore_patterns, vec!["--foo"]);
@@ -2970,7 +2936,7 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "-d$HOME/d\n-t${HOME}/t\n");
 
-        let args = Args::parse_from(["rustow", "pkg"]);
+        let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(
             args.dir,
             Some(PathBuf::from(format!("{}/d", home_dir.to_string_lossy())))
