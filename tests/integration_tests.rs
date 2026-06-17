@@ -3971,6 +3971,31 @@ fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
 }
 
 #[test]
+fn test_binary_stowrc_relative_env_display_does_not_rewrite_diagnostic_copy() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=$RUSTOW_STOW_DIR\n").unwrap();
+
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        ("RUSTOW_STOW_DIR", "stow"),
+    ];
+
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
+    assert!(stderr.contains("Failed to canonicalize stow directory"));
+    assert!(stderr.contains("$RUSTOW_STOW_DIR"));
+    assert!(!stderr.contains("Failed to canonicalize $RUSTOW_STOW_DIR directory"));
+}
+
+#[test]
 fn test_binary_stowrc_tilde_expanded_path_is_redacted_in_config_error() {
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let home_dir = temp_dir.path().join("secret-home-from-tilde");

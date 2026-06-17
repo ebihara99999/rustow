@@ -353,7 +353,10 @@ impl RedactionTable {
             .iter()
             .filter_map(|override_path| {
                 let path = override_path.path.display().to_string();
-                if path.is_empty() || path == override_path.display {
+                if path.is_empty()
+                    || path == override_path.display
+                    || is_bare_relative_redaction_path(&override_path.path)
+                {
                     return None;
                 }
                 Some((path, override_path.display.clone()))
@@ -385,6 +388,10 @@ impl RedactionTable {
             PathBuf::from(redacted)
         }
     }
+}
+
+fn is_bare_relative_redaction_path(path: &Path) -> bool {
+    path.is_relative() && path.components().count() == 1
 }
 
 fn replace_path_occurrences(text: &str, needle: &str, replacement: &str) -> String {
@@ -575,6 +582,32 @@ mod tests {
         assert_eq!(
             replace_path_occurrences(text, "/tmp/secret", "$RUSTOW_SECRET"),
             "real: $RUSTOW_SECRET/file; unrelated: /backup/tmp/secret/file"
+        );
+    }
+
+    #[test]
+    fn test_redaction_table_ignores_bare_relative_paths() {
+        let redactions = RedactionTable::new(&[PathDisplayOverride::new(
+            PathBuf::from("stow"),
+            "$RUSTOW_STOW_DIR".to_string(),
+        )]);
+
+        assert_eq!(
+            redactions.redact("Failed to canonicalize stow directory '$RUSTOW_STOW_DIR'"),
+            "Failed to canonicalize stow directory '$RUSTOW_STOW_DIR'"
+        );
+    }
+
+    #[test]
+    fn test_redaction_table_keeps_relative_paths_with_separators() {
+        let redactions = RedactionTable::new(&[PathDisplayOverride::new(
+            PathBuf::from("secret/stow"),
+            "$RUSTOW_STOW_DIR".to_string(),
+        )]);
+
+        assert_eq!(
+            redactions.redact("Path secret/stow/pkg is hidden"),
+            "Path $RUSTOW_STOW_DIR/pkg is hidden"
         );
     }
 }

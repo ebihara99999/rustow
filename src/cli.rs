@@ -179,6 +179,11 @@ impl Args {
         Self::parse_runtime_from_with_operation_groups(std::env::args_os())
     }
 
+    /// Parses only the supplied argv and reconstructs operation groups.
+    ///
+    /// This public parser intentionally does not read `.stowrc`; the binary
+    /// uses the hidden runtime parser so resource-file diagnostics can carry
+    /// redacted display metadata.
     pub fn parse_from_with_operation_groups<I, T>(itr: I) -> ParsedArgs
     where
         I: IntoIterator<Item = T>,
@@ -2694,6 +2699,29 @@ mod tests {
         assert_eq!(args.dir, None);
         assert_eq!(args.target, None);
         assert_eq!(args.packages, vec!["pkg"]);
+    }
+
+    #[test]
+    fn test_public_parse_from_with_operation_groups_ignores_stowrc_resource_files() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "--target\n--dir=/from-stowrc\n");
+
+        let parsed = Args::parse_from_with_operation_groups(["rustow", "--delete", "pkg"]);
+        assert_eq!(parsed.args.dir, None);
+        assert_eq!(parsed.args.target, None);
+        assert_eq!(
+            parsed.operation_groups,
+            vec![OperationGroup {
+                mode: OperationMode::Delete,
+                packages: vec!["pkg".to_string()],
+            }]
+        );
     }
 
     #[test]
