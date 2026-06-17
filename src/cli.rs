@@ -31,11 +31,41 @@ pub struct ParsedArgs {
     pub operation_groups: Vec<OperationGroup>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 #[doc(hidden)]
 pub struct PathDisplayOverride {
-    path: PathBuf,
-    display: String,
+    pub(crate) path: PathBuf,
+    pub(crate) display: String,
+}
+
+impl PathDisplayOverride {
+    pub(crate) fn new(path: PathBuf, display: String) -> Self {
+        Self { path, display }
+    }
+}
+
+impl std::fmt::Debug for PathDisplayOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PathDisplayOverride")
+            .field("display", &self.display)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct RuntimeParsedArgs {
+    pub parsed_args: ParsedArgs,
+    pub(crate) path_displays: Vec<PathDisplayOverride>,
+}
+
+impl std::fmt::Debug for RuntimeParsedArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeParsedArgs")
+            .field("operation_groups", &self.parsed_args.operation_groups)
+            .field("path_displays", &self.path_displays)
+            .finish()
+    }
 }
 
 /// Rustow: A Rust implementation of GNU Stow
@@ -102,10 +132,6 @@ pub struct Args {
     /// Packages to process
     #[clap(value_parser, required = true, num_args = 1..)]
     pub packages: Vec<String>,
-
-    #[clap(skip)]
-    #[doc(hidden)]
-    pub path_displays: Vec<PathDisplayOverride>,
 }
 
 impl Args {
@@ -119,9 +145,7 @@ impl Args {
             return parse_args_from_argv(&argv);
         }
         let merged = merge_stowrc_args(&argv)?;
-        let mut args = parse_args_from_argv(&merged.argv)?;
-        args.path_displays = effective_path_displays(merged.path_displays, &argv);
-        Ok(args)
+        parse_args_from_argv(&merged.argv)
     }
 
     pub fn parse_from<I, T>(itr: I) -> Self
@@ -137,6 +161,11 @@ impl Args {
         Self::parse_from_with_operation_groups(std::env::args_os())
     }
 
+    #[doc(hidden)]
+    pub fn parse_runtime_with_operation_groups() -> RuntimeParsedArgs {
+        Self::parse_runtime_from_with_operation_groups(std::env::args_os())
+    }
+
     pub fn parse_from_with_operation_groups<I, T>(itr: I) -> ParsedArgs
     where
         I: IntoIterator<Item = T>,
@@ -145,7 +174,27 @@ impl Args {
         Self::try_parse_from_with_operation_groups(itr).unwrap_or_else(|err| err.exit())
     }
 
+    #[doc(hidden)]
+    pub fn parse_runtime_from_with_operation_groups<I, T>(itr: I) -> RuntimeParsedArgs
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Self::try_parse_runtime_from_with_operation_groups(itr).unwrap_or_else(|err| err.exit())
+    }
+
     pub fn try_parse_from_with_operation_groups<I, T>(itr: I) -> Result<ParsedArgs, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Ok(Self::try_parse_runtime_from_with_operation_groups(itr)?.parsed_args)
+    }
+
+    #[doc(hidden)]
+    pub fn try_parse_runtime_from_with_operation_groups<I, T>(
+        itr: I,
+    ) -> Result<RuntimeParsedArgs, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
@@ -153,19 +202,25 @@ impl Args {
         let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
         if help_or_version_arg(&argv).is_some() {
             let args = parse_args_from_argv(&argv)?;
-            return Ok(ParsedArgs {
-                args,
-                operation_groups: Vec::new(),
+            return Ok(RuntimeParsedArgs {
+                parsed_args: ParsedArgs {
+                    args,
+                    operation_groups: Vec::new(),
+                },
+                path_displays: Vec::new(),
             });
         }
         let merged = merge_stowrc_args(&argv)?;
-        let mut args = parse_args_from_argv(&merged.argv)?;
-        args.path_displays = effective_path_displays(merged.path_displays, &argv);
+        let args = parse_args_from_argv(&merged.argv)?;
+        let path_displays = effective_path_displays(merged.path_displays, &argv);
         let operation_groups = parse_operation_groups(&argv);
 
-        Ok(ParsedArgs {
-            args,
-            operation_groups,
+        Ok(RuntimeParsedArgs {
+            parsed_args: ParsedArgs {
+                args,
+                operation_groups,
+            },
+            path_displays,
         })
     }
 }
@@ -232,6 +287,42 @@ pub(crate) fn path_display(path: &Path, overrides: &[PathDisplayOverride]) -> St
         .find(|override_path| override_path.path == path)
         .map(|override_path| override_path.display.clone())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+#[allow(dead_code)]
+pub(crate) fn path_display_with_prefix(path: &Path, overrides: &[PathDisplayOverride]) -> String {
+    overrides
+        .iter()
+        .filter_map(|override_path| {
+            if override_path.path == path {
+                return Some((
+                    override_path.path.as_os_str().len(),
+                    override_path.display.clone(),
+                ));
+            }
+            let suffix = path.strip_prefix(&override_path.path).ok()?;
+            Some((
+                override_path.path.as_os_str().len(),
+                join_display_path(&override_path.display, suffix),
+            ))
+        })
+        .max_by_key(|(prefix_len, _)| *prefix_len)
+        .map(|(_, display)| display)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+#[allow(dead_code)]
+fn join_display_path(prefix: &str, suffix: &Path) -> String {
+    if suffix.as_os_str().is_empty() {
+        return prefix.to_string();
+    }
+
+    let suffix = suffix.display();
+    if prefix.ends_with(std::path::MAIN_SEPARATOR) {
+        format!("{prefix}{suffix}")
+    } else {
+        format!("{prefix}{}{suffix}", std::path::MAIN_SEPARATOR)
+    }
 }
 
 fn effective_path_displays(
@@ -2619,6 +2710,31 @@ mod tests {
             Some(PathBuf::from("$HOME/.stowrc_noparse"))
         );
         drop(home_guard);
+    }
+
+    #[test]
+    fn test_runtime_args_debug_redacts_env_expanded_path_values() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let cwd = temp_dir.path().join("cwd");
+        let secret_dir = temp_dir.path().join("secret-value-from-env");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let _home_guard = EnvVarGuard::new("HOME", home_dir.to_str().unwrap());
+        let _secret_guard =
+            EnvVarGuard::new("RUSTOW_SECRET_STOW_DIR", secret_dir.to_str().unwrap());
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+        write_file(
+            &cwd.join(".stowrc"),
+            "--dir=$RUSTOW_SECRET_STOW_DIR/missing\n",
+        );
+
+        let parsed = Args::parse_runtime_from_with_operation_groups(["rustow", "pkg"]);
+        let debug = format!("{:?}", parsed);
+        assert!(!debug.contains("secret-value-from-env"));
+        assert!(debug.contains("$RUSTOW_SECRET_STOW_DIR/missing"));
     }
 
     #[test]

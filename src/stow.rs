@@ -2985,14 +2985,38 @@ pub fn validate_package_for_operation(
     stow_dir: &Path,
     package_name: &str,
 ) -> Result<(), RustowError> {
-    validated_package_path(stow_dir, package_name).map(|_| ())
+    validate_package_for_operation_with_display(stow_dir, package_name, None, None)
+}
+
+pub fn validate_package_for_operation_with_display(
+    stow_dir: &Path,
+    package_name: &str,
+    package_path_display: Option<&str>,
+    stow_dir_display: Option<&str>,
+) -> Result<(), RustowError> {
+    validated_package_path_with_display(
+        stow_dir,
+        package_name,
+        package_path_display,
+        stow_dir_display,
+    )
+    .map(|_| ())
 }
 
 fn validated_package_path(stow_dir: &Path, package_name: &str) -> Result<PathBuf, RustowError> {
+    validated_package_path_with_display(stow_dir, package_name, None, None)
+}
+
+fn validated_package_path_with_display(
+    stow_dir: &Path,
+    package_name: &str,
+    package_path_display: Option<&str>,
+    stow_dir_display: Option<&str>,
+) -> Result<PathBuf, RustowError> {
     validate_relative_package_name(package_name)?;
 
     let package_path = stow_dir.join(package_name);
-    validate_package_path(&package_path, package_name)?;
+    validate_package_path(&package_path, package_name, package_path_display)?;
 
     let canonical_package_path = fs_utils::canonicalize_path(&package_path)?;
     let canonical_stow_dir = fs_utils::canonicalize_path(stow_dir)?;
@@ -3009,7 +3033,9 @@ fn validated_package_path(stow_dir: &Path, package_name: &str) -> Result<PathBuf
         return Err(StowError::InvalidPackageStructure(format!(
             "Package '{}' resolves outside stow directory '{}'",
             package_name,
-            canonical_stow_dir.display()
+            stow_dir_display
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| canonical_stow_dir.display().to_string())
         ))
         .into());
     }
@@ -3077,15 +3103,22 @@ fn target_action_reports_have_blocking_status(reports: &[TargetActionReport]) ->
 }
 
 /// Validate that the package path exists and is a directory
-fn validate_package_path(package_path: &Path, package_name: &str) -> Result<(), RustowError> {
+fn validate_package_path(
+    package_path: &Path,
+    package_name: &str,
+    package_path_display: Option<&str>,
+) -> Result<(), RustowError> {
     if !fs_utils::path_exists(package_path) {
         return Err(StowError::PackageNotFound(package_name.to_string()).into());
     }
 
     if !fs_utils::is_directory(package_path) {
         return Err(StowError::InvalidPackageStructure(format!(
-            "Package '{}' is not a directory at {:?}",
-            package_name, package_path
+            "Package '{}' is not a directory at {}",
+            package_name,
+            package_path_display
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{:?}", package_path))
         ))
         .into());
     }

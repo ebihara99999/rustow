@@ -1,4 +1,4 @@
-use crate::cli::Args;
+use crate::cli::{Args, PathDisplayOverride};
 use crate::error::{ConfigError, FsError, Result as RustowResult, RustowError};
 use crate::fs_utils; // Import fs_utils
 use regex::Regex;
@@ -39,8 +39,14 @@ pub struct Config {
 
 impl Config {
     pub fn from_args(args: Args) -> RustowResult<Self> {
-        let path_displays = args.path_displays.clone();
+        let mut path_displays = Vec::new();
+        Self::from_args_with_path_displays(args, &mut path_displays)
+    }
 
+    pub(crate) fn from_args_with_path_displays(
+        args: Args,
+        path_displays: &mut Vec<PathDisplayOverride>,
+    ) -> RustowResult<Self> {
         // 1. Determine StowMode
         let mode: StowMode = if args.delete {
             StowMode::Delete
@@ -63,28 +69,30 @@ impl Config {
                 })?,
             },
         };
+        let stow_dir_display = crate::cli::path_display(&stow_dir_path_unresolved, path_displays);
         let stow_dir: PathBuf =
             fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| match e {
                 RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidStowDir(format!(
                         "Failed to canonicalize stow directory '{}': {}",
-                        crate::cli::path_display(&stow_dir_path_unresolved, &path_displays),
-                        source
+                        stow_dir_display, source
                     )))
                 },
                 RustowError::Fs(fs_error) => {
                     RustowError::Config(ConfigError::InvalidStowDir(format!(
                         "Failed to canonicalize stow directory '{}': {}",
-                        crate::cli::path_display(&stow_dir_path_unresolved, &path_displays),
-                        fs_error
+                        stow_dir_display, fs_error
                     )))
                 },
                 _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
                     "An unexpected error occurred while canonicalizing stow directory '{}': {}",
-                    crate::cli::path_display(&stow_dir_path_unresolved, &path_displays),
-                    e
+                    stow_dir_display, e
                 ))),
             })?;
+        path_displays.push(PathDisplayOverride::new(
+            stow_dir.clone(),
+            stow_dir_display.clone(),
+        ));
 
         // 3. Resolve target_dir
         let target_dir_path_unresolved: PathBuf = match args.target {
@@ -95,28 +103,31 @@ impl Config {
                 ))
             })?.to_path_buf(),
         };
+        let target_dir_display =
+            crate::cli::path_display(&target_dir_path_unresolved, path_displays);
         let target_dir: PathBuf = fs_utils::canonicalize_path(&target_dir_path_unresolved)
             .map_err(|e| match e {
                 RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidTargetDir(format!(
                         "Failed to canonicalize target directory '{}': {}",
-                        crate::cli::path_display(&target_dir_path_unresolved, &path_displays),
-                        source
+                        target_dir_display, source
                     )))
                 },
                 RustowError::Fs(fs_error) => {
                     RustowError::Config(ConfigError::InvalidTargetDir(format!(
                         "Failed to canonicalize target directory '{}': {}",
-                        crate::cli::path_display(&target_dir_path_unresolved, &path_displays),
-                        fs_error
+                        target_dir_display, fs_error
                     )))
                 },
                 _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
                     "An unexpected error occurred while canonicalizing target directory '{}': {}",
-                    crate::cli::path_display(&target_dir_path_unresolved, &path_displays),
-                    e
+                    target_dir_display, e
                 ))),
             })?;
+        path_displays.push(PathDisplayOverride::new(
+            target_dir.clone(),
+            target_dir_display,
+        ));
 
         let home_dir: PathBuf = dirs::home_dir().ok_or_else(|| {
             RustowError::Config(ConfigError::InvalidStowDir(
@@ -431,16 +442,19 @@ mod tests {
             env::set_var("RUSTOW_SECRET_CONFIG_PATH", secret_root.to_str().unwrap());
         }
 
-        let first_args = {
+        let first_parsed = {
             let _cwd_guard = CurrentDirGuard::set(&cwd);
-            Args::parse_from(["rustow", "pkg"])
+            Args::parse_runtime_from_with_operation_groups(["rustow", "pkg"])
         };
         {
             let _cwd_guard = CurrentDirGuard::set(&second_cwd);
-            let _second_args = Args::parse_from(["rustow", "other-pkg"]);
+            let _second_args =
+                Args::parse_runtime_from_with_operation_groups(["rustow", "other-pkg"]);
         }
 
-        let config_result = Config::from_args(first_args);
+        let mut path_displays = first_parsed.path_displays;
+        let config_result =
+            Config::from_args_with_path_displays(first_parsed.parsed_args.args, &mut path_displays);
         assert!(config_result.is_err());
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
@@ -472,8 +486,15 @@ mod tests {
         }
         let _cwd_guard = CurrentDirGuard::set(&cwd);
 
-        let args = Args::parse_from(["rustow", "--dir", missing_stow.to_str().unwrap(), "pkg"]);
-        let config_result = Config::from_args(args);
+        let parsed = Args::parse_runtime_from_with_operation_groups([
+            "rustow",
+            "--dir",
+            missing_stow.to_str().unwrap(),
+            "pkg",
+        ]);
+        let mut path_displays = parsed.path_displays;
+        let config_result =
+            Config::from_args_with_path_displays(parsed.parsed_args.args, &mut path_displays);
         assert!(config_result.is_err());
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidStowDir(msg)) => {

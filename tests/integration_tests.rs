@@ -1,8 +1,9 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::MutexGuard;
 
 use rustow::cli::Args;
 use rustow::config::{Config, StowMode};
@@ -13,7 +14,76 @@ use rustow::stow::{
 use tempfile::{TempDir, tempdir};
 
 lazy_static::lazy_static! {
-// ... existing code ...
+    static ref PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
+struct IsolatedParserEnv {
+    _lock: MutexGuard<'static, ()>,
+    _temp_dir: TempDir,
+    original_cwd: PathBuf,
+    original_home: Option<OsString>,
+    original_stow_dir: Option<OsString>,
+}
+
+impl IsolatedParserEnv {
+    fn new() -> Self {
+        let lock = PROCESS_ENV_LOCK.lock().expect("process env lock poisoned");
+        let temp_dir = tempdir().expect("Failed to create isolated parser temp dir");
+        let home_dir = temp_dir.path().join("home");
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&home_dir).expect("Failed to create isolated parser HOME");
+        fs::create_dir_all(&cwd).expect("Failed to create isolated parser cwd");
+        let original_cwd = std::env::current_dir().expect("current dir should be obtainable");
+        let original_home = std::env::var_os("HOME");
+        let original_stow_dir = std::env::var_os("STOW_DIR");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+            std::env::remove_var("STOW_DIR");
+        }
+        std::env::set_current_dir(&cwd).expect("failed to switch parser cwd");
+
+        Self {
+            _lock: lock,
+            _temp_dir: temp_dir,
+            original_cwd,
+            original_home,
+            original_stow_dir,
+        }
+    }
+}
+
+impl Drop for IsolatedParserEnv {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.original_cwd).expect("failed to restore parser cwd");
+        unsafe {
+            match &self.original_home {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.original_stow_dir {
+                Some(stow_dir) => std::env::set_var("STOW_DIR", stow_dir),
+                None => std::env::remove_var("STOW_DIR"),
+            }
+        }
+    }
+}
+
+fn parse_args_isolated<I, T>(itr: I) -> Args
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let _guard = IsolatedParserEnv::new();
+    Args::parse_from(itr)
+}
+
+fn parse_from_with_operation_groups_isolated<I, T>(itr: I) -> rustow::cli::ParsedArgs
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let _guard = IsolatedParserEnv::new();
+    Args::parse_from_with_operation_groups(itr)
 }
 
 // Helper function to set up a test environment with stow and target directories
@@ -1349,7 +1419,6 @@ fn test_config_integration_verbosity_and_simulate() {
         override_conflicts: vec![],
         defer_conflicts: vec![],
         ignore_patterns: vec![],
-        path_displays: Vec::new(),
     };
 
     let config_result: Result<Config, rustow::error::RustowError> = Config::from_args(args);
@@ -2594,7 +2663,7 @@ fn test_mixed_restow_prunes_obsolete_nested_symlink_when_package_subtree_is_remo
     ));
     fs::remove_dir_all(package_dir.join("config")).unwrap();
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "--no-folding".to_string(),
         "-p".to_string(),
@@ -2701,7 +2770,7 @@ fn test_mixed_restow_preserves_ignored_obsolete_nested_symlink() {
     ));
     fs::remove_dir_all(package_dir.join("config")).unwrap();
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "--no-folding".to_string(),
         "--ignore".to_string(),
@@ -2827,7 +2896,6 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
-        path_displays: Vec::new(),
     };
 
     let stow_config = Config::from_args(stow_args).unwrap();
@@ -2849,7 +2917,6 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
-        path_displays: Vec::new(),
     });
     assert!(
         stow_result.is_ok(),
@@ -2878,7 +2945,6 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
-        path_displays: Vec::new(),
     });
     assert!(
         delete_result.is_ok(),
@@ -2907,7 +2973,6 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
-        path_displays: Vec::new(),
     });
     assert!(
         restow_result.is_ok(),
@@ -2940,7 +3005,7 @@ fn test_cli_mixed_delete_and_stow_operations() {
     stow_packages(&old_config).unwrap();
     assert!(target_dir.join("bin/old_tool").exists());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -2984,7 +3049,7 @@ fn test_public_run_rejects_ambiguous_mixed_args_without_mutation() {
     );
     stow_packages(&old_config).unwrap();
 
-    let args = Args::parse_from([
+    let args = parse_args_isolated([
         "rustow",
         "-d",
         stow_dir.to_str().unwrap(),
@@ -3026,7 +3091,7 @@ fn test_public_run_with_empty_operation_groups_rejects_ambiguous_mixed_args_with
     );
     stow_packages(&old_config).unwrap();
 
-    let args = Args::parse_from([
+    let args = parse_args_isolated([
         "rustow",
         "-d",
         stow_dir.to_str().unwrap(),
@@ -3071,7 +3136,7 @@ fn test_cli_mixed_same_package_stow_and_delete_leaves_package_stowed() {
     fs::remove_file(package_dir.join("bin/old")).unwrap();
     fs::write(package_dir.join("bin/new"), "new").unwrap();
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "--no-folding".to_string(),
         "-d".to_string(),
@@ -3116,7 +3181,7 @@ fn test_cli_mixed_duplicate_stow_groups_are_idempotent() {
     stow_packages(&old_config).unwrap();
     assert!(target_dir.join("share/old").exists());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -3353,7 +3418,7 @@ fn test_cli_mixed_stow_then_delete_replaces_overlapping_target() {
     stow_packages(&old_config).unwrap();
     assert!(target_dir.join("bin/tool").exists());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -3401,7 +3466,7 @@ fn test_cli_mixed_stow_conflict_prevents_prior_delete() {
     fs::write(target_dir.join("etc/app.conf"), "unmanaged").unwrap();
     assert!(target_dir.join("bin/old_tool").exists());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -3507,7 +3572,6 @@ fn test_cli_restow_conflict_preserves_existing_symlinks() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -3540,7 +3604,7 @@ fn test_cli_mixed_delete_open_directory_then_stow_file_replacement() {
     assert!(target_dir.join("bin/tool").exists());
     assert!(target_dir.join("bin").is_dir());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -3947,6 +4011,37 @@ fn test_binary_direct_cli_config_error_keeps_literal_path() {
 }
 
 #[test]
+fn test_binary_stowrc_env_expanded_package_validation_error_is_redacted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let secret_stow_dir = temp_dir.path().join("secret-value-from-env");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&secret_stow_dir).unwrap();
+    fs::write(secret_stow_dir.join("pkg"), "not a directory").unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=$RUSTOW_SECRET_STOW_DIR\n").unwrap();
+
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        (
+            "RUSTOW_SECRET_STOW_DIR",
+            secret_stow_dir
+                .to_str()
+                .expect("stow dir should be valid utf-8"),
+        ),
+    ];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_STOW_DIR/pkg"));
+}
+
+#[test]
 fn test_binary_stowrc_expansion_and_quote_handling() {
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let home_dir = temp_dir.path().join("home");
@@ -4038,7 +4133,7 @@ fn test_cli_mixed_repeated_mode_switches_are_accepted() {
     assert!(target_dir.join("bin/oldpkg_tool").exists());
     assert!(target_dir.join("bin/olderpkg_tool").exists());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4082,7 +4177,7 @@ fn test_cli_mixed_operations_preflight_missing_package_before_delete() {
     stow_packages(&old_config).unwrap();
     assert!(target_dir.join("bin/old_tool").exists());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4124,7 +4219,7 @@ fn test_cli_clustered_target_option_value_is_not_treated_as_package() {
     stow_packages(&old_config).unwrap();
     assert!(target_dir.join("bin/old_tool").exists());
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4154,7 +4249,7 @@ fn test_cli_double_dash_allows_dash_prefixed_package_names() {
     fs::create_dir_all(package_dir.join("bin")).unwrap();
     fs::write(package_dir.join("bin/dash_tool"), "dash").unwrap();
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4199,7 +4294,6 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
-        path_displays: Vec::new(),
     });
     assert!(
         stow_result.is_ok(),
@@ -4228,7 +4322,6 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
-        path_displays: Vec::new(),
     });
     assert!(
         repeat_stow_result.is_ok(),
@@ -4252,7 +4345,6 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
-        path_displays: Vec::new(),
     });
     assert!(
         restow_result.is_ok(),
@@ -4280,7 +4372,6 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     assert!(
@@ -4313,7 +4404,7 @@ fn test_cli_mixed_delete_real_package_and_stow_alias_package() {
         PathBuf::from("../stow_dir/realpkg/bin")
     );
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4418,7 +4509,7 @@ fn test_mixed_restow_does_not_refold_directory_with_ignored_descendants() {
     config.ignore_patterns = vec![regex::Regex::new("secret").unwrap()];
     stow_packages(&config).unwrap();
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "--ignore".to_string(),
         "secret".to_string(),
@@ -4581,7 +4672,7 @@ fn test_mixed_operations_preserve_unrelated_foldable_open_directory() {
     );
     stow_packages(&old_config).unwrap();
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4636,7 +4727,7 @@ fn test_mixed_refold_preserves_alias_package_path() {
     assert!(target_dir.join("bin").is_dir());
     assert!(!rustow::fs_utils::is_symlink(&target_dir.join("bin")));
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4697,7 +4788,7 @@ fn test_mixed_refold_rejects_package_alias_resolving_outside_stow_dir() {
     assert!(rustow::fs_utils::is_symlink(&target_bin.join("tool")));
     assert!(rustow::fs_utils::is_symlink(&target_bin.join("old_tool")));
 
-    let parsed_args = Args::parse_from_with_operation_groups(vec![
+    let parsed_args = parse_from_with_operation_groups_isolated(vec![
         "rustow".to_string(),
         "-d".to_string(),
         stow_dir.to_string_lossy().into_owned(),
@@ -4743,7 +4834,6 @@ fn test_stow_rejects_symlinked_target_ancestor_without_external_mutation() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -4778,7 +4868,6 @@ fn test_adopt_rejects_symlinked_target_ancestor_without_external_mutation() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -4878,7 +4967,6 @@ fn test_adopt_package_symlink_alias_uses_canonical_destination_and_preserves_ali
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     assert!(result.is_ok(), "alias adopt failed: {:?}", result.err());
@@ -4954,7 +5042,6 @@ fn test_adopt_directory_refuses_symlinked_destination_child_directory() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -5316,7 +5403,6 @@ fn test_adopt_option_with_existing_file() {
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     // Should succeed
@@ -5389,7 +5475,6 @@ fn test_adopt_option_with_existing_directory() {
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     // Should succeed
@@ -5469,7 +5554,6 @@ fn test_adopt_option_simulation_mode() {
         simulate: true,
         verbose: 1,
         packages: vec!["testpkg".to_string()],
-        path_displays: Vec::new(),
     });
 
     // Should succeed

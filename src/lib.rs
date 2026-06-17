@@ -8,11 +8,14 @@ pub mod stow;
 #[cfg(test)]
 mod test_sync;
 
-use crate::cli::{Args, OperationGroup, OperationMode, ParsedArgs};
+use crate::cli::{
+    Args, OperationGroup, OperationMode, ParsedArgs, PathDisplayOverride, RuntimeParsedArgs,
+};
 use crate::config::{Config, PackageOperation, StowMode};
 use crate::error::{ConfigError, RustowError, StowError};
 use crate::stow::{
-    delete_packages, mixed_packages, restow_packages, stow_packages, validate_package_for_operation,
+    delete_packages, mixed_packages, restow_packages, stow_packages,
+    validate_package_for_operation_with_display,
 };
 use std::path::{Component, Path};
 
@@ -23,7 +26,20 @@ pub fn run(args: Args) -> Result<(), RustowError> {
 }
 
 pub fn run_parsed(parsed_args: ParsedArgs) -> Result<(), RustowError> {
-    run_with_operation_groups(parsed_args.args, parsed_args.operation_groups)
+    run_with_operation_groups_and_path_displays(
+        parsed_args.args,
+        parsed_args.operation_groups,
+        Vec::new(),
+    )
+}
+
+#[doc(hidden)]
+pub fn run_runtime_parsed(parsed_args: RuntimeParsedArgs) -> Result<(), RustowError> {
+    run_with_operation_groups_and_path_displays(
+        parsed_args.parsed_args.args,
+        parsed_args.parsed_args.operation_groups,
+        parsed_args.path_displays,
+    )
 }
 
 /// Runs rustow with operation groups reconstructed from CLI argument order.
@@ -31,17 +47,25 @@ pub fn run_with_operation_groups(
     args: Args,
     operation_groups: Vec<OperationGroup>,
 ) -> Result<(), RustowError> {
+    run_with_operation_groups_and_path_displays(args, operation_groups, Vec::new())
+}
+
+fn run_with_operation_groups_and_path_displays(
+    args: Args,
+    operation_groups: Vec<OperationGroup>,
+    mut path_displays: Vec<PathDisplayOverride>,
+) -> Result<(), RustowError> {
     // eprintln!("stderr: Successfully parsed args in lib::run: {:?}", args.clone());
     if operation_groups.is_empty() {
         reject_ambiguous_mixed_args(&args)?;
     }
 
-    match Config::from_args(args) {
+    match Config::from_args_with_path_displays(args, &mut path_displays) {
         Ok(config) => {
             // eprintln!("stderr: Successfully constructed config in lib::run: {:?}", config);
 
             let package_operations = package_operations_for_config(&config, operation_groups);
-            preflight_package_operations(&config, &package_operations)?;
+            preflight_package_operations(&config, &package_operations, &path_displays)?;
             let reports = execute_config_operations(&config, &package_operations)?;
 
             // Process reports for logging/output
@@ -124,11 +148,22 @@ fn package_operations_for_config(
 fn preflight_package_operations(
     config: &Config,
     operations: &[PackageOperation],
+    path_displays: &[PathDisplayOverride],
 ) -> Result<(), RustowError> {
     for operation in operations {
         for package_name in &operation.packages {
             validate_package_name(package_name)?;
-            validate_package_for_operation(&config.stow_dir, package_name)?;
+            let package_path = config.stow_dir.join(package_name);
+            let package_path_display =
+                crate::cli::path_display_with_prefix(&package_path, path_displays);
+            let stow_dir_display =
+                crate::cli::path_display_with_prefix(&config.stow_dir, path_displays);
+            validate_package_for_operation_with_display(
+                &config.stow_dir,
+                package_name,
+                Some(&package_path_display),
+                Some(&stow_dir_display),
+            )?;
         }
     }
 
