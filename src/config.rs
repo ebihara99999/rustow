@@ -178,8 +178,8 @@ mod tests {
         Args::parse_from(["rustow", package_name])
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::test_sync::global_process_env_lock()
+    fn env_lock() -> crate::test_sync::IsolatedProcessEnv {
+        crate::test_sync::IsolatedProcessEnv::new()
     }
 
     #[test]

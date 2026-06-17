@@ -89,8 +89,17 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let temp_dir = tempdir().expect("Failed to create isolated rustow run temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).expect("Failed to create isolated rustow HOME");
+    fs::create_dir_all(&cwd).expect("Failed to create isolated rustow cwd");
+
     Command::new(env!("CARGO_BIN_EXE_rustow"))
         .args(args)
+        .current_dir(cwd)
+        .env("HOME", home_dir)
+        .env_remove("STOW_DIR")
         .output()
         .expect("Failed to run rustow binary")
 }
@@ -103,6 +112,7 @@ where
     Command::new(env!("CARGO_BIN_EXE_rustow"))
         .args(args)
         .current_dir(cwd)
+        .env_remove("STOW_DIR")
         .envs(envs.iter().copied())
         .output()
         .expect("Failed to run rustow binary")
@@ -3736,20 +3746,20 @@ fn test_binary_stowrc_options_from_current_and_home_are_prepared() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        target_home.join("bin").exists(),
-        "home stowrc should be applied after local"
+        target_local.join("bin").exists(),
+        "current-dir stowrc should override home stowrc"
     );
     assert!(
-        !target_local.join("bin").exists(),
-        "home stowrc should override local target"
+        !target_home.join("bin").exists(),
+        "home stowrc should not override current-dir stowrc"
     );
 
     let output_with_cli_override = run_rustow_with(
         [
             "-d",
-            stow_local.to_string_lossy().as_ref(),
+            stow_home.to_string_lossy().as_ref(),
             "-t",
-            target_local.to_string_lossy().as_ref(),
+            target_home.to_string_lossy().as_ref(),
             "pkg",
         ],
         &cwd,
@@ -3762,9 +3772,50 @@ fn test_binary_stowrc_options_from_current_and_home_are_prepared() {
         String::from_utf8_lossy(&output_with_cli_override.stderr)
     );
     assert!(
-        target_local.join("bin").exists(),
+        target_home.join("bin").exists(),
         "cli flags should override resource files"
     );
+}
+
+#[test]
+fn test_binary_stowrc_rejects_missing_value_without_consuming_cli_package() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(cwd.join(".stowrc"), "--target\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("resource file option '--target' requires a value")
+    );
+}
+
+#[test]
+fn test_binary_help_ignores_malformed_stowrc() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(cwd.join(".stowrc"), "--target\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    let output = run_rustow_with(["--help"], &cwd, &envs);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
 }
 
 #[test]

@@ -97,6 +97,9 @@ impl Args {
         T: Into<OsString> + Clone,
     {
         let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        if help_or_version_arg(&argv).is_some() {
+            return parse_args_from_argv(&argv);
+        }
         let merged = merge_stowrc_args(&argv)?;
         parse_args_from_argv(&merged)
     }
@@ -128,6 +131,13 @@ impl Args {
         T: Into<OsString> + Clone,
     {
         let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        if help_or_version_arg(&argv).is_some() {
+            let args = parse_args_from_argv(&argv)?;
+            return Ok(ParsedArgs {
+                args,
+                operation_groups: Vec::new(),
+            });
+        }
         let merged = merge_stowrc_args(&argv)?;
         let args = parse_args_from_argv(&merged)?;
         let operation_groups = parse_operation_groups(&argv);
@@ -162,19 +172,19 @@ fn merge_stowrc_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
     }
 
     let mut stowrc_args = Vec::new();
-    if let Ok(current_dir) = env::current_dir() {
-        let local_path = current_dir.join(".stowrc");
-        let local_entries = read_stowrc_file(&local_path)?;
-        stowrc_args.extend(local_entries);
-    }
-
     if let Some(home_dir) = dirs::home_dir() {
         let home_path = home_dir.join(".stowrc");
         let home_entries = read_stowrc_file(&home_path)?;
         stowrc_args.extend(home_entries);
     }
 
-    let merged_resource_args = normalize_stowrc_tokens(stowrc_args)?;
+    if let Ok(current_dir) = env::current_dir() {
+        let local_path = current_dir.join(".stowrc");
+        let local_entries = read_stowrc_file(&local_path)?;
+        stowrc_args.extend(local_entries);
+    }
+
+    let merged_resource_args = normalize_stowrc_tokens(stowrc_args, argv)?;
 
     merged_argv.push(argv[0].clone());
     merged_argv.extend(merged_resource_args);
@@ -195,14 +205,20 @@ fn read_stowrc_file(path: &Path) -> Result<Vec<String>, clap::Error> {
     };
 
     let mut tokens = Vec::new();
-    for line in contents.lines() {
-        tokens.extend(tokenize_stowrc_line(line));
+    for (index, line) in contents.lines().enumerate() {
+        let line_tokens = tokenize_stowrc_line(line).map_err(|err| {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                format!("{} in '{}:{}'", err, path.display(), index + 1),
+            )
+        })?;
+        tokens.extend(line_tokens);
     }
 
     Ok(tokens)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResourceValueOption {
     Dir,
     Target,
@@ -215,16 +231,51 @@ impl ResourceValueOption {
     fn is_path_option(self) -> bool {
         matches!(self, Self::Dir | Self::Target)
     }
+
+    fn option_name(self) -> &'static str {
+        match self {
+            Self::Dir => "--dir",
+            Self::Target => "--target",
+            Self::Ignore => "--ignore",
+            Self::Defer => "--defer",
+            Self::Override => "--override",
+        }
+    }
 }
 
-fn normalize_stowrc_tokens(raw_tokens: Vec<String>) -> Result<Vec<OsString>, clap::Error> {
+#[derive(Debug, Clone, Copy)]
+struct ResourcePathValue {
+    index: usize,
+    option_name: ResourceValueOption,
+}
+
+#[derive(Debug)]
+struct ParsedResourceOption {
+    tokens: Vec<OsString>,
+    expecting_value: Option<ResourceValueOption>,
+    path_value: Option<(usize, ResourceValueOption)>,
+}
+
+fn normalize_stowrc_tokens(
+    raw_tokens: Vec<String>,
+    cli_argv: &[OsString],
+) -> Result<Vec<OsString>, clap::Error> {
     let mut normalized = Vec::new();
     let mut expecting_value: Option<ResourceValueOption> = None;
+    let mut path_values = Vec::new();
+    let mut after_double_dash = false;
 
     for token in raw_tokens {
         if let Some(option_name) = expecting_value {
+            if looks_like_stowrc_option(&token) {
+                return Err(stowrc_missing_value_error(option_name));
+            }
             if option_name.is_path_option() {
-                normalized.push(expand_path_value(&token).into());
+                path_values.push(ResourcePathValue {
+                    index: normalized.len(),
+                    option_name,
+                });
+                normalized.push(OsString::from(token));
             } else {
                 normalized.push(OsString::from(token));
             }
@@ -232,8 +283,13 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<String>) -> Result<Vec<OsString>, cla
             continue;
         }
 
+        if after_double_dash {
+            continue;
+        }
+
         if token == "--" {
             // Packages are ignored in resource files.
+            after_double_dash = true;
             continue;
         }
 
@@ -243,12 +299,17 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<String>) -> Result<Vec<OsString>, cla
         }
 
         if token.starts_with("--") {
-            if let Some((emit_token, expecting)) = parse_long_stowrc_option(&token) {
-                if let Some(option_name) = expecting {
-                    normalized.push(emit_token);
+            if let Some(parsed) = parse_long_stowrc_option(&token) {
+                let base_index = normalized.len();
+                normalized.extend(parsed.tokens);
+                if let Some((relative_index, option_name)) = parsed.path_value {
+                    path_values.push(ResourcePathValue {
+                        index: base_index + relative_index,
+                        option_name,
+                    });
+                }
+                if let Some(option_name) = parsed.expecting_value {
                     expecting_value = Some(option_name);
-                } else {
-                    normalized.push(emit_token);
                 }
             }
 
@@ -256,17 +317,30 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<String>) -> Result<Vec<OsString>, cla
         }
 
         if token.len() > 1 {
-            if let Some((emit_tokens, expecting)) = parse_short_stowrc_option(&token) {
-                normalized.extend(emit_tokens);
-                expecting_value = expecting;
+            if let Some(parsed) = parse_short_stowrc_option(&token) {
+                let base_index = normalized.len();
+                normalized.extend(parsed.tokens);
+                if let Some((relative_index, option_name)) = parsed.path_value {
+                    path_values.push(ResourcePathValue {
+                        index: base_index + relative_index,
+                        option_name,
+                    });
+                }
+                expecting_value = parsed.expecting_value;
             }
         }
     }
 
+    if let Some(option_name) = expecting_value {
+        return Err(stowrc_missing_value_error(option_name));
+    }
+
+    expand_final_resource_path_values(&mut normalized, &path_values, cli_argv)?;
+
     Ok(normalized)
 }
 
-fn parse_long_stowrc_option(token: &str) -> Option<(OsString, Option<ResourceValueOption>)> {
+fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
     let token = token.trim();
     let long_token = token.trim_start_matches("--");
     if long_token.is_empty() {
@@ -280,26 +354,47 @@ fn parse_long_stowrc_option(token: &str) -> Option<(OsString, Option<ResourceVal
     if let Some((key, value)) = long_token.split_once('=') {
         if let Some(option_name) = map_long_value_option(key) {
             if option_name.is_path_option() {
-                return Some((
-                    OsString::from(format!("--{}={}", key, expand_path_value(value))),
-                    None,
-                ));
+                return Some(ParsedResourceOption {
+                    tokens: vec![OsString::from(format!("--{}", key)), OsString::from(value)],
+                    expecting_value: None,
+                    path_value: Some((1, option_name)),
+                });
             }
-            return Some((OsString::from(token), None));
+            return Some(ParsedResourceOption {
+                tokens: vec![OsString::from(token)],
+                expecting_value: None,
+                path_value: None,
+            });
         }
 
-        return Some((OsString::from(token), None));
+        return Some(ParsedResourceOption {
+            tokens: vec![OsString::from(token)],
+            expecting_value: None,
+            path_value: None,
+        });
     }
 
     if let Some(option_name) = map_long_value_option(long_token) {
-        return Some((OsString::from(token), Some(option_name)));
+        return Some(ParsedResourceOption {
+            tokens: vec![OsString::from(token)],
+            expecting_value: Some(option_name),
+            path_value: None,
+        });
     }
 
     if map_long_bool_option(long_token) {
-        return Some((OsString::from(token), None));
+        return Some(ParsedResourceOption {
+            tokens: vec![OsString::from(token)],
+            expecting_value: None,
+            path_value: None,
+        });
     }
 
-    Some((OsString::from(token), None))
+    Some(ParsedResourceOption {
+        tokens: vec![OsString::from(token)],
+        expecting_value: None,
+        path_value: None,
+    })
 }
 
 fn map_long_bool_option(token: &str) -> bool {
@@ -328,7 +423,7 @@ fn map_long_value_option(token: &str) -> Option<ResourceValueOption> {
     }
 }
 
-fn parse_short_stowrc_option(token: &str) -> Option<(Vec<OsString>, Option<ResourceValueOption>)> {
+fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
     let chars: Vec<char> = token.chars().skip(1).collect();
     if chars.is_empty() {
         return None;
@@ -352,15 +447,20 @@ fn parse_short_stowrc_option(token: &str) -> Option<(Vec<OsString>, Option<Resou
                 let token_remainder = chars.iter().skip(i + 1).collect::<String>();
                 if token_remainder.is_empty() {
                     if bool_flags.is_empty() {
-                        return Some((vec![format!("-{}", chars[i]).into()], Some(option_name)));
+                        return Some(ParsedResourceOption {
+                            tokens: vec![format!("-{}", chars[i]).into()],
+                            expecting_value: Some(option_name),
+                            path_value: None,
+                        });
                     }
-                    return Some((
-                        vec![
+                    return Some(ParsedResourceOption {
+                        tokens: vec![
                             format!("-{}{}", bool_flags.iter().collect::<String>(), chars[i])
                                 .into(),
                         ],
-                        Some(option_name),
-                    ));
+                        expecting_value: Some(option_name),
+                        path_value: None,
+                    });
                 }
 
                 let prefix = if bool_flags.is_empty() {
@@ -368,37 +468,45 @@ fn parse_short_stowrc_option(token: &str) -> Option<(Vec<OsString>, Option<Resou
                 } else {
                     format!("-{}{}", bool_flags.iter().collect::<String>(), chars[i])
                 };
-                return Some((
-                    vec![OsString::from(format!(
-                        "{}{}",
-                        prefix,
-                        expand_path_value(&token_remainder)
-                    ))],
-                    None,
-                ));
+                return Some(ParsedResourceOption {
+                    tokens: vec![OsString::from(prefix), token_remainder.into()],
+                    expecting_value: None,
+                    path_value: Some((1, option_name)),
+                });
             },
             'p' | 'v' | 'h' | 'V' | 'n' => {
                 bool_flags.push(chars[i]);
                 i += 1;
             },
             other if other.is_ascii_alphabetic() => {
-                return Some((vec![OsString::from(token)], None));
+                return Some(ParsedResourceOption {
+                    tokens: vec![OsString::from(token)],
+                    expecting_value: None,
+                    path_value: None,
+                });
             },
-            _ => return Some((vec![OsString::from(token)], None)),
+            _ => {
+                return Some(ParsedResourceOption {
+                    tokens: vec![OsString::from(token)],
+                    expecting_value: None,
+                    path_value: None,
+                });
+            },
         }
     }
 
     if bool_flags.is_empty() {
         None
     } else {
-        Some((
-            vec![format!("-{}", bool_flags.iter().collect::<String>()).into()],
-            None,
-        ))
+        Some(ParsedResourceOption {
+            tokens: vec![format!("-{}", bool_flags.iter().collect::<String>()).into()],
+            expecting_value: None,
+            path_value: None,
+        })
     }
 }
 
-fn tokenize_stowrc_line(line: &str) -> Vec<String> {
+fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut in_single_quote = false;
@@ -406,10 +514,6 @@ fn tokenize_stowrc_line(line: &str) -> Vec<String> {
     let mut chars = line.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if ch == '#' && !in_single_quote && !in_double_quote {
-            break;
-        }
-
         if ch == '\\' && !in_single_quote {
             if let Some(next) = chars.next() {
                 if next.is_whitespace() {
@@ -455,10 +559,21 @@ fn tokenize_stowrc_line(line: &str) -> Vec<String> {
         tokens.push(token);
     }
 
-    tokens
+    if in_single_quote {
+        return Err("unterminated single quote in resource file".to_string());
+    }
+
+    if in_double_quote {
+        return Err("unterminated double quote in resource file".to_string());
+    }
+
+    Ok(tokens)
 }
 
-fn expand_path_value(raw_value: &str) -> String {
+fn expand_path_value(
+    raw_value: &str,
+    option_name: ResourceValueOption,
+) -> Result<String, clap::Error> {
     let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(""));
     let mut output = String::new();
     let mut chars = raw_value.chars().peekable();
@@ -481,7 +596,29 @@ fn expand_path_value(raw_value: &str) -> String {
         }
 
         if ch == '~' && is_start && !home_dir.as_os_str().is_empty() {
-            output.push_str(&home_dir.to_string_lossy());
+            let mut user = String::new();
+            while let Some(next) = chars.peek().copied() {
+                if next == '/' {
+                    break;
+                }
+                user.push(next);
+                chars.next();
+            }
+
+            if user.is_empty() {
+                output.push_str(&home_dir.to_string_lossy());
+            } else if let Some(user_home) = home_dir_for_user(&user) {
+                output.push_str(&user_home.to_string_lossy());
+            } else {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::InvalidValue,
+                    format!(
+                        "{} option references unknown user '~{}'; aborting",
+                        option_name.option_name(),
+                        user
+                    ),
+                ));
+            }
             is_start = false;
             continue;
         }
@@ -496,9 +633,9 @@ fn expand_path_value(raw_value: &str) -> String {
                     }
                     variable.push(next);
                 }
-                if let Ok(value) = env::var(&variable) {
-                    output.push_str(&value);
-                }
+                let value = env::var(&variable)
+                    .map_err(|_| undefined_env_var_error(&variable, option_name))?;
+                output.push_str(&value);
                 is_start = false;
                 continue;
             }
@@ -516,9 +653,9 @@ fn expand_path_value(raw_value: &str) -> String {
                         }
                     }
 
-                    if let Ok(value) = env::var(&variable) {
-                        output.push_str(&value);
-                    }
+                    let value = env::var(&variable)
+                        .map_err(|_| undefined_env_var_error(&variable, option_name))?;
+                    output.push_str(&value);
                     is_start = false;
                     continue;
                 }
@@ -533,7 +670,162 @@ fn expand_path_value(raw_value: &str) -> String {
         is_start = false;
     }
 
-    output
+    Ok(output)
+}
+
+fn expand_final_resource_path_values(
+    normalized: &mut [OsString],
+    path_values: &[ResourcePathValue],
+    cli_argv: &[OsString],
+) -> Result<(), clap::Error> {
+    let final_dir_index = final_resource_path_value_index(path_values, ResourceValueOption::Dir);
+    let final_target_index =
+        final_resource_path_value_index(path_values, ResourceValueOption::Target);
+    let cli_overrides_dir = cli_overrides_path_option(cli_argv, ResourceValueOption::Dir);
+    let cli_overrides_target = cli_overrides_path_option(cli_argv, ResourceValueOption::Target);
+
+    for path_value in path_values {
+        let should_expand = match path_value.option_name {
+            ResourceValueOption::Dir => {
+                !cli_overrides_dir && Some(path_value.index) == final_dir_index
+            },
+            ResourceValueOption::Target => {
+                !cli_overrides_target && Some(path_value.index) == final_target_index
+            },
+            _ => false,
+        };
+
+        if should_expand {
+            let raw_value = normalized[path_value.index].to_string_lossy();
+            normalized[path_value.index] =
+                expand_path_value(&raw_value, path_value.option_name)?.into();
+        }
+    }
+
+    Ok(())
+}
+
+fn final_resource_path_value_index(
+    path_values: &[ResourcePathValue],
+    option_name: ResourceValueOption,
+) -> Option<usize> {
+    path_values
+        .iter()
+        .rev()
+        .find(|value| value.option_name == option_name)
+        .map(|value| value.index)
+}
+
+fn cli_overrides_path_option(argv: &[OsString], option_name: ResourceValueOption) -> bool {
+    let mut expecting_option_value = false;
+    let mut after_double_dash = false;
+    let short_flag = match option_name {
+        ResourceValueOption::Dir => 'd',
+        ResourceValueOption::Target => 't',
+        _ => return false,
+    };
+    let long_flag = option_name.option_name();
+
+    for arg in argv.iter().skip(1) {
+        let arg = arg.to_string_lossy();
+
+        if after_double_dash {
+            continue;
+        }
+
+        if expecting_option_value {
+            expecting_option_value = false;
+            continue;
+        }
+
+        if arg == "--" {
+            after_double_dash = true;
+            continue;
+        }
+
+        if arg == long_flag || arg.starts_with(&format!("{}=", long_flag)) {
+            return true;
+        }
+
+        if arg == format!("-{}", short_flag) {
+            return true;
+        }
+
+        if is_option_requiring_separate_value(&arg) {
+            expecting_option_value = true;
+            continue;
+        }
+
+        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
+            for flag in arg[1..].chars() {
+                if flag == short_flag {
+                    return true;
+                }
+
+                if short_cluster_stops_value_parsing(flag) {
+                    break;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn looks_like_stowrc_option(token: &str) -> bool {
+    if token == "--" || !token.starts_with('-') || token == "-" {
+        return false;
+    }
+
+    if let Some(long_token) = token.strip_prefix("--") {
+        let key = long_token
+            .split_once('=')
+            .map_or(long_token, |(key, _)| key);
+        return matches!(key, "stow" | "delete" | "restow")
+            || map_long_value_option(key).is_some()
+            || map_long_bool_option(key);
+    }
+
+    token[1..].chars().all(|flag| {
+        matches!(
+            flag,
+            'S' | 'D' | 'R' | 't' | 'd' | 'p' | 'v' | 'h' | 'V' | 'n'
+        )
+    })
+}
+
+fn stowrc_missing_value_error(option_name: ResourceValueOption) -> clap::Error {
+    clap::Error::raw(
+        clap::error::ErrorKind::InvalidValue,
+        format!(
+            "resource file option '{}' requires a value",
+            option_name.option_name()
+        ),
+    )
+}
+
+fn undefined_env_var_error(variable: &str, option_name: ResourceValueOption) -> clap::Error {
+    clap::Error::raw(
+        clap::error::ErrorKind::InvalidValue,
+        format!(
+            "{} option references undefined environment variable ${}; aborting",
+            option_name.option_name(),
+            variable
+        ),
+    )
+}
+
+fn home_dir_for_user(user: &str) -> Option<PathBuf> {
+    let passwd = fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        if name != user {
+            return None;
+        }
+
+        fields.nth(4).map(PathBuf::from)
+    })
 }
 
 fn is_valid_var_start(ch: char) -> bool {
@@ -964,8 +1256,8 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
-    fn process_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::test_sync::global_process_env_lock()
+    fn process_env_lock() -> crate::test_sync::IsolatedProcessEnv {
+        crate::test_sync::IsolatedProcessEnv::new()
     }
 
     // Helper function to ensure STOW_DIR is cleared before and after tests that use it.
@@ -1058,6 +1350,7 @@ mod tests {
 
     #[test]
     fn test_basic_stow_command() {
+        let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new(); // Ensure STOW_DIR is clear
         let args = Args::parse_from(["rustow", "mypackage"]);
         assert_eq!(args.packages, vec!["mypackage"]);
@@ -1073,6 +1366,7 @@ mod tests {
 
     #[test]
     fn test_delete_option() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-D", "mypackage"]);
         assert!(args.delete);
         assert!(!args.stow);
@@ -1081,6 +1375,7 @@ mod tests {
 
     #[test]
     fn test_restow_option() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-R", "mypackage"]);
         assert!(args.restow);
         assert!(!args.stow);
@@ -1089,6 +1384,7 @@ mod tests {
 
     #[test]
     fn test_target_and_dir_options() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "-t",
@@ -1104,6 +1400,7 @@ mod tests {
 
     #[test]
     fn test_verbose_option() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-vvv", "mypackage"]);
         assert_eq!(args.verbose, 3);
         let args_single_v = Args::parse_from(["rustow", "-v", "mypackage"]);
@@ -1120,6 +1417,7 @@ mod tests {
 
     #[test]
     fn test_verbose_option_cluster_with_compat_before() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-pv", "mypackage"]);
 
         assert!(args.compat);
@@ -1129,6 +1427,7 @@ mod tests {
 
     #[test]
     fn test_verbose_option_cluster_with_compat_after() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-vp", "mypackage"]);
 
         assert!(args.compat);
@@ -1137,6 +1436,7 @@ mod tests {
 
     #[test]
     fn test_verbose_numeric_out_of_range_reports_range() {
+        let _lock = process_env_lock();
         let error = Args::try_parse_from(["rustow", "--verbose=6", "mypackage"]).unwrap_err();
 
         assert!(error.to_string().contains("between 0 and 5"));
@@ -1144,6 +1444,7 @@ mod tests {
 
     #[test]
     fn test_hyphen_prefixed_option_values_are_preserved() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "--dir=--verbose=0",
@@ -1161,6 +1462,7 @@ mod tests {
 
     #[test]
     fn test_operation_flags_are_rejected_as_missing_separate_option_values() {
+        let _lock = process_env_lock();
         let error = Args::try_parse_from(["rustow", "-d", "-D", "mypackage"]).unwrap_err();
         assert!(error.to_string().contains("requires a value"));
 
@@ -1213,6 +1515,7 @@ mod tests {
 
     #[test]
     fn test_reserved_flags_can_be_passed_as_explicit_hyphen_values() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "--dir=-D",
@@ -1229,6 +1532,7 @@ mod tests {
 
     #[test]
     fn test_hyphen_prefixed_option_values_for_all_pattern_lists() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "--ignore=--help",
@@ -1247,6 +1551,7 @@ mod tests {
 
     #[test]
     fn test_help_takes_precedence_over_invalid_verbose() {
+        let _lock = process_env_lock();
         let error = Args::try_parse_from(["rustow", "--help", "--verbose=6"]).unwrap_err();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
@@ -1254,6 +1559,7 @@ mod tests {
 
     #[test]
     fn test_help_takes_precedence_after_packages() {
+        let _lock = process_env_lock();
         let error = Args::try_parse_from(["rustow", "mypackage", "--help"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
 
@@ -1266,6 +1572,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_from_with_operation_groups_returns_parse_errors() {
+        let _lock = process_env_lock();
         let error =
             Args::try_parse_from_with_operation_groups(["rustow", "--verbose=6", "mypackage"])
                 .unwrap_err();
@@ -1275,6 +1582,7 @@ mod tests {
 
     #[test]
     fn test_verbose_numeric_option_sets_level_in_argument_order() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-v", "--verbose=0", "mypackage"]);
         assert_eq!(args.verbose, 0);
 
@@ -1287,6 +1595,7 @@ mod tests {
 
     #[test]
     fn test_verbose_numeric_option_after_double_dash_is_package() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "--", "--verbose=0"]);
         assert_eq!(args.verbose, 0);
         assert_eq!(args.packages, vec!["--verbose=0"]);
@@ -1294,12 +1603,14 @@ mod tests {
 
     #[test]
     fn test_multiple_packages() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "pkg1", "pkg2", "pkg3"]);
         assert_eq!(args.packages, vec!["pkg1", "pkg2", "pkg3"]);
     }
 
     #[test]
     fn test_simulate_option() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-n", "mypackage"]);
         assert!(args.simulate);
         let args_long = Args::parse_from(["rustow", "--simulate", "mypackage"]);
@@ -1310,6 +1621,7 @@ mod tests {
 
     #[test]
     fn test_override_defer_options() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "--override=foo",
@@ -1323,6 +1635,7 @@ mod tests {
 
     #[test]
     fn test_all_boolean_flags() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "--adopt",
@@ -1339,6 +1652,7 @@ mod tests {
 
     #[test]
     fn test_compat_option_is_parsed() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "--compat", "mypackage"]);
         assert!(args.compat);
 
@@ -1392,6 +1706,7 @@ mod tests {
 
     #[test]
     fn test_stow_option_short() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-S", "mypackage"]);
         assert!(args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
@@ -1399,6 +1714,7 @@ mod tests {
 
     #[test]
     fn test_stow_option_long() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "--stow", "mypackage"]);
         assert!(args.stow);
         assert_eq!(args.packages, vec!["mypackage"]);
@@ -1406,6 +1722,7 @@ mod tests {
 
     #[test]
     fn test_ignore_option_single() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "--ignore=\\.git", "mypackage"]);
         assert_eq!(args.ignore_patterns, vec!["\\.git"]);
         assert_eq!(args.packages, vec!["mypackage"]);
@@ -1413,6 +1730,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_mixed_modes() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups([
             "rustow", "-D", "old", "-S", "new", "--restow", "refresh",
         ]);
@@ -1438,6 +1756,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_defaults_to_stow_until_mode_changes() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups([
             "rustow", "base", "-D", "old1", "old2", "-S", "new1", "new2",
         ]);
@@ -1463,6 +1782,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_treats_args_after_double_dash_as_packages() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups(["rustow", "--", "-D", "old"]);
 
         assert_eq!(
@@ -1476,6 +1796,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_keeps_current_mode_after_double_dash() {
+        let _lock = process_env_lock();
         let parsed_args =
             Args::parse_from_with_operation_groups(["rustow", "-D", "old", "--", "-S", "new"]);
 
@@ -1490,6 +1811,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_skips_clustered_short_option_values() {
+        let _lock = process_env_lock();
         let parsed_args =
             Args::parse_from_with_operation_groups(["rustow", "-Dt", "/tmp/target", "old"]);
 
@@ -1504,6 +1826,7 @@ mod tests {
 
     #[test]
     fn test_short_cluster_with_value_flag_stops_verbosity_counting() {
+        let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-tv", "mypackage"]);
         assert_eq!(args.target, Some(PathBuf::from("v")));
         assert_eq!(args.verbose, 0);
@@ -1512,6 +1835,7 @@ mod tests {
 
     #[test]
     fn test_short_cluster_mode_value_attached_to_target() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups(["rustow", "-Dt/tmp/stow", "pkg"]);
 
         assert_eq!(
@@ -1526,6 +1850,7 @@ mod tests {
 
     #[test]
     fn test_short_cluster_mode_before_dir_value() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups(["rustow", "-Sd/tmp/stow", "pkg"]);
 
         assert_eq!(
@@ -1540,6 +1865,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_skips_attached_short_option_values() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups([
             "rustow",
             "-Dtdir",
@@ -1565,6 +1891,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_allows_repeated_modes_after_switching() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups([
             "rustow", "-D", "old", "-S", "new", "-D", "older",
         ]);
@@ -1590,6 +1917,7 @@ mod tests {
 
     #[test]
     fn test_parse_operation_groups_allows_repeated_long_modes_after_switching() {
+        let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups([
             "rustow", "--delete", "old", "--stow", "new", "--delete", "older",
         ]);
@@ -1615,6 +1943,7 @@ mod tests {
 
     #[test]
     fn test_ignore_option_multiple() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "--ignore=\\.git",
@@ -1628,6 +1957,7 @@ mod tests {
 
     #[test]
     fn test_stow_with_ignore_combination() {
+        let _lock = process_env_lock();
         let args = Args::parse_from([
             "rustow",
             "-S",
@@ -1663,26 +1993,116 @@ mod tests {
         );
 
         let args = Args::parse_from(["rustow", "my-package"]);
-        assert_eq!(
-            args.dir,
-            Some(PathBuf::from(format!(
-                "{}/.stowrc_home_dir",
-                home_dir.to_string_lossy()
-            )))
-        );
-        assert_eq!(
-            args.target,
-            Some(PathBuf::from(format!(
-                "{}/home_target",
-                home_dir.to_string_lossy()
-            )))
-        );
-        assert_eq!(args.ignore_patterns, vec!["local", "home"]);
+        assert_eq!(args.dir, Some(PathBuf::from("/local")));
+        assert_eq!(args.target, Some(PathBuf::from("/local_target")));
+        assert_eq!(args.ignore_patterns, vec!["home", "local"]);
         assert_eq!(args.packages, vec!["my-package"]);
 
         let args_override = Args::parse_from(["rustow", "--dir", "/cli-dir", "my-package"]);
         assert_eq!(args_override.dir, Some(PathBuf::from("/cli-dir")));
         drop(home_guard);
+    }
+
+    #[test]
+    fn test_stowrc_double_dash_ignores_following_options() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(
+            &cwd.join(".stowrc"),
+            "--ignore=before\n--\n--dir=/after\n--target=/after\n--ignore=after\n",
+        );
+
+        let args = Args::parse_from(["rustow", "pkg"]);
+        assert_eq!(args.dir, None);
+        assert_eq!(args.target, None);
+        assert_eq!(args.ignore_patterns, vec!["before"]);
+        assert_eq!(args.packages, vec!["pkg"]);
+    }
+
+    #[test]
+    fn test_stowrc_missing_value_does_not_consume_cli_package() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "--target\n");
+
+        let error = Args::try_parse_from(["rustow", "pkg"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("resource file option '--target' requires a value")
+        );
+    }
+
+    #[test]
+    fn test_stowrc_undefined_env_in_final_path_errors() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+        unsafe {
+            std::env::remove_var("RUSTOW_UNDEFINED_STOWRC_VAR");
+        }
+
+        write_file(&cwd.join(".stowrc"), "--dir=$RUSTOW_UNDEFINED_STOWRC_VAR\n");
+
+        let error = Args::try_parse_from(["rustow", "pkg"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("undefined environment variable $RUSTOW_UNDEFINED_STOWRC_VAR")
+        );
+    }
+
+    #[test]
+    fn test_stowrc_overridden_undefined_env_is_not_expanded() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let _home_guard = EnvVarGuard::new("HOME", home_dir.to_str().unwrap());
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+        unsafe {
+            std::env::remove_var("RUSTOW_LOW_PRIORITY_UNDEFINED");
+        }
+
+        write_file(
+            &home_dir.join(".stowrc"),
+            "--dir=$RUSTOW_LOW_PRIORITY_UNDEFINED\n",
+        );
+        write_file(&cwd.join(".stowrc"), "--dir=/local\n");
+
+        let args = Args::parse_from(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(PathBuf::from("/local")));
+    }
+
+    #[test]
+    fn test_cli_help_ignores_malformed_stowrc() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "--target\n");
+
+        let error = Args::try_parse_from(["rustow", "--help"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
     #[test]
@@ -1783,17 +2203,33 @@ mod tests {
 
     #[test]
     fn test_stowrc_tokenization_handles_quotes_and_comments() {
+        let _lock = process_env_lock();
         assert_eq!(
-            tokenize_stowrc_line(r#"--ignore='one # two' "three four" # comment"#),
-            vec!["--ignore=one # two".to_string(), "three four".to_string()]
+            tokenize_stowrc_line(r#"--ignore='one # two' "three four" # comment"#).unwrap(),
+            vec![
+                "--ignore=one # two".to_string(),
+                "three four".to_string(),
+                "#".to_string(),
+                "comment".to_string()
+            ]
         );
     }
 
     #[test]
     fn test_stowrc_tokenization_supports_escaped_hash_character() {
+        let _lock = process_env_lock();
         assert_eq!(
-            tokenize_stowrc_line(r#"--ignore=a\#b"#),
+            tokenize_stowrc_line(r#"--ignore=a\#b"#).unwrap(),
             vec!["--ignore=a#b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_stowrc_tokenization_preserves_embedded_hash_character() {
+        let _lock = process_env_lock();
+        assert_eq!(
+            tokenize_stowrc_line(r#"--ignore=.*#.*"#).unwrap(),
+            vec!["--ignore=.*#.*".to_string()]
         );
     }
 
@@ -1803,11 +2239,15 @@ mod tests {
         let _home_guard = EnvVarGuard::new("HOME_STOW", "/home/example");
 
         assert_eq!(
-            expand_path_value(r"$HOME_STOW/.stowrc"),
+            expand_path_value(r"$HOME_STOW/.stowrc", ResourceValueOption::Dir).unwrap(),
             "/home/example/.stowrc".to_string()
         );
         assert_eq!(
-            expand_path_value(r"${HOME_STOW}/nested/${HOME_STOW}"),
+            expand_path_value(
+                r"${HOME_STOW}/nested/${HOME_STOW}",
+                ResourceValueOption::Target
+            )
+            .unwrap(),
             "/home/example/nested//home/example".to_string()
         );
     }
@@ -1818,15 +2258,15 @@ mod tests {
         let _home_guard = EnvVarGuard::new("HOME_STOW", "/home/example");
 
         assert_eq!(
-            expand_path_value(r"\$HOME_STOW/keep-this"),
+            expand_path_value(r"\$HOME_STOW/keep-this", ResourceValueOption::Dir).unwrap(),
             "$HOME_STOW/keep-this".to_string()
         );
         assert_eq!(
-            expand_path_value(r"\~/.keep-this"),
+            expand_path_value(r"\~/.keep-this", ResourceValueOption::Dir).unwrap(),
             "~/.keep-this".to_string()
         );
         assert_eq!(
-            expand_path_value(r"\${HOME_STOW}/path"),
+            expand_path_value(r"\${HOME_STOW}/path", ResourceValueOption::Dir).unwrap(),
             "${HOME_STOW}/path".to_string()
         );
     }
