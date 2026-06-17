@@ -36,11 +36,13 @@ pub fn run_parsed(parsed_args: ParsedArgs) -> Result<(), RustowError> {
 #[doc(hidden)]
 pub fn run_runtime_parsed(parsed_args: RuntimeParsedArgs) -> Result<(), RustowError> {
     let (parsed_args, path_displays) = parsed_args.into_parts();
+    let error_displays = path_displays.clone();
     run_with_operation_groups_and_path_displays(
         parsed_args.args,
         parsed_args.operation_groups,
         path_displays,
     )
+    .map_err(|error| redact_runtime_error(error, &error_displays))
 }
 
 /// Runs rustow with operation groups reconstructed from CLI argument order.
@@ -263,6 +265,8 @@ fn process_reports(
     config: &Config,
     path_displays: &[PathDisplayOverride],
 ) {
+    let redactions = RedactionTable::new(path_displays);
+
     if reports.is_empty() {
         if config.verbosity > 0 {
             eprintln!("No actions to perform.");
@@ -275,26 +279,26 @@ fn process_reports(
             crate::stow::TargetActionReportStatus::Success => {
                 if config.verbosity > 1 || config.simulate {
                     if let Some(message) = &report.message {
-                        eprintln!("{}", redact_report_text(message, path_displays));
+                        eprintln!("{}", redactions.redact(message));
                     }
                 }
             },
             crate::stow::TargetActionReportStatus::Skipped => {
                 if config.verbosity > 0 || config.simulate {
                     if let Some(message) = &report.message {
-                        eprintln!("{}", redact_report_text(message, path_displays));
+                        eprintln!("{}", redactions.redact(message));
                     }
                 }
             },
             crate::stow::TargetActionReportStatus::ConflictPrevented => {
                 if let Some(message) = &report.message {
-                    eprintln!("{}", redact_report_text(message, path_displays));
+                    eprintln!("{}", redactions.redact(message));
                 }
             },
             crate::stow::TargetActionReportStatus::Failure(error) => {
-                eprintln!("ERROR: {}", redact_report_text(error, path_displays));
+                eprintln!("ERROR: {}", redactions.redact(error));
                 if let Some(message) = &report.message {
-                    eprintln!("Details: {}", redact_report_text(message, path_displays));
+                    eprintln!("Details: {}", redactions.redact(message));
                 }
             },
         }
@@ -331,22 +335,48 @@ fn process_reports(
     }
 }
 
-fn redact_report_text(text: &str, path_displays: &[PathDisplayOverride]) -> String {
-    let mut replacements: Vec<(String, String)> = path_displays
-        .iter()
-        .filter_map(|override_path| {
-            let path = override_path.path.display().to_string();
-            if path.is_empty() || path == override_path.display {
-                return None;
-            }
-            Some((path, override_path.display.clone()))
-        })
-        .collect();
-    replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+struct RedactionTable {
+    replacements: Vec<(String, String)>,
+}
 
-    replacements
-        .into_iter()
-        .fold(text.to_string(), |redacted, (path, display)| {
-            redacted.replace(&path, &display)
-        })
+impl RedactionTable {
+    fn new(path_displays: &[PathDisplayOverride]) -> Self {
+        let mut replacements: Vec<(String, String)> = path_displays
+            .iter()
+            .filter_map(|override_path| {
+                let path = override_path.path.display().to_string();
+                if path.is_empty() || path == override_path.display {
+                    return None;
+                }
+                Some((path, override_path.display.clone()))
+            })
+            .collect();
+        replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+
+        Self { replacements }
+    }
+
+    fn redact(&self, text: &str) -> String {
+        if self.replacements.is_empty() {
+            return text.to_string();
+        }
+
+        self.replacements
+            .iter()
+            .fold(text.to_string(), |redacted, (path, display)| {
+                redacted.replace(path, display)
+            })
+    }
+}
+
+fn redact_runtime_error(error: RustowError, path_displays: &[PathDisplayOverride]) -> RustowError {
+    let redactions = RedactionTable::new(path_displays);
+    let original = error.to_string();
+    let redacted = redactions.redact(&original);
+
+    if redacted == original {
+        error
+    } else {
+        RustowError::Stow(StowError::OperationFailed(redacted))
+    }
 }

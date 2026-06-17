@@ -33,7 +33,7 @@ pub struct ParsedArgs {
 
 #[derive(Clone, Default)]
 #[doc(hidden)]
-pub struct PathDisplayOverride {
+pub(crate) struct PathDisplayOverride {
     pub(crate) path: PathBuf,
     pub(crate) display: String,
 }
@@ -994,7 +994,7 @@ struct ExpandedEnvironmentValue {
 
 fn expand_environment_value(
     raw_value: &str,
-    _option_name: ResourceValueOption,
+    option_name: ResourceValueOption,
 ) -> Result<ExpandedEnvironmentValue, clap::Error> {
     let mut output = String::new();
     let mut display = String::new();
@@ -1043,7 +1043,7 @@ fn expand_environment_value(
                     }
                     continue;
                 }
-                let value = env_resource_value(&variable);
+                let value = env_resource_value(&variable, option_name)?;
                 output.push_str(&value);
                 display.push_str(&format!("${{{}}}", variable));
                 changed_display = true;
@@ -1063,7 +1063,7 @@ fn expand_environment_value(
                         }
                     }
 
-                    let value = env_resource_value(&variable);
+                    let value = env_resource_value(&variable, option_name)?;
                     output.push_str(&value);
                     display.push_str(&format!("${}", variable));
                     changed_display = true;
@@ -1086,17 +1086,22 @@ fn expand_environment_value(
     })
 }
 
-fn env_resource_value(variable: &str) -> String {
-    match env::var(variable) {
-        Ok(value) => value,
-        Err(_) => {
-            eprintln!(
-                "Use of uninitialized value ${} in stow resource file expansion; substituting empty string",
-                variable
-            );
-            String::new()
-        },
-    }
+fn env_resource_value(
+    variable: &str,
+    option_name: ResourceValueOption,
+) -> Result<String, clap::Error> {
+    env::var(variable).map_err(|_| undefined_env_var_error(variable, option_name))
+}
+
+fn undefined_env_var_error(variable: &str, option_name: ResourceValueOption) -> clap::Error {
+    clap::Error::raw(
+        clap::error::ErrorKind::InvalidValue,
+        format!(
+            "{} option references undefined environment variable ${}; aborting!",
+            option_name.option_name(),
+            variable
+        ),
+    )
 }
 
 fn expand_tilde_value(value: &str) -> String {
@@ -1425,6 +1430,8 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
     let mut expecting_option_value = false;
     let mut after_double_dash = false;
     let mut current_mode = OperationMode::Stow;
+    let mut saw_help = false;
+    let mut saw_version = false;
 
     for arg in argv.iter().skip(1) {
         let arg = arg.to_string_lossy();
@@ -1448,8 +1455,14 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
             continue;
         }
 
-        if matches!(arg.as_ref(), "--help" | "--version") {
-            return Some(OsString::from(arg.as_ref()));
+        if arg == "--help" {
+            saw_help = true;
+            continue;
+        }
+
+        if arg == "--version" {
+            saw_version = true;
+            continue;
         }
 
         if arg.starts_with("--") {
@@ -1462,8 +1475,10 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
             }
 
             for flag in arg[1..].chars() {
-                if matches!(flag, 'h' | 'V') {
-                    return Some(OsString::from(format!("-{flag}")));
+                if flag == 'h' {
+                    saw_help = true;
+                } else if flag == 'V' {
+                    saw_version = true;
                 }
 
                 if short_cluster_stops_value_parsing(flag) {
@@ -1473,7 +1488,13 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
         }
     }
 
-    None
+    if saw_help {
+        Some(OsString::from("--help"))
+    } else if saw_version {
+        Some(OsString::from("--version"))
+    } else {
+        None
+    }
 }
 
 fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap::Error> {
@@ -1984,6 +2005,15 @@ mod tests {
 
         let error = Args::try_parse_from(["rustow", "mypackage", "-V"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+
+        let error = Args::try_parse_from(["rustow", "--version", "--help"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+
+        let error = Args::try_parse_from(["rustow", "-Vh"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+
+        let error = Args::try_parse_from(["rustow", "-hV"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
     #[test]
@@ -2483,7 +2513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stowrc_undefined_env_in_final_path_expands_to_empty() {
+    fn test_stowrc_undefined_env_in_final_path_errors() {
         let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
@@ -2496,8 +2526,10 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "--dir=$RUSTOW_UNDEFINED_STOWRC_VAR\n");
 
-        let args = parse_runtime_args(["rustow", "pkg"]);
-        assert_eq!(args.dir, Some(PathBuf::from("")));
+        let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
+        assert!(error.to_string().contains(
+            "--dir option references undefined environment variable $RUSTOW_UNDEFINED_STOWRC_VAR; aborting!"
+        ));
     }
 
     #[test]
@@ -2526,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stowrc_final_undefined_env_allows_cli_override() {
+    fn test_stowrc_final_undefined_env_errors_even_with_cli_override() {
         let _lock = process_env_lock();
         let _guard = StowDirEnvGuard::new();
         let temp_dir = tempdir().unwrap();
@@ -2542,8 +2574,10 @@ mod tests {
             "--dir=$RUSTOW_CLI_OVERRIDE_UNDEFINED\n",
         );
 
-        let args = parse_runtime_args(["rustow", "--dir", "/cli-dir", "pkg"]);
-        assert_eq!(args.dir, Some(PathBuf::from("/cli-dir")));
+        let error = try_parse_runtime_args(["rustow", "--dir", "/cli-dir", "pkg"]).unwrap_err();
+        assert!(error.to_string().contains(
+            "--dir option references undefined environment variable $RUSTOW_CLI_OVERRIDE_UNDEFINED; aborting!"
+        ));
     }
 
     #[test]
