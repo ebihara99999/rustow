@@ -24,6 +24,7 @@ pub struct IsolatedProcessEnv {
 impl IsolatedProcessEnv {
     pub fn new() -> Self {
         let lock = global_process_env_lock();
+        crate::path_display::clear_redacted_paths();
         let original_cwd = std::env::current_dir().expect("current dir should be obtainable");
         let original_home = std::env::var_os("HOME");
         let original_stow_dir = std::env::var_os("STOW_DIR");
@@ -63,5 +64,6 @@ impl Drop for IsolatedProcessEnv {
                 None => std::env::remove_var("STOW_DIR"),
             }
         }
+        crate::path_display::clear_redacted_paths();
     }
 }

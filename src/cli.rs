@@ -2,15 +2,16 @@ use clap::Parser;
 use std::ffi::OsString;
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
+use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{env, fs, io::ErrorKind, path::Path};
 
 const MAX_VERBOSITY: u8 = 5;
-const MAX_STOWRC_BYTES: u64 = 1024 * 1024;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationMode {
     Stow,
@@ -177,8 +178,10 @@ fn merge_stowrc_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
         return Ok(merged_argv);
     }
 
+    crate::path_display::clear_redacted_paths();
+
     let mut stowrc_args = Vec::new();
-    if let Some(home_dir) = env::var_os("HOME") {
+    if let Some(home_dir) = env::var_os("HOME").filter(|home| !home.as_os_str().is_empty()) {
         let home_path = home_stowrc_path(home_dir);
         let home_entries = read_stowrc_file(&home_path)?;
         stowrc_args.extend(home_entries);
@@ -217,18 +220,19 @@ struct PendingResourceValue {
 }
 
 fn home_stowrc_path(home_dir: OsString) -> PathBuf {
-    if home_dir.as_os_str().is_empty() {
-        PathBuf::from("/.stowrc")
-    } else {
-        PathBuf::from(home_dir).join(".stowrc")
-    }
+    PathBuf::from(home_dir).join(".stowrc")
 }
 
 fn read_stowrc_file(path: &Path) -> Result<Vec<StowrcToken>, clap::Error> {
-    let metadata = match fs::metadata(path) {
+    let file = match open_stowrc_file(path)? {
+        Some(file) => file,
+        None => return Ok(Vec::new()),
+    };
+
+    let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(Vec::new()),
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => {
             return Err(clap::Error::raw(
                 clap::error::ErrorKind::Io,
@@ -245,36 +249,59 @@ fn read_stowrc_file(path: &Path) -> Result<Vec<StowrcToken>, clap::Error> {
         return Ok(Vec::new());
     }
 
-    if metadata.len() > MAX_STOWRC_BYTES {
-        return Err(clap::Error::raw(
-            clap::error::ErrorKind::InvalidValue,
-            format!(
-                "resource file '{}' is too large to read safely",
-                path.display()
-            ),
-        ));
+    stowrc_tokens_from_reader(path, file)
+}
+
+#[cfg(unix)]
+fn open_stowrc_file(path: &Path) -> Result<Option<fs::File>, clap::Error> {
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => Ok(None),
+        Err(err) => Err(clap::Error::raw(
+            clap::error::ErrorKind::Io,
+            format!("failed to open resource file '{}': {}", path.display(), err),
+        )),
     }
+}
 
-    let contents = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(clap::Error::raw(
-                clap::error::ErrorKind::Io,
-                format!("failed to read resource file '{}': {}", path.display(), err),
-            ));
-        },
-    };
+#[cfg(not(unix))]
+fn open_stowrc_file(path: &Path) -> Result<Option<fs::File>, clap::Error> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => Ok(None),
+        Err(err) => Err(clap::Error::raw(
+            clap::error::ErrorKind::Io,
+            format!("failed to open resource file '{}': {}", path.display(), err),
+        )),
+    }
+}
 
+fn stowrc_tokens_from_reader(path: &Path, file: fs::File) -> Result<Vec<StowrcToken>, clap::Error> {
     let mut tokens = Vec::new();
     let path = Arc::new(path.to_path_buf());
-    for (index, line) in contents.lines().enumerate() {
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(Vec::new()),
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::Io,
+                    format!("failed to read resource file '{}': {}", path.display(), err),
+                ));
+            },
+        };
         let origin = StowrcTokenOrigin {
             path: path.clone(),
             line: index + 1,
         };
-        let line_tokens = tokenize_stowrc_line(line).map_err(|err| {
+        let line_tokens = tokenize_stowrc_line(&line).map_err(|err| {
             clap::Error::raw(
                 clap::error::ErrorKind::InvalidValue,
                 format!("{} in '{}:{}'", err, path.display(), index + 1),
@@ -656,19 +683,45 @@ fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
+#[cfg(test)]
 fn expand_path_value(
     raw_value: &str,
     option_name: ResourceValueOption,
 ) -> Result<String, clap::Error> {
+    let expanded = expand_path_value_with_display(raw_value, option_name)?;
+    Ok(expanded.value)
+}
+
+struct ExpandedPathValue {
+    value: String,
+    display: Option<String>,
+}
+
+fn expand_path_value_with_display(
+    raw_value: &str,
+    option_name: ResourceValueOption,
+) -> Result<ExpandedPathValue, clap::Error> {
     let env_expanded = expand_environment_value(raw_value, option_name)?;
-    Ok(expand_tilde_value(&env_expanded))
+    let value = expand_tilde_value(&env_expanded.value);
+    let display = env_expanded
+        .display
+        .map(|display| expand_tilde_value(&display));
+
+    Ok(ExpandedPathValue { value, display })
+}
+
+struct ExpandedEnvironmentValue {
+    value: String,
+    display: Option<String>,
 }
 
 fn expand_environment_value(
     raw_value: &str,
     option_name: ResourceValueOption,
-) -> Result<String, clap::Error> {
+) -> Result<ExpandedEnvironmentValue, clap::Error> {
     let mut output = String::new();
+    let mut display = String::new();
+    let mut changed_display = false;
     let mut chars = raw_value.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -676,12 +729,16 @@ fn expand_environment_value(
             if let Some(next) = chars.next() {
                 if next == '$' {
                     output.push(next);
+                    display.push(next);
                 } else {
                     output.push('\\');
                     output.push(next);
+                    display.push('\\');
+                    display.push(next);
                 }
             } else {
                 output.push('\\');
+                display.push('\\');
             }
             continue;
         }
@@ -701,14 +758,19 @@ fn expand_environment_value(
                 if !closed || !is_gnu_braced_env_name(&variable) {
                     output.push_str("${");
                     output.push_str(&variable);
+                    display.push_str("${");
+                    display.push_str(&variable);
                     if closed {
                         output.push('}');
+                        display.push('}');
                     }
                     continue;
                 }
                 let value = env::var(&variable)
                     .map_err(|_| undefined_env_var_error(&variable, option_name))?;
                 output.push_str(&value);
+                display.push_str(&format!("${{{}}}", variable));
+                changed_display = true;
                 continue;
             }
 
@@ -728,18 +790,25 @@ fn expand_environment_value(
                     let value = env::var(&variable)
                         .map_err(|_| undefined_env_var_error(&variable, option_name))?;
                     output.push_str(&value);
+                    display.push_str(&format!("${}", variable));
+                    changed_display = true;
                     continue;
                 }
             }
 
             output.push('$');
+            display.push('$');
             continue;
         }
 
         output.push(ch);
+        display.push(ch);
     }
 
-    Ok(output)
+    Ok(ExpandedEnvironmentValue {
+        value: output,
+        display: changed_display.then_some(display),
+    })
 }
 
 fn expand_tilde_value(value: &str) -> String {
@@ -789,17 +858,27 @@ fn expand_final_resource_path_values(
 
         if should_expand {
             let raw_value = normalized[path_value.index].to_string_lossy();
-            let expanded = if path_value.value_start == 0 {
-                expand_path_value(&raw_value, path_value.option_name)?
+            let (expanded_token, redacted_path_value, redacted_display) = if path_value.value_start
+                == 0
+            {
+                let expanded = expand_path_value_with_display(&raw_value, path_value.option_name)?;
+                (expanded.value.clone(), expanded.value, expanded.display)
             } else {
                 let (prefix, raw_value) = raw_value.split_at(path_value.value_start);
-                format!(
-                    "{}{}",
-                    prefix,
-                    expand_path_value(raw_value, path_value.option_name)?
+                let expanded = expand_path_value_with_display(raw_value, path_value.option_name)?;
+                (
+                    format!("{}{}", prefix, expanded.value),
+                    expanded.value,
+                    expanded.display,
                 )
             };
-            normalized[path_value.index] = expanded.into();
+            if let Some(display) = redacted_display {
+                crate::path_display::register_redacted_path(
+                    PathBuf::from(redacted_path_value),
+                    display,
+                );
+            }
+            normalized[path_value.index] = expanded_token.into();
         }
     }
 
@@ -2257,6 +2336,29 @@ mod tests {
         let _cwd_guard = CurrentDirGuard::set(&cwd);
         unsafe {
             std::env::remove_var("HOME");
+        }
+
+        write_file(&fallback_home.join(".stowrc"), "--dir=/from-logdir\n");
+        write_file(&cwd.join(".stowrc"), "--target=/from-current\n");
+
+        let args = Args::parse_from(["rustow", "pkg"]);
+        assert_eq!(args.dir, None);
+        assert_eq!(args.target, Some(PathBuf::from("/from-current")));
+    }
+
+    #[test]
+    fn test_stowrc_home_file_is_not_read_when_home_is_empty() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let fallback_home = temp_dir.path().join("fallback-home");
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&fallback_home).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let _logdir_guard = EnvVarGuard::new("LOGDIR", fallback_home.to_str().unwrap());
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+        unsafe {
+            std::env::set_var("HOME", "");
         }
 
         write_file(&fallback_home.join(".stowrc"), "--dir=/from-logdir\n");

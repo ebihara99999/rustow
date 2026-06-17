@@ -3857,6 +3857,7 @@ fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
     let output = run_rustow_with(["pkg"], &cwd, &envs);
     assert_eq!(output.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-value-from-env"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_SECRET_PATH/missing"));
 
     let stow_dir = temp_dir.path().join("stow");
     fs::create_dir_all(stow_dir.join("pkg")).unwrap();
@@ -3872,6 +3873,59 @@ fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
     let output = run_rustow_with(["pkg"], &cwd, &envs);
     assert_eq!(output.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-value-from-env"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_SECRET_PATH/missing"));
+
+    fs::write(cwd.join(".stowrc"), "--dir=$RUSTOW_TILDE_SECRET/missing\n").unwrap();
+    let tilde_secret = "~/secret-value-from-env";
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        ("RUSTOW_TILDE_SECRET", tilde_secret),
+    ];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-value-from-env"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_TILDE_SECRET/missing"));
+
+    fs::write(cwd.join(".stowrc"), "--dir=$RUSTOW_SHORT_SECRET/missing\n").unwrap();
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        ("RUSTOW_SHORT_SECRET", "abc"),
+    ];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("abc/missing"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_SHORT_SECRET/missing"));
+}
+
+#[test]
+fn test_binary_direct_cli_config_error_keeps_literal_path() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+
+    let missing_stow = home_dir.join("missing-stow");
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(
+        ["-d", missing_stow.to_string_lossy().as_ref(), "pkg"],
+        &cwd,
+        &envs,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(missing_stow.to_string_lossy().as_ref())
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("$HOME/missing-stow"));
 }
 
 #[test]
