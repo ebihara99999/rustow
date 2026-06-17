@@ -391,7 +391,7 @@ fn replace_path_occurrences(text: &str, needle: &str, replacement: &str) -> Stri
         let end = index + needle.len();
         output.push_str(&remaining[..index]);
 
-        if is_path_boundary_after(remaining, end) {
+        if is_path_boundary_before(remaining, index) && is_path_boundary_after(remaining, end) {
             output.push_str(replacement);
         } else {
             output.push_str(needle);
@@ -404,14 +404,39 @@ fn replace_path_occurrences(text: &str, needle: &str, replacement: &str) -> Stri
     output
 }
 
-fn is_path_boundary_after(text: &str, index: usize) -> bool {
-    match text[index..].chars().next() {
-        Some(ch) => matches!(
-            ch,
-            '/' | '\\' | '"' | '\'' | ')' | ']' | '}' | ',' | ':' | ';' | ' ' | '\n' | '\t'
-        ),
+fn is_path_boundary_before(text: &str, index: usize) -> bool {
+    match text[..index].chars().next_back() {
+        Some(ch) => is_path_boundary_char(ch),
         None => true,
     }
+}
+
+fn is_path_boundary_after(text: &str, index: usize) -> bool {
+    match text[index..].chars().next() {
+        Some(ch) => is_path_boundary_char(ch),
+        None => true,
+    }
+}
+
+fn is_path_boundary_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '/' | '\\'
+            | '"'
+            | '\''
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | ','
+            | ':'
+            | ';'
+            | ' '
+            | '\n'
+            | '\t'
+    )
 }
 
 fn redact_runtime_error(error: RustowError, path_displays: &[PathDisplayOverride]) -> RustowError {
@@ -532,5 +557,20 @@ fn redact_fs_error(error: FsError, redactions: &RedactionTable) -> FsError {
             path: redactions.redact_path(path),
             source,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_path_occurrences_requires_leading_boundary() {
+        let text = "real: /tmp/secret/file; unrelated: /backup/tmp/secret/file";
+
+        assert_eq!(
+            replace_path_occurrences(text, "/tmp/secret", "$RUSTOW_SECRET"),
+            "real: $RUSTOW_SECRET/file; unrelated: /backup/tmp/secret/file"
+        );
     }
 }

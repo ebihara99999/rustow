@@ -3848,6 +3848,35 @@ fn test_binary_version_ignores_malformed_stowrc() {
 }
 
 #[test]
+fn test_binary_invalid_cli_option_precedes_malformed_stowrc_with_usage() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(cwd.join(".stowrc"), "--target\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    let output = run_rustow_with(["--bad-option", "pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr);
+    assert!(stderr.contains("--bad-option"));
+    assert!(stderr.contains("Usage:"));
+    assert!(!stderr.contains("resource file option"));
+
+    let output = run_rustow_with(["-xh", "pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr);
+    assert!(stderr.contains("-x"));
+    assert!(stderr.contains("Usage:"));
+    assert!(!stderr.contains("resource file option"));
+}
+
+#[test]
 fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let home_dir = temp_dir.path().join("home");
@@ -3917,6 +3946,28 @@ fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
     assert_eq!(output.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("abc/missing"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_SHORT_SECRET/missing"));
+}
+
+#[test]
+fn test_binary_stowrc_tilde_expanded_path_is_redacted_in_config_error() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("secret-home-from-tilde");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=~/missing-stow\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
+    assert!(!stderr.contains(home_dir.to_str().expect("home dir should be valid utf-8")));
+    assert!(stderr.contains("~/missing-stow"));
+    assert!(stderr.contains("Invalid stow directory"));
 }
 
 #[test]
@@ -4321,6 +4372,53 @@ fn test_binary_stowrc_env_expanded_bare_env_default_target_output_is_redacted() 
     assert!(!stderr.contains("secret-value-from-env"));
     assert!(stderr.contains("$RUSTOW_SECRET_STOW_DIR/pkg/bin"));
     assert!(stderr.contains("$RUSTOW_SECRET_STOW_DIR/../bin"));
+}
+
+#[test]
+fn test_binary_stowrc_tilde_expanded_default_target_output_is_redacted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("secret-home-from-tilde");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = home_dir.join("stow");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=~/stow\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(["--simulate", "pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr);
+    assert!(!stderr.contains(home_dir.to_str().expect("home dir should be valid utf-8")));
+    assert!(stderr.contains("~/stow/pkg/bin"));
+    assert!(stderr.contains("~/bin"));
+}
+
+#[test]
+fn test_binary_stowrc_tilde_expanded_conflict_output_is_redacted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("secret-home-from-tilde");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = home_dir.join("stow");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::create_dir_all(home_dir.join("bin")).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+    fs::write(home_dir.join("bin/tool"), "existing").unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=~/stow\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
+    assert!(!stderr.contains(home_dir.to_str().expect("home dir should be valid utf-8")));
+    assert!(stderr.contains("~/bin/tool"));
 }
 
 #[test]

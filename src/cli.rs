@@ -331,9 +331,11 @@ fn validate_cli_option_tokens(argv: &[OsString]) -> Result<(), clap::Error> {
 }
 
 fn unknown_option_error(option: &str) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
     clap::Error::raw(
         clap::error::ErrorKind::UnknownArgument,
-        format!("unexpected argument '{option}'"),
+        format!("unexpected argument '{option}'\n\n{usage}"),
     )
 }
 
@@ -1056,15 +1058,24 @@ fn expand_path_value_with_display(
     option_name: ResourceValueOption,
 ) -> Result<ExpandedPathValue, clap::Error> {
     let env_expanded = expand_environment_value(raw_value, option_name)?;
-    let value = expand_tilde_value(&env_expanded.value);
+    let tilde_expanded = expand_tilde_value_with_display(&env_expanded.value);
     let display = env_expanded
         .display
-        .map(|display| expand_tilde_value(&display));
+        .map(|display| unescape_tilde_markers(&display))
+        .or(tilde_expanded.display);
 
-    Ok(ExpandedPathValue { value, display })
+    Ok(ExpandedPathValue {
+        value: tilde_expanded.value,
+        display,
+    })
 }
 
 struct ExpandedEnvironmentValue {
+    value: String,
+    display: Option<String>,
+}
+
+struct ExpandedTildeValue {
     value: String,
     display: Option<String>,
 }
@@ -1167,6 +1178,8 @@ fn env_resource_value(
     variable: &str,
     option_name: ResourceValueOption,
 ) -> Result<String, clap::Error> {
+    // GNU Stow 2.4.1 aborts here via _safe_expand_env_var despite a nearby
+    // source comment mentioning Perl's empty-string fallback.
     env::var(variable).map_err(|_| undefined_env_var_error(variable, option_name))
 }
 
@@ -1181,7 +1194,7 @@ fn undefined_env_var_error(variable: &str, option_name: ResourceValueOption) -> 
     )
 }
 
-fn expand_tilde_value(value: &str) -> String {
+fn expand_tilde_value_with_display(value: &str) -> ExpandedTildeValue {
     let tilde_expanded = if let Some(rest) = value.strip_prefix('~') {
         let user_end = rest.find('/').unwrap_or(rest.len());
         let user = &rest[..user_end];
@@ -1208,7 +1221,20 @@ fn expand_tilde_value(value: &str) -> String {
         value.to_string()
     };
 
-    tilde_expanded.replace("\\~", "~")
+    let tilde_expanded = unescape_tilde_markers(&tilde_expanded);
+    let display = value
+        .starts_with('~')
+        .then(|| unescape_tilde_markers(value))
+        .filter(|display| display != &tilde_expanded);
+
+    ExpandedTildeValue {
+        value: tilde_expanded,
+        display,
+    }
+}
+
+fn unescape_tilde_markers(value: &str) -> String {
+    value.replace("\\~", "~")
 }
 
 fn expand_final_resource_path_values(
@@ -3086,6 +3112,27 @@ mod tests {
         assert_eq!(
             expand_path_value(r"\${HOME_STOW}/path", ResourceValueOption::Dir).unwrap(),
             "${HOME_STOW}/path".to_string()
+        );
+    }
+
+    #[test]
+    fn test_expand_path_value_display_tracks_tilde_expansion() {
+        let _lock = process_env_lock();
+        let _home_guard = EnvVarGuard::new("HOME", "/home/example");
+        let _secret_guard = EnvVarGuard::new("RUSTOW_SECRET_FROM_ENV", "~/env-stow");
+
+        let expanded =
+            expand_path_value_with_display("~/tilde-stow", ResourceValueOption::Dir).unwrap();
+        assert_eq!(expanded.value, "/home/example/tilde-stow");
+        assert_eq!(expanded.display, Some("~/tilde-stow".to_string()));
+
+        let expanded =
+            expand_path_value_with_display("$RUSTOW_SECRET_FROM_ENV/pkg", ResourceValueOption::Dir)
+                .unwrap();
+        assert_eq!(expanded.value, "/home/example/env-stow/pkg");
+        assert_eq!(
+            expanded.display,
+            Some("$RUSTOW_SECRET_FROM_ENV/pkg".to_string())
         );
     }
 
