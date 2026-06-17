@@ -1,7 +1,6 @@
 use crate::cli::Args;
 use crate::error::{ConfigError, FsError, Result as RustowResult, RustowError};
 use crate::fs_utils; // Import fs_utils
-use crate::path_display;
 use regex::Regex;
 use std::env;
 use std::path::PathBuf;
@@ -40,6 +39,8 @@ pub struct Config {
 
 impl Config {
     pub fn from_args(args: Args) -> RustowResult<Self> {
+        let path_displays = args.path_displays.clone();
+
         // 1. Determine StowMode
         let mode: StowMode = if args.delete {
             StowMode::Delete
@@ -67,20 +68,20 @@ impl Config {
                 RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidStowDir(format!(
                         "Failed to canonicalize stow directory '{}': {}",
-                        path_display::path_display(&stow_dir_path_unresolved),
+                        crate::cli::path_display(&stow_dir_path_unresolved, &path_displays),
                         source
                     )))
                 },
                 RustowError::Fs(fs_error) => {
                     RustowError::Config(ConfigError::InvalidStowDir(format!(
                         "Failed to canonicalize stow directory '{}': {}",
-                        path_display::path_display(&stow_dir_path_unresolved),
+                        crate::cli::path_display(&stow_dir_path_unresolved, &path_displays),
                         fs_error
                     )))
                 },
                 _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
                     "An unexpected error occurred while canonicalizing stow directory '{}': {}",
-                    path_display::path_display(&stow_dir_path_unresolved),
+                    crate::cli::path_display(&stow_dir_path_unresolved, &path_displays),
                     e
                 ))),
             })?;
@@ -99,20 +100,20 @@ impl Config {
                 RustowError::Fs(FsError::Canonicalize { source, .. }) => {
                     RustowError::Config(ConfigError::InvalidTargetDir(format!(
                         "Failed to canonicalize target directory '{}': {}",
-                        path_display::path_display(&target_dir_path_unresolved),
+                        crate::cli::path_display(&target_dir_path_unresolved, &path_displays),
                         source
                     )))
                 },
                 RustowError::Fs(fs_error) => {
                     RustowError::Config(ConfigError::InvalidTargetDir(format!(
                         "Failed to canonicalize target directory '{}': {}",
-                        path_display::path_display(&target_dir_path_unresolved),
+                        crate::cli::path_display(&target_dir_path_unresolved, &path_displays),
                         fs_error
                     )))
                 },
                 _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
                     "An unexpected error occurred while canonicalizing target directory '{}': {}",
-                    path_display::path_display(&target_dir_path_unresolved),
+                    crate::cli::path_display(&target_dir_path_unresolved, &path_displays),
                     e
                 ))),
             })?;
@@ -195,6 +196,24 @@ mod tests {
 
     fn env_lock() -> crate::test_sync::IsolatedProcessEnv {
         crate::test_sync::IsolatedProcessEnv::new()
+    }
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original = env::current_dir().expect("current dir should be obtainable");
+            env::set_current_dir(path).expect("failed to switch current directory");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.original).expect("failed to restore current directory");
+        }
     }
 
     #[test]
@@ -386,6 +405,80 @@ mod tests {
             RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
                 assert!(msg.contains(&format!("{}/missing", direct_root)));
                 assert!(!msg.contains("$RUSTOW_DIRECT_CONFIG_PATH"));
+            },
+            e => panic!("Unexpected error type: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_canonicalization_failure_keeps_stowrc_display_after_interleaved_parse() {
+        let _lock = env_lock();
+        let temp_base = tempdir().unwrap();
+        let home_dir = temp_base.path().join("home");
+        let cwd = temp_base.path().join("cwd");
+        let second_cwd = temp_base.path().join("second-cwd");
+        let secret_root = temp_base.path().join("secret-value-from-env");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&second_cwd).unwrap();
+        fs::write(
+            cwd.join(".stowrc"),
+            "--dir=$RUSTOW_SECRET_CONFIG_PATH/missing\n",
+        )
+        .unwrap();
+        unsafe {
+            env::set_var("HOME", home_dir.to_str().unwrap());
+            env::set_var("RUSTOW_SECRET_CONFIG_PATH", secret_root.to_str().unwrap());
+        }
+
+        let first_args = {
+            let _cwd_guard = CurrentDirGuard::set(&cwd);
+            Args::parse_from(["rustow", "pkg"])
+        };
+        {
+            let _cwd_guard = CurrentDirGuard::set(&second_cwd);
+            let _second_args = Args::parse_from(["rustow", "other-pkg"]);
+        }
+
+        let config_result = Config::from_args(first_args);
+        assert!(config_result.is_err());
+        match config_result.err().unwrap() {
+            RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
+                assert!(!msg.contains("secret-value-from-env"));
+                assert!(msg.contains("$RUSTOW_SECRET_CONFIG_PATH/missing"));
+            },
+            e => panic!("Unexpected error type: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_canonicalization_failure_keeps_cli_override_literal_for_same_stowrc_path() {
+        let _lock = env_lock();
+        let temp_base = tempdir().unwrap();
+        let home_dir = temp_base.path().join("home");
+        let cwd = temp_base.path().join("cwd");
+        let secret_root = temp_base.path().join("secret-value-from-env");
+        let missing_stow = secret_root.join("missing");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            cwd.join(".stowrc"),
+            "--dir=$RUSTOW_SECRET_CONFIG_PATH/missing\n",
+        )
+        .unwrap();
+        unsafe {
+            env::set_var("HOME", home_dir.to_str().unwrap());
+            env::set_var("RUSTOW_SECRET_CONFIG_PATH", secret_root.to_str().unwrap());
+        }
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        let args = Args::parse_from(["rustow", "--dir", missing_stow.to_str().unwrap(), "pkg"]);
+        let config_result = Config::from_args(args);
+        assert!(config_result.is_err());
+        match config_result.err().unwrap() {
+            RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
+                assert!(msg.contains(missing_stow.to_string_lossy().as_ref()));
+                assert!(!msg.contains("$RUSTOW_SECRET_CONFIG_PATH/missing"));
             },
             e => panic!("Unexpected error type: {:?}", e),
         }

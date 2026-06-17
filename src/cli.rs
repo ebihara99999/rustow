@@ -31,6 +31,13 @@ pub struct ParsedArgs {
     pub operation_groups: Vec<OperationGroup>,
 }
 
+#[derive(Debug, Clone, Default)]
+#[doc(hidden)]
+pub struct PathDisplayOverride {
+    path: PathBuf,
+    display: String,
+}
+
 /// Rustow: A Rust implementation of GNU Stow
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None, args_override_self = true)]
@@ -95,6 +102,10 @@ pub struct Args {
     /// Packages to process
     #[clap(value_parser, required = true, num_args = 1..)]
     pub packages: Vec<String>,
+
+    #[clap(skip)]
+    #[doc(hidden)]
+    pub path_displays: Vec<PathDisplayOverride>,
 }
 
 impl Args {
@@ -108,7 +119,9 @@ impl Args {
             return parse_args_from_argv(&argv);
         }
         let merged = merge_stowrc_args(&argv)?;
-        parse_args_from_argv(&merged)
+        let mut args = parse_args_from_argv(&merged.argv)?;
+        args.path_displays = effective_path_displays(merged.path_displays, &argv);
+        Ok(args)
     }
 
     pub fn parse_from<I, T>(itr: I) -> Self
@@ -146,7 +159,8 @@ impl Args {
             });
         }
         let merged = merge_stowrc_args(&argv)?;
-        let args = parse_args_from_argv(&merged)?;
+        let mut args = parse_args_from_argv(&merged.argv)?;
+        args.path_displays = effective_path_displays(merged.path_displays, &argv);
         let operation_groups = parse_operation_groups(&argv);
 
         Ok(ParsedArgs {
@@ -172,16 +186,23 @@ fn parse_args_from_argv(argv: &[OsString]) -> Result<Args, clap::Error> {
     Ok(args)
 }
 
-fn merge_stowrc_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
+#[derive(Debug)]
+struct MergedArgs {
+    argv: Vec<OsString>,
+    path_displays: Vec<ResourcePathDisplay>,
+}
+
+fn merge_stowrc_args(argv: &[OsString]) -> Result<MergedArgs, clap::Error> {
     let mut merged_argv = Vec::new();
     if argv.is_empty() {
-        return Ok(merged_argv);
+        return Ok(MergedArgs {
+            argv: merged_argv,
+            path_displays: Vec::new(),
+        });
     }
 
-    crate::path_display::clear_redacted_paths();
-
     let mut stowrc_args = Vec::new();
-    if let Some(home_dir) = env::var_os("HOME").filter(|home| !home.as_os_str().is_empty()) {
+    if let Some(home_dir) = env::var_os("HOME") {
         let home_path = home_stowrc_path(home_dir);
         let home_entries = read_stowrc_file(&home_path)?;
         stowrc_args.extend(home_entries);
@@ -196,9 +217,118 @@ fn merge_stowrc_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
     let merged_resource_args = normalize_stowrc_tokens(stowrc_args)?;
 
     merged_argv.push(argv[0].clone());
-    merged_argv.extend(merged_resource_args);
+    merged_argv.extend(merged_resource_args.argv);
     merged_argv.extend(argv.iter().skip(1).cloned());
-    Ok(merged_argv)
+    Ok(MergedArgs {
+        argv: merged_argv,
+        path_displays: merged_resource_args.path_displays,
+    })
+}
+
+pub(crate) fn path_display(path: &Path, overrides: &[PathDisplayOverride]) -> String {
+    overrides
+        .iter()
+        .rev()
+        .find(|override_path| override_path.path == path)
+        .map(|override_path| override_path.display.clone())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn effective_path_displays(
+    resource_displays: Vec<ResourcePathDisplay>,
+    cli_argv: &[OsString],
+) -> Vec<PathDisplayOverride> {
+    let cli_overrides = cli_path_option_overrides(cli_argv);
+    resource_displays
+        .into_iter()
+        .filter(|display| !cli_overrides.overrides(display.option_name))
+        .map(|display| PathDisplayOverride {
+            path: display.path,
+            display: display.display,
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct CliPathOptionOverrides {
+    dir: bool,
+    target: bool,
+}
+
+impl CliPathOptionOverrides {
+    fn overrides(&self, option_name: ResourceValueOption) -> bool {
+        match option_name {
+            ResourceValueOption::Dir => self.dir,
+            ResourceValueOption::Target => self.target,
+            _ => false,
+        }
+    }
+}
+
+fn cli_path_option_overrides(argv: &[OsString]) -> CliPathOptionOverrides {
+    let mut overrides = CliPathOptionOverrides::default();
+    let mut expecting_option_value = false;
+    let mut after_double_dash = false;
+
+    for arg in argv.iter().skip(1) {
+        let arg = arg.to_string_lossy();
+
+        if after_double_dash {
+            continue;
+        }
+
+        if expecting_option_value {
+            expecting_option_value = false;
+            continue;
+        }
+
+        if arg == "--" {
+            after_double_dash = true;
+            continue;
+        }
+
+        if let Some(long_token) = arg.strip_prefix("--") {
+            let (key, has_attached_value) = long_token
+                .split_once('=')
+                .map_or((long_token, false), |(key, _)| (key, true));
+            match map_long_value_option(key) {
+                Some(ResourceValueOption::Dir) => {
+                    overrides.dir = true;
+                    expecting_option_value = !has_attached_value;
+                },
+                Some(ResourceValueOption::Target) => {
+                    overrides.target = true;
+                    expecting_option_value = !has_attached_value;
+                },
+                Some(_) => {
+                    expecting_option_value = !has_attached_value;
+                },
+                None => {},
+            }
+            continue;
+        }
+
+        if arg.starts_with('-') && arg.len() > 1 {
+            let mut flags = arg[1..].chars().peekable();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    'd' => {
+                        overrides.dir = true;
+                        expecting_option_value = flags.peek().is_none();
+                        break;
+                    },
+                    't' => {
+                        overrides.target = true;
+                        expecting_option_value = flags.peek().is_none();
+                        break;
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+
+    overrides
 }
 
 #[derive(Debug, Clone)]
@@ -217,10 +347,21 @@ struct StowrcTokenOrigin {
 struct PendingResourceValue {
     option_name: ResourceValueOption,
     origin: StowrcTokenOrigin,
+    value_prefix: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResourceValueExpectation {
+    option_name: ResourceValueOption,
+    value_prefix: String,
 }
 
 fn home_stowrc_path(home_dir: OsString) -> PathBuf {
-    PathBuf::from(home_dir).join(".stowrc")
+    if home_dir.as_os_str().is_empty() {
+        PathBuf::from("/.stowrc")
+    } else {
+        PathBuf::from(home_dir).join(".stowrc")
+    }
 }
 
 fn read_stowrc_file(path: &Path) -> Result<Vec<StowrcToken>, clap::Error> {
@@ -348,14 +489,29 @@ struct ResourcePathValue {
     value_start: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ResourcePathDisplay {
+    option_name: ResourceValueOption,
+    path: PathBuf,
+    display: String,
+}
+
 #[derive(Debug)]
 struct ParsedResourceOption {
     tokens: Vec<OsString>,
-    expecting_value: Option<ResourceValueOption>,
+    expecting_value: Option<ResourceValueExpectation>,
     path_value: Option<ResourcePathValue>,
 }
 
-fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>, clap::Error> {
+#[derive(Debug)]
+struct NormalizedStowrcArgs {
+    argv: Vec<OsString>,
+    path_displays: Vec<ResourcePathDisplay>,
+}
+
+fn normalize_stowrc_tokens(
+    raw_tokens: Vec<StowrcToken>,
+) -> Result<NormalizedStowrcArgs, clap::Error> {
     let mut normalized = Vec::new();
     let mut expecting_value: Option<PendingResourceValue> = None;
     let mut path_values = Vec::new();
@@ -365,19 +521,16 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>
         let token_value = token.value;
 
         if let Some(pending) = expecting_value {
-            if looks_like_stowrc_option(&token_value) {
-                return Err(stowrc_missing_value_error(&pending));
-            }
+            let normalized_value = format!("{}{}", pending.value_prefix, token_value);
+            let value_start = pending.value_prefix.len();
             if pending.option_name.is_path_option() {
                 path_values.push(ResourcePathValue {
                     index: normalized.len(),
                     option_name: pending.option_name,
-                    value_start: 0,
+                    value_start,
                 });
-                normalized.push(OsString::from(token_value));
-            } else {
-                normalized.push(OsString::from(token_value));
             }
+            normalized.push(OsString::from(normalized_value));
             expecting_value = None;
             continue;
         }
@@ -410,8 +563,9 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>
                 }
                 if let Some(option_name) = parsed.expecting_value {
                     expecting_value = Some(PendingResourceValue {
-                        option_name,
+                        option_name: option_name.option_name,
                         origin: token.origin,
+                        value_prefix: option_name.value_prefix,
                     });
                 }
             }
@@ -433,8 +587,9 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>
                 expecting_value = parsed
                     .expecting_value
                     .map(|option_name| PendingResourceValue {
-                        option_name,
+                        option_name: option_name.option_name,
                         origin: token.origin,
+                        value_prefix: option_name.value_prefix,
                     });
             }
         }
@@ -444,9 +599,12 @@ fn normalize_stowrc_tokens(raw_tokens: Vec<StowrcToken>) -> Result<Vec<OsString>
         return Err(stowrc_missing_value_error(&pending));
     }
 
-    expand_final_resource_path_values(&mut normalized, &path_values)?;
+    let path_displays = expand_final_resource_path_values(&mut normalized, &path_values)?;
 
-    Ok(normalized)
+    Ok(NormalizedStowrcArgs {
+        argv: normalized,
+        path_displays,
+    })
 }
 
 fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
@@ -489,8 +647,11 @@ fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
 
     if let Some(option_name) = map_long_value_option(long_token) {
         return Some(ParsedResourceOption {
-            tokens: vec![OsString::from(token)],
-            expecting_value: Some(option_name),
+            tokens: Vec::new(),
+            expecting_value: Some(ResourceValueExpectation {
+                option_name,
+                value_prefix: format!("--{}=", long_token),
+            }),
             path_value: None,
         });
     }
@@ -560,18 +721,24 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                 let token_remainder = chars.iter().skip(i + 1).collect::<String>();
                 if token_remainder.is_empty() {
                     if bool_flags.is_empty() {
+                        let value_prefix = format!("-{}", chars[i]);
                         return Some(ParsedResourceOption {
-                            tokens: vec![format!("-{}", chars[i]).into()],
-                            expecting_value: Some(option_name),
+                            tokens: Vec::new(),
+                            expecting_value: Some(ResourceValueExpectation {
+                                option_name,
+                                value_prefix,
+                            }),
                             path_value: None,
                         });
                     }
+                    let value_prefix =
+                        format!("-{}{}", bool_flags.iter().collect::<String>(), chars[i]);
                     return Some(ParsedResourceOption {
-                        tokens: vec![
-                            format!("-{}{}", bool_flags.iter().collect::<String>(), chars[i])
-                                .into(),
-                        ],
-                        expecting_value: Some(option_name),
+                        tokens: Vec::new(),
+                        expecting_value: Some(ResourceValueExpectation {
+                            option_name,
+                            value_prefix,
+                        }),
                         path_value: None,
                     });
                 }
@@ -844,10 +1011,11 @@ fn expand_tilde_value(value: &str) -> String {
 fn expand_final_resource_path_values(
     normalized: &mut [OsString],
     path_values: &[ResourcePathValue],
-) -> Result<(), clap::Error> {
+) -> Result<Vec<ResourcePathDisplay>, clap::Error> {
     let final_dir_index = final_resource_path_value_index(path_values, ResourceValueOption::Dir);
     let final_target_index =
         final_resource_path_value_index(path_values, ResourceValueOption::Target);
+    let mut path_displays = Vec::new();
 
     for path_value in path_values {
         let should_expand = match path_value.option_name {
@@ -873,16 +1041,17 @@ fn expand_final_resource_path_values(
                 )
             };
             if let Some(display) = redacted_display {
-                crate::path_display::register_redacted_path(
-                    PathBuf::from(redacted_path_value),
+                path_displays.push(ResourcePathDisplay {
+                    option_name: path_value.option_name,
+                    path: PathBuf::from(redacted_path_value),
                     display,
-                );
+                });
             }
             normalized[path_value.index] = expanded_token.into();
         }
     }
 
-    Ok(())
+    Ok(path_displays)
 }
 
 fn final_resource_path_value_index(
@@ -894,28 +1063,6 @@ fn final_resource_path_value_index(
         .rev()
         .find(|value| value.option_name == option_name)
         .map(|value| value.index)
-}
-
-fn looks_like_stowrc_option(token: &str) -> bool {
-    if token == "--" || !token.starts_with('-') || token == "-" {
-        return false;
-    }
-
-    if let Some(long_token) = token.strip_prefix("--") {
-        let key = long_token
-            .split_once('=')
-            .map_or(long_token, |(key, _)| key);
-        return matches!(key, "stow" | "delete" | "restow")
-            || map_long_value_option(key).is_some()
-            || map_long_bool_option(key);
-    }
-
-    token[1..].chars().all(|flag| {
-        matches!(
-            flag,
-            'S' | 'D' | 'R' | 't' | 'd' | 'p' | 'v' | 'h' | 'V' | 'n'
-        )
-    })
 }
 
 fn stowrc_missing_value_error(pending: &PendingResourceValue) -> clap::Error {
@@ -2347,26 +2494,11 @@ mod tests {
     }
 
     #[test]
-    fn test_stowrc_home_file_is_not_read_when_home_is_empty() {
-        let _lock = process_env_lock();
-        let _guard = StowDirEnvGuard::new();
-        let temp_dir = tempdir().unwrap();
-        let fallback_home = temp_dir.path().join("fallback-home");
-        let cwd = temp_dir.path().join("cwd");
-        fs::create_dir_all(&fallback_home).unwrap();
-        fs::create_dir_all(&cwd).unwrap();
-        let _logdir_guard = EnvVarGuard::new("LOGDIR", fallback_home.to_str().unwrap());
-        let _cwd_guard = CurrentDirGuard::set(&cwd);
-        unsafe {
-            std::env::set_var("HOME", "");
-        }
-
-        write_file(&fallback_home.join(".stowrc"), "--dir=/from-logdir\n");
-        write_file(&cwd.join(".stowrc"), "--target=/from-current\n");
-
-        let args = Args::parse_from(["rustow", "pkg"]);
-        assert_eq!(args.dir, None);
-        assert_eq!(args.target, Some(PathBuf::from("/from-current")));
+    fn test_stowrc_home_path_matches_gnu_when_home_is_empty() {
+        assert_eq!(
+            home_stowrc_path(OsString::from("")),
+            PathBuf::from("/.stowrc")
+        );
     }
 
     #[cfg(unix)]
@@ -2674,6 +2806,28 @@ mod tests {
         let args = Args::parse_from(["rustow", "pkg"]);
         assert_eq!(args.dir, Some(PathBuf::from("-D")));
         assert_eq!(args.target, Some(PathBuf::from("--help")));
+    }
+
+    #[test]
+    fn test_stowrc_value_options_consume_separate_hyphen_values() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(
+            &cwd.join(".stowrc"),
+            "--dir\n-D\n--target\n--verbose\n--ignore\n--foo\n--defer\n--bar\n--override\n--baz\n",
+        );
+
+        let args = Args::parse_from(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(PathBuf::from("-D")));
+        assert_eq!(args.target, Some(PathBuf::from("--verbose")));
+        assert_eq!(args.ignore_patterns, vec!["--foo"]);
+        assert_eq!(args.defer_conflicts, vec!["--bar"]);
+        assert_eq!(args.override_conflicts, vec!["--baz"]);
     }
 
     #[cfg(unix)]

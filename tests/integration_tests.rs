@@ -1349,6 +1349,7 @@ fn test_config_integration_verbosity_and_simulate() {
         override_conflicts: vec![],
         defer_conflicts: vec![],
         ignore_patterns: vec![],
+        path_displays: Vec::new(),
     };
 
     let config_result: Result<Config, rustow::error::RustowError> = Config::from_args(args);
@@ -2826,6 +2827,7 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
+        path_displays: Vec::new(),
     };
 
     let stow_config = Config::from_args(stow_args).unwrap();
@@ -2847,6 +2849,7 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
+        path_displays: Vec::new(),
     });
     assert!(
         stow_result.is_ok(),
@@ -2875,6 +2878,7 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
+        path_displays: Vec::new(),
     });
     assert!(
         delete_result.is_ok(),
@@ -2903,6 +2907,7 @@ fn test_cli_integration_modes() {
         simulate: false,
         verbose: 0,
         packages: vec![package_name.to_string()],
+        path_displays: Vec::new(),
     });
     assert!(
         restow_result.is_ok(),
@@ -3502,6 +3507,7 @@ fn test_cli_restow_conflict_preserves_existing_symlinks() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -3912,10 +3918,21 @@ fn test_binary_direct_cli_config_error_keeps_literal_path() {
     fs::create_dir_all(&cwd).unwrap();
 
     let missing_stow = home_dir.join("missing-stow");
-    let envs = vec![(
-        "HOME",
-        home_dir.to_str().expect("home dir should be valid utf-8"),
-    )];
+    fs::write(
+        cwd.join(".stowrc"),
+        "--dir=$RUSTOW_SECRET_PATH/missing-stow\n",
+    )
+    .unwrap();
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        (
+            "RUSTOW_SECRET_PATH",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+    ];
     let output = run_rustow_with(
         ["-d", missing_stow.to_string_lossy().as_ref(), "pkg"],
         &cwd,
@@ -3926,6 +3943,7 @@ fn test_binary_direct_cli_config_error_keeps_literal_path() {
         String::from_utf8_lossy(&output.stderr).contains(missing_stow.to_string_lossy().as_ref())
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("$HOME/missing-stow"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_SECRET_PATH/missing-stow"));
 }
 
 #[test]
@@ -4181,6 +4199,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
+        path_displays: Vec::new(),
     });
     assert!(
         stow_result.is_ok(),
@@ -4209,6 +4228,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
+        path_displays: Vec::new(),
     });
     assert!(
         repeat_stow_result.is_ok(),
@@ -4232,6 +4252,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
+        path_displays: Vec::new(),
     });
     assert!(
         restow_result.is_ok(),
@@ -4259,6 +4280,7 @@ fn test_cli_package_symlink_alias_can_be_stowed_and_deleted() {
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     assert!(
@@ -4721,6 +4743,7 @@ fn test_stow_rejects_symlinked_target_ancestor_without_external_mutation() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -4755,6 +4778,7 @@ fn test_adopt_rejects_symlinked_target_ancestor_without_external_mutation() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -4854,6 +4878,7 @@ fn test_adopt_package_symlink_alias_uses_canonical_destination_and_preserves_ali
         simulate: false,
         verbose: 0,
         packages: vec!["aliaspkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     assert!(result.is_ok(), "alias adopt failed: {:?}", result.err());
@@ -4929,6 +4954,7 @@ fn test_adopt_directory_refuses_symlinked_destination_child_directory() {
         simulate: false,
         verbose: 0,
         packages: vec!["pkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     assert!(result.is_err());
@@ -5290,6 +5316,7 @@ fn test_adopt_option_with_existing_file() {
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     // Should succeed
@@ -5362,6 +5389,7 @@ fn test_adopt_option_with_existing_directory() {
         simulate: false,
         verbose: 0,
         packages: vec!["testpkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     // Should succeed
@@ -5441,6 +5469,7 @@ fn test_adopt_option_simulation_mode() {
         simulate: true,
         verbose: 1,
         packages: vec!["testpkg".to_string()],
+        path_displays: Vec::new(),
     });
 
     // Should succeed

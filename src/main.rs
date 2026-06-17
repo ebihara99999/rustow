@@ -4,7 +4,6 @@ pub mod dotfiles;
 pub mod error;
 pub mod fs_utils;
 pub mod ignore;
-mod path_display;
 pub mod stow;
 #[cfg(test)]
 mod test_sync;
