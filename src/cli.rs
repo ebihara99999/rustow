@@ -2799,6 +2799,30 @@ mod tests {
     }
 
     #[test]
+    fn test_stowrc_hash_tokens_match_gnu_shellwords() {
+        let _lock = process_env_lock();
+        assert_eq!(
+            tokenize_stowrc_line(r#"# --dir=/shellwords-token"#).unwrap(),
+            vec!["#".to_string(), "--dir=/shellwords-token".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_stowrc_hash_prefixed_options_match_gnu_shellwords() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "# --dir=/shellwords-dir\n");
+
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(PathBuf::from("/shellwords-dir")));
+    }
+
+    #[test]
     fn test_stowrc_tokenization_preserves_empty_quoted_values() {
         let _lock = process_env_lock();
         assert_eq!(

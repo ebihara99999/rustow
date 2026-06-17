@@ -12,12 +12,12 @@ use crate::cli::{
     Args, OperationGroup, OperationMode, ParsedArgs, PathDisplayOverride, RuntimeParsedArgs,
 };
 use crate::config::{Config, PackageOperation, StowMode};
-use crate::error::{ConfigError, RustowError, StowError};
+use crate::error::{ConfigError, FsError, IgnoreError, RustowError, StowError};
 use crate::stow::{
     delete_packages, mixed_packages, restow_packages, stow_packages,
     validate_package_for_operation_with_display,
 };
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// Runs the rustow application logic.
 pub fn run(args: Args) -> Result<(), RustowError> {
@@ -36,13 +36,11 @@ pub fn run_parsed(parsed_args: ParsedArgs) -> Result<(), RustowError> {
 #[doc(hidden)]
 pub fn run_runtime_parsed(parsed_args: RuntimeParsedArgs) -> Result<(), RustowError> {
     let (parsed_args, path_displays) = parsed_args.into_parts();
-    let error_displays = path_displays.clone();
     run_with_operation_groups_and_path_displays(
         parsed_args.args,
         parsed_args.operation_groups,
         path_displays,
     )
-    .map_err(|error| redact_runtime_error(error, &error_displays))
 }
 
 /// Runs rustow with operation groups reconstructed from CLI argument order.
@@ -58,50 +56,56 @@ fn run_with_operation_groups_and_path_displays(
     operation_groups: Vec<OperationGroup>,
     mut path_displays: Vec<PathDisplayOverride>,
 ) -> Result<(), RustowError> {
-    // eprintln!("stderr: Successfully parsed args in lib::run: {:?}", args.clone());
-    if operation_groups.is_empty() {
-        reject_ambiguous_mixed_args(&args)?;
-    }
+    let result = (|| {
+        // eprintln!("stderr: Successfully parsed args in lib::run: {:?}", args.clone());
+        if operation_groups.is_empty() {
+            reject_ambiguous_mixed_args(&args)?;
+        }
 
-    match Config::from_args_with_path_displays(args, &mut path_displays) {
-        Ok(config) => {
-            // eprintln!("stderr: Successfully constructed config in lib::run: {:?}", config);
+        match Config::from_args_with_path_displays(args, &mut path_displays) {
+            Ok(config) => {
+                // eprintln!("stderr: Successfully constructed config in lib::run: {:?}", config);
 
-            let package_operations = package_operations_for_config(&config, operation_groups);
-            preflight_package_operations(&config, &package_operations, &path_displays)?;
-            let reports = execute_config_operations(&config, &package_operations)?;
+                let package_operations = package_operations_for_config(&config, operation_groups);
+                preflight_package_operations(&config, &package_operations, &path_displays)?;
+                let reports = execute_config_operations(&config, &package_operations)?;
 
-            // Process reports for logging/output
-            process_reports(&reports, &config, &path_displays);
+                // Process reports for logging/output
+                process_reports(&reports, &config, &path_displays);
 
-            let conflict_count = reports
-                .iter()
-                .filter(|r| {
-                    matches!(
-                        r.status,
-                        crate::stow::TargetActionReportStatus::ConflictPrevented
-                    )
-                })
-                .count();
-            let failure_count = reports
-                .iter()
-                .filter(|r| matches!(r.status, crate::stow::TargetActionReportStatus::Failure(_)))
-                .count();
+                let conflict_count = reports
+                    .iter()
+                    .filter(|r| {
+                        matches!(
+                            r.status,
+                            crate::stow::TargetActionReportStatus::ConflictPrevented
+                        )
+                    })
+                    .count();
+                let failure_count = reports
+                    .iter()
+                    .filter(|r| {
+                        matches!(r.status, crate::stow::TargetActionReportStatus::Failure(_))
+                    })
+                    .count();
 
-            if conflict_count > 0 || failure_count > 0 {
-                return Err(RustowError::Stow(StowError::OperationFailed(format!(
-                    "Execution stopped with {} conflicts and {} failures",
-                    conflict_count, failure_count
-                ))));
-            }
+                if conflict_count > 0 || failure_count > 0 {
+                    return Err(RustowError::Stow(StowError::OperationFailed(format!(
+                        "Execution stopped with {} conflicts and {} failures",
+                        conflict_count, failure_count
+                    ))));
+                }
 
-            Ok(())
-        },
-        Err(e) => {
-            // eprintln!("stderr: Error constructing config in lib::run: {}", e);
-            Err(e)
-        },
-    }
+                Ok(())
+            },
+            Err(e) => {
+                // eprintln!("stderr: Error constructing config in lib::run: {}", e);
+                Err(e)
+            },
+        }
+    })();
+
+    result.map_err(|error| redact_runtime_error(error, &path_displays))
 }
 
 fn reject_ambiguous_mixed_args(args: &Args) -> Result<(), RustowError> {
@@ -364,19 +368,169 @@ impl RedactionTable {
         self.replacements
             .iter()
             .fold(text.to_string(), |redacted, (path, display)| {
-                redacted.replace(path, display)
+                replace_path_occurrences(&redacted, path, display)
             })
+    }
+
+    fn redact_path(&self, path: PathBuf) -> PathBuf {
+        let display = path.display().to_string();
+        let redacted = self.redact(&display);
+        if redacted == display {
+            path
+        } else {
+            PathBuf::from(redacted)
+        }
+    }
+}
+
+fn replace_path_occurrences(text: &str, needle: &str, replacement: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = text;
+
+    while let Some(index) = remaining.find(needle) {
+        let end = index + needle.len();
+        output.push_str(&remaining[..index]);
+
+        if is_path_boundary_after(remaining, end) {
+            output.push_str(replacement);
+        } else {
+            output.push_str(needle);
+        }
+
+        remaining = &remaining[end..];
+    }
+
+    output.push_str(remaining);
+    output
+}
+
+fn is_path_boundary_after(text: &str, index: usize) -> bool {
+    match text[index..].chars().next() {
+        Some(ch) => matches!(
+            ch,
+            '/' | '\\' | '"' | '\'' | ')' | ']' | '}' | ',' | ':' | ';' | ' ' | '\n' | '\t'
+        ),
+        None => true,
     }
 }
 
 fn redact_runtime_error(error: RustowError, path_displays: &[PathDisplayOverride]) -> RustowError {
     let redactions = RedactionTable::new(path_displays);
-    let original = error.to_string();
-    let redacted = redactions.redact(&original);
+    redact_rustow_error(error, &redactions)
+}
 
-    if redacted == original {
-        error
-    } else {
-        RustowError::Stow(StowError::OperationFailed(redacted))
+fn redact_rustow_error(error: RustowError, redactions: &RedactionTable) -> RustowError {
+    match error {
+        RustowError::Config(error) => RustowError::Config(redact_config_error(error, redactions)),
+        RustowError::Stow(error) => RustowError::Stow(redact_stow_error(error, redactions)),
+        RustowError::Fs(error) => RustowError::Fs(redact_fs_error(error, redactions)),
+        RustowError::Ignore(error) => RustowError::Ignore(redact_ignore_error(error, redactions)),
+        RustowError::Cli(message) => RustowError::Cli(redactions.redact(&message)),
+        RustowError::InvalidPattern(pattern) => {
+            RustowError::InvalidPattern(redactions.redact(&pattern))
+        },
+        other => other,
+    }
+}
+
+fn redact_config_error(error: ConfigError, redactions: &RedactionTable) -> ConfigError {
+    match error {
+        ConfigError::InvalidTargetDir(message) => {
+            ConfigError::InvalidTargetDir(redactions.redact(&message))
+        },
+        ConfigError::InvalidStowDir(message) => {
+            ConfigError::InvalidStowDir(redactions.redact(&message))
+        },
+        ConfigError::InvalidPackageName(message) => {
+            ConfigError::InvalidPackageName(redactions.redact(&message))
+        },
+        ConfigError::InvalidRegexPattern(message) => {
+            ConfigError::InvalidRegexPattern(redactions.redact(&message))
+        },
+        ConfigError::InvalidOperation(message) => {
+            ConfigError::InvalidOperation(redactions.redact(&message))
+        },
+        ConfigError::InvalidVerbosityLevel(level) => ConfigError::InvalidVerbosityLevel(level),
+    }
+}
+
+fn redact_stow_error(error: StowError, redactions: &RedactionTable) -> StowError {
+    match error {
+        StowError::Conflict(message) => StowError::Conflict(redactions.redact(&message)),
+        StowError::PackageNotFound(package) => {
+            StowError::PackageNotFound(redactions.redact(&package))
+        },
+        StowError::InvalidPackageStructure(message) => {
+            StowError::InvalidPackageStructure(redactions.redact(&message))
+        },
+        StowError::OperationFailed(message) => {
+            StowError::OperationFailed(redactions.redact(&message))
+        },
+    }
+}
+
+fn redact_ignore_error(error: IgnoreError, redactions: &RedactionTable) -> IgnoreError {
+    match error {
+        IgnoreError::LoadPatternsError(message) => {
+            IgnoreError::LoadPatternsError(redactions.redact(&message))
+        },
+        IgnoreError::InvalidPattern(pattern) => {
+            IgnoreError::InvalidPattern(redactions.redact(&pattern))
+        },
+    }
+}
+
+fn redact_fs_error(error: FsError, redactions: &RedactionTable) -> FsError {
+    match error {
+        FsError::Io { path, source } => FsError::Io {
+            path: redactions.redact_path(path),
+            source,
+        },
+        FsError::Canonicalize { path, source } => FsError::Canonicalize {
+            path: redactions.redact_path(path),
+            source,
+        },
+        FsError::NotFound(path) => FsError::NotFound(redactions.redact_path(path)),
+        FsError::NotADirectory(path) => FsError::NotADirectory(redactions.redact_path(path)),
+        FsError::NotASymlink(path) => FsError::NotASymlink(redactions.redact_path(path)),
+        FsError::CreateSymlink {
+            link_path,
+            target_path,
+            source,
+        } => FsError::CreateSymlink {
+            link_path: redactions.redact_path(link_path),
+            target_path: redactions.redact_path(target_path),
+            source,
+        },
+        FsError::ReadSymlink { path, source } => FsError::ReadSymlink {
+            path: redactions.redact_path(path),
+            source,
+        },
+        FsError::DeleteSymlink { path, source } => FsError::DeleteSymlink {
+            path: redactions.redact_path(path),
+            source,
+        },
+        FsError::CreateDirectory { path, source } => FsError::CreateDirectory {
+            path: redactions.redact_path(path),
+            source,
+        },
+        FsError::DeleteDirectory { path, source } => FsError::DeleteDirectory {
+            path: redactions.redact_path(path),
+            source,
+        },
+        FsError::MoveItem {
+            source_path,
+            destination_path,
+            source_io_error,
+        } => FsError::MoveItem {
+            source_path: redactions.redact_path(source_path),
+            destination_path: redactions.redact_path(destination_path),
+            source_io_error,
+        },
+        FsError::MoveSamePath(path) => FsError::MoveSamePath(redactions.redact_path(path)),
+        FsError::WalkDir { path, source } => FsError::WalkDir {
+            path: redactions.redact_path(path),
+            source,
+        },
     }
 }

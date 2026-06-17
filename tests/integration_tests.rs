@@ -3866,8 +3866,11 @@ fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
 
     let output = run_rustow_with(["pkg"], &cwd, &envs);
     assert_eq!(output.status.code(), Some(1));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-value-from-env"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_SECRET_PATH/missing"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_PATH/missing"));
+    assert!(stderr.contains("Invalid stow directory"));
+    assert!(!stderr.contains("Operation failed"));
 
     let stow_dir = temp_dir.path().join("stow");
     fs::create_dir_all(stow_dir.join("pkg")).unwrap();
@@ -3882,8 +3885,11 @@ fn test_binary_stowrc_env_expanded_path_is_redacted_in_config_error() {
 
     let output = run_rustow_with(["pkg"], &cwd, &envs);
     assert_eq!(output.status.code(), Some(1));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-value-from-env"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("$RUSTOW_SECRET_PATH/missing"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_PATH/missing"));
+    assert!(stderr.contains("Invalid target directory"));
+    assert!(!stderr.contains("Operation failed"));
 
     fs::write(cwd.join(".stowrc"), "--dir=$RUSTOW_TILDE_SECRET/missing\n").unwrap();
     let tilde_secret = "~/secret-value-from-env";
@@ -4197,6 +4203,60 @@ fn test_binary_stowrc_env_expanded_planning_error_is_redacted() {
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
     assert!(!stderr.contains("secret-value-from-env"));
     assert!(stderr.contains("$RUSTOW_SECRET_ROOT/stow/pkg/blocked"));
+    assert!(stderr.contains("WalkDir error"));
+    assert!(!stderr.contains("Operation failed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_binary_stowrc_env_expanded_default_target_planning_error_is_redacted() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let secret_root = temp_dir.path().join("secret-value-from-env");
+    let stow_dir = secret_root.join("stow");
+    let blocked_target_dir = secret_root.join("blocked");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/blocked")).unwrap();
+    fs::write(stow_dir.join("pkg/blocked/tool"), "tool").unwrap();
+    fs::create_dir_all(&blocked_target_dir).unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=$RUSTOW_SECRET_ROOT/stow\n").unwrap();
+
+    let mut blocked_permissions = fs::metadata(&blocked_target_dir).unwrap().permissions();
+    blocked_permissions.set_mode(0o0);
+    fs::set_permissions(&blocked_target_dir, blocked_permissions).unwrap();
+
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        (
+            "RUSTOW_SECRET_ROOT",
+            secret_root
+                .to_str()
+                .expect("secret root should be valid utf-8"),
+        ),
+    ];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+
+    let mut restored_permissions = fs::metadata(&blocked_target_dir).unwrap().permissions();
+    restored_permissions.set_mode(0o700);
+    fs::set_permissions(&blocked_target_dir, restored_permissions).unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_ROOT/blocked"));
+    assert!(stderr.contains("IO error"));
+    assert!(!stderr.contains("Operation failed"));
 }
 
 #[test]
