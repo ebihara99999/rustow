@@ -3968,6 +3968,158 @@ fn test_binary_stowrc_env_expanded_package_validation_error_is_redacted() {
 }
 
 #[test]
+fn test_binary_stowrc_env_expanded_action_output_is_redacted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let secret_root = temp_dir.path().join("secret-value-from-env");
+    let stow_dir = secret_root.join("stow");
+    let target_dir = secret_root.join("target");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+    fs::write(
+        cwd.join(".stowrc"),
+        "--dir=$RUSTOW_SECRET_ROOT/stow\n--target=$RUSTOW_SECRET_ROOT/target\n",
+    )
+    .unwrap();
+
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        (
+            "RUSTOW_SECRET_ROOT",
+            secret_root
+                .to_str()
+                .expect("secret root should be valid utf-8"),
+        ),
+    ];
+    let output = run_rustow_with(["--simulate", "pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr);
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_ROOT/stow/pkg/bin"));
+    assert!(stderr.contains("$RUSTOW_SECRET_ROOT/target/bin"));
+}
+
+#[test]
+fn test_binary_stowrc_env_expanded_conflict_output_is_redacted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let secret_root = temp_dir.path().join("secret-value-from-env");
+    let stow_dir = secret_root.join("stow");
+    let target_dir = secret_root.join("target");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::create_dir_all(target_dir.join("bin")).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+    fs::write(target_dir.join("bin/tool"), "existing").unwrap();
+    fs::write(
+        cwd.join(".stowrc"),
+        "--dir=$RUSTOW_SECRET_ROOT/stow\n--target=$RUSTOW_SECRET_ROOT/target\n",
+    )
+    .unwrap();
+
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        (
+            "RUSTOW_SECRET_ROOT",
+            secret_root
+                .to_str()
+                .expect("secret root should be valid utf-8"),
+        ),
+    ];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_ROOT/target/bin/tool"));
+}
+
+#[test]
+fn test_binary_stowrc_env_expanded_failure_output_is_redacted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let secret_root = temp_dir.path().join("secret-value-from-env");
+    let stow_dir = secret_root.join("stow");
+    let target_dir = secret_root.join("target");
+    let external_dir = temp_dir.path().join("external");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(&external_dir).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+    rustow::fs_utils::create_symlink(&target_dir.join("bin"), &external_dir).unwrap();
+    fs::write(
+        cwd.join(".stowrc"),
+        "--dir=$RUSTOW_SECRET_ROOT/stow\n--target=$RUSTOW_SECRET_ROOT/target\n",
+    )
+    .unwrap();
+
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        (
+            "RUSTOW_SECRET_ROOT",
+            secret_root
+                .to_str()
+                .expect("secret root should be valid utf-8"),
+        ),
+    ];
+    let output = run_rustow_with(["--no-folding", "pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_ROOT/target/bin"));
+}
+
+#[test]
+fn test_binary_stowrc_env_expanded_default_target_output_is_redacted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let secret_root = temp_dir.path().join("secret-value-from-env");
+    let stow_dir = secret_root.join("stow");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=$RUSTOW_SECRET_ROOT/stow\n").unwrap();
+
+    let envs = vec![
+        (
+            "HOME",
+            home_dir.to_str().expect("home dir should be valid utf-8"),
+        ),
+        (
+            "RUSTOW_SECRET_ROOT",
+            secret_root
+                .to_str()
+                .expect("secret root should be valid utf-8"),
+        ),
+    ];
+    let output = run_rustow_with(["--simulate", "pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr);
+    assert!(!stderr.contains("secret-value-from-env"));
+    assert!(stderr.contains("$RUSTOW_SECRET_ROOT/bin"));
+    assert!(stderr.contains("$RUSTOW_SECRET_ROOT/stow/pkg/bin"));
+}
+
+#[test]
 fn test_binary_stowrc_expansion_and_quote_handling() {
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let home_dir = temp_dir.path().join("home");
@@ -4034,6 +4186,44 @@ fn test_binary_accepts_hyphen_prefixed_separate_option_values() {
         assert_ne!(output.status.code(), Some(2));
         assert!(!stderr.contains("requires a value"));
     }
+
+    let help_as_value = run_rustow(["-Dt", "--help", "pkg"]);
+    assert_ne!(help_as_value.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&help_as_value.stdout).contains("Usage:"));
+
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = temp_dir.path().join("stow");
+    let target_dir = cwd.join("--verbose");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(
+        [
+            "--dir",
+            stow_dir.to_str().expect("stow dir should be valid utf-8"),
+            "--target",
+            "--verbose",
+            "pkg",
+        ],
+        &cwd,
+        &envs,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target_dir.join("bin/tool").exists());
 }
 
 #[test]

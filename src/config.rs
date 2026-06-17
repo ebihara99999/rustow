@@ -3,7 +3,7 @@ use crate::error::{ConfigError, FsError, Result as RustowResult, RustowError};
 use crate::fs_utils; // Import fs_utils
 use regex::Regex;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StowMode {
@@ -95,16 +95,24 @@ impl Config {
         ));
 
         // 3. Resolve target_dir
-        let target_dir_path_unresolved: PathBuf = match args.target {
-            Some(path) => path,
-            None => stow_dir.parent().ok_or_else(|| {
-                RustowError::Config(ConfigError::InvalidTargetDir(
-                    format!("Stow directory '{}' has no parent, cannot determine default target directory", stow_dir.display())
-                ))
-            })?.to_path_buf(),
+        let (target_dir_path_unresolved, target_dir_display): (PathBuf, String) = match args.target
+        {
+            Some(path) => {
+                let display = crate::cli::path_display(&path, path_displays);
+                (path, display)
+            },
+            None => {
+                let path = stow_dir.parent().ok_or_else(|| {
+                        RustowError::Config(ConfigError::InvalidTargetDir(format!(
+                            "Stow directory '{}' has no parent, cannot determine default target directory",
+                            stow_dir_display
+                        )))
+                    })?.to_path_buf();
+                let display = display_parent(&stow_dir_display)
+                    .unwrap_or_else(|| crate::cli::path_display(&path, path_displays));
+                (path, display)
+            },
         };
-        let target_dir_display =
-            crate::cli::path_display(&target_dir_path_unresolved, path_displays);
         let target_dir: PathBuf = fs_utils::canonicalize_path(&target_dir_path_unresolved)
             .map_err(|e| match e {
                 RustowError::Fs(FsError::Canonicalize { source, .. }) => {
@@ -191,6 +199,12 @@ impl Config {
             home_dir,
         })
     }
+}
+
+fn display_parent(display: &str) -> Option<String> {
+    let parent = Path::new(display).parent()?;
+    let parent_display = parent.display().to_string();
+    (!parent_display.is_empty()).then_some(parent_display)
 }
 
 #[cfg(test)]
@@ -452,9 +466,9 @@ mod tests {
                 Args::parse_runtime_from_with_operation_groups(["rustow", "other-pkg"]);
         }
 
-        let mut path_displays = first_parsed.path_displays;
+        let (first_parsed, mut path_displays) = first_parsed.into_parts();
         let config_result =
-            Config::from_args_with_path_displays(first_parsed.parsed_args.args, &mut path_displays);
+            Config::from_args_with_path_displays(first_parsed.args, &mut path_displays);
         assert!(config_result.is_err());
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidStowDir(msg)) => {
@@ -492,9 +506,8 @@ mod tests {
             missing_stow.to_str().unwrap(),
             "pkg",
         ]);
-        let mut path_displays = parsed.path_displays;
-        let config_result =
-            Config::from_args_with_path_displays(parsed.parsed_args.args, &mut path_displays);
+        let (parsed, mut path_displays) = parsed.into_parts();
+        let config_result = Config::from_args_with_path_displays(parsed.args, &mut path_displays);
         assert!(config_result.is_err());
         match config_result.err().unwrap() {
             RustowError::Config(ConfigError::InvalidStowDir(msg)) => {

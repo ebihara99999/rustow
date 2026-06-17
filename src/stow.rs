@@ -2988,7 +2988,7 @@ pub fn validate_package_for_operation(
     validate_package_for_operation_with_display(stow_dir, package_name, None, None)
 }
 
-pub fn validate_package_for_operation_with_display(
+pub(crate) fn validate_package_for_operation_with_display(
     stow_dir: &Path,
     package_name: &str,
     package_path_display: Option<&str>,

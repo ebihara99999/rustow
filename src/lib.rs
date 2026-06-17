@@ -35,10 +35,11 @@ pub fn run_parsed(parsed_args: ParsedArgs) -> Result<(), RustowError> {
 
 #[doc(hidden)]
 pub fn run_runtime_parsed(parsed_args: RuntimeParsedArgs) -> Result<(), RustowError> {
+    let (parsed_args, path_displays) = parsed_args.into_parts();
     run_with_operation_groups_and_path_displays(
-        parsed_args.parsed_args.args,
-        parsed_args.parsed_args.operation_groups,
-        parsed_args.path_displays,
+        parsed_args.args,
+        parsed_args.operation_groups,
+        path_displays,
     )
 }
 
@@ -69,7 +70,7 @@ fn run_with_operation_groups_and_path_displays(
             let reports = execute_config_operations(&config, &package_operations)?;
 
             // Process reports for logging/output
-            process_reports(&reports, &config);
+            process_reports(&reports, &config, &path_displays);
 
             let conflict_count = reports
                 .iter()
@@ -257,7 +258,11 @@ fn reports_have_blocking_status(reports: &[crate::stow::TargetActionReport]) -> 
 }
 
 /// Process and display action reports based on verbosity and simulation settings
-fn process_reports(reports: &[crate::stow::TargetActionReport], config: &Config) {
+fn process_reports(
+    reports: &[crate::stow::TargetActionReport],
+    config: &Config,
+    path_displays: &[PathDisplayOverride],
+) {
     if reports.is_empty() {
         if config.verbosity > 0 {
             eprintln!("No actions to perform.");
@@ -270,26 +275,26 @@ fn process_reports(reports: &[crate::stow::TargetActionReport], config: &Config)
             crate::stow::TargetActionReportStatus::Success => {
                 if config.verbosity > 1 || config.simulate {
                     if let Some(message) = &report.message {
-                        eprintln!("{}", message);
+                        eprintln!("{}", redact_report_text(message, path_displays));
                     }
                 }
             },
             crate::stow::TargetActionReportStatus::Skipped => {
                 if config.verbosity > 0 || config.simulate {
                     if let Some(message) = &report.message {
-                        eprintln!("{}", message);
+                        eprintln!("{}", redact_report_text(message, path_displays));
                     }
                 }
             },
             crate::stow::TargetActionReportStatus::ConflictPrevented => {
                 if let Some(message) = &report.message {
-                    eprintln!("{}", message);
+                    eprintln!("{}", redact_report_text(message, path_displays));
                 }
             },
             crate::stow::TargetActionReportStatus::Failure(error) => {
-                eprintln!("ERROR: {}", error);
+                eprintln!("ERROR: {}", redact_report_text(error, path_displays));
                 if let Some(message) = &report.message {
-                    eprintln!("Details: {}", message);
+                    eprintln!("Details: {}", redact_report_text(message, path_displays));
                 }
             },
         }
@@ -324,4 +329,24 @@ fn process_reports(reports: &[crate::stow::TargetActionReport], config: &Config)
             success_count, skipped_count, conflict_count, failure_count
         );
     }
+}
+
+fn redact_report_text(text: &str, path_displays: &[PathDisplayOverride]) -> String {
+    let mut replacements: Vec<(String, String)> = path_displays
+        .iter()
+        .filter_map(|override_path| {
+            let path = override_path.path.display().to_string();
+            if path.is_empty() || path == override_path.display {
+                return None;
+            }
+            Some((path, override_path.display.clone()))
+        })
+        .collect();
+    replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+
+    replacements
+        .into_iter()
+        .fold(text.to_string(), |redacted, (path, display)| {
+            redacted.replace(&path, &display)
+        })
 }

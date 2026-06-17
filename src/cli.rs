@@ -55,8 +55,15 @@ impl std::fmt::Debug for PathDisplayOverride {
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct RuntimeParsedArgs {
-    pub parsed_args: ParsedArgs,
-    pub(crate) path_displays: Vec<PathDisplayOverride>,
+    parsed_args: ParsedArgs,
+    path_displays: Vec<PathDisplayOverride>,
+}
+
+impl RuntimeParsedArgs {
+    #[allow(dead_code)]
+    pub(crate) fn into_parts(self) -> (ParsedArgs, Vec<PathDisplayOverride>) {
+        (self.parsed_args, self.path_displays)
+    }
 }
 
 impl std::fmt::Debug for RuntimeParsedArgs {
@@ -1036,7 +1043,7 @@ fn expand_environment_value(
                     }
                     continue;
                 }
-                let value = env::var(&variable).unwrap_or_default();
+                let value = env_resource_value(&variable);
                 output.push_str(&value);
                 display.push_str(&format!("${{{}}}", variable));
                 changed_display = true;
@@ -1056,7 +1063,7 @@ fn expand_environment_value(
                         }
                     }
 
-                    let value = env::var(&variable).unwrap_or_default();
+                    let value = env_resource_value(&variable);
                     output.push_str(&value);
                     display.push_str(&format!("${}", variable));
                     changed_display = true;
@@ -1077,6 +1084,19 @@ fn expand_environment_value(
         value: output,
         display: changed_display.then_some(display),
     })
+}
+
+fn env_resource_value(variable: &str) -> String {
+    match env::var(variable) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!(
+                "Use of uninitialized value ${} in stow resource file expansion; substituting empty string",
+                variable
+            );
+            String::new()
+        },
+    }
 }
 
 fn expand_tilde_value(value: &str) -> String {
