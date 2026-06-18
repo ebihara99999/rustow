@@ -261,6 +261,7 @@ fn parse_args_from_argv(argv: &[OsString]) -> Result<Args, clap::Error> {
         return <Args as Parser>::try_parse_from([program, help_or_version]);
     }
 
+    validate_cli_option_tokens(argv)?;
     let verbose = parse_verbose_level(argv)?;
     let mut args = <Args as Parser>::try_parse_from(normalize_verbose_args(argv)?)?;
     args.verbose = verbose;
@@ -268,7 +269,6 @@ fn parse_args_from_argv(argv: &[OsString]) -> Result<Args, clap::Error> {
 }
 
 fn validate_cli_args_before_resource_files(argv: &[OsString]) -> Result<(), clap::Error> {
-    validate_cli_option_tokens(argv)?;
     match parse_args_from_argv(argv) {
         Ok(_) => Ok(()),
         Err(error)
@@ -327,7 +327,7 @@ fn validate_cli_option_tokens(argv: &[OsString]) -> Result<(), clap::Error> {
                 | LongOptionKind::Help
                 | LongOptionKind::Version => {
                     if has_attached_value {
-                        return Err(unknown_option_error(&arg));
+                        return Err(long_option_value_error(key));
                     }
                 },
             }
@@ -372,6 +372,15 @@ fn unknown_long_option_error(option: &str) -> clap::Error {
     clap::Error::raw(
         clap::error::ErrorKind::UnknownArgument,
         format!("Unknown option: {option}\n\n{usage}"),
+    )
+}
+
+fn long_option_value_error(option: &str) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    clap::Error::raw(
+        clap::error::ErrorKind::InvalidValue,
+        format!("Option {option} does not take a value\n\n{usage}"),
     )
 }
 
@@ -1000,6 +1009,8 @@ const LONG_OPTION_SPECS: &[LongOptionSpec] = &[
     },
 ];
 
+const SHORT_OPTION_SPECS: &[char] = &['h', 'V', 'S', 'D', 'R', 'p', 'n', 'v', 't', 'd'];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LongOptionResolveError {
     Unknown,
@@ -1177,13 +1188,15 @@ impl StowrcNormalizer {
         }
 
         if token_text == "--" {
-            // Packages are ignored in resource files.
+            // GNU Stow ignores package names in resource files; after `--`,
+            // every following token is necessarily a package-like argument.
             self.after_double_dash = true;
             return Ok(());
         }
 
         if !token_text.starts_with('-') {
-            // Treated as package names in resource files.
+            // GNU Stow does not allow package names in resource files, so
+            // package-like tokens are ignored instead of becoming CLI args.
             return Ok(());
         }
 
@@ -1336,6 +1349,7 @@ fn parse_long_stowrc_option(
 
     match resolve_long_option(long_token) {
         Ok(spec) => match spec.kind {
+            // GNU Stow ignores -D, -R, and -S in resource files.
             LongOptionKind::Mode(_) => Ok(None),
             LongOptionKind::Value(option_name) => Ok(Some(ParsedResourceOption {
                 tokens: Vec::new(),
@@ -1380,6 +1394,118 @@ fn map_long_value_option(token: &str) -> Option<ResourceValueOption> {
     }
 }
 
+#[cfg(unix)]
+fn parse_short_stowrc_option(
+    token: &OsString,
+    origin: &StowrcTokenOrigin,
+) -> Result<Option<ParsedResourceOption>, clap::Error> {
+    let bytes = token.as_os_str().as_bytes();
+    let cluster = &bytes[1..];
+    if cluster.is_empty() {
+        return Ok(None);
+    }
+
+    let mut bool_flags = Vec::new();
+    let mut verbose = ResourceVerboseAction::default();
+    let mut index = 0;
+
+    while index < cluster.len() {
+        match cluster[index] {
+            b'S' | b'D' | b'R' => {
+                // GNU Stow ignores -D, -R, and -S in resource files.
+            },
+            b't' | b'd' => {
+                let flag = cluster[index];
+                let option_name = match flag {
+                    b't' => ResourceValueOption::Target,
+                    b'd' => ResourceValueOption::Dir,
+                    _ => unreachable!(),
+                };
+                let rest = &cluster[index + 1..];
+                let mut value_prefix = Vec::with_capacity(1 + bool_flags.len() + 1);
+                value_prefix.push(b'-');
+                value_prefix.extend_from_slice(&bool_flags);
+                value_prefix.push(flag);
+
+                if rest.is_empty() {
+                    let value_prefix = String::from_utf8(value_prefix)
+                        .expect("resource short option prefix is ASCII");
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: Vec::new(),
+                        expecting_value: Some(ResourceValueExpectation {
+                            option_name,
+                            value_prefix,
+                        }),
+                        path_value: None,
+                        verbose,
+                    }));
+                }
+
+                let mut normalized = value_prefix.clone();
+                normalized.extend_from_slice(rest);
+                return Ok(Some(ParsedResourceOption {
+                    tokens: vec![OsString::from_vec(normalized)],
+                    expecting_value: None,
+                    path_value: Some(ResourcePathValue {
+                        index: 0,
+                        option_name,
+                        value_start: value_prefix.len(),
+                    }),
+                    verbose,
+                }));
+            },
+            b'v' => {
+                let rest = &cluster[index + 1..];
+                if rest.is_empty() {
+                    verbose.expects_value = true;
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: normalized_short_tokens_from_bytes(&bool_flags, &[]),
+                        expecting_value: None,
+                        path_value: None,
+                        verbose,
+                    }));
+                }
+                if rest.first().is_some_and(u8::is_ascii_digit) {
+                    let rest = std::str::from_utf8(rest).map_err(|_| {
+                        stowrc_verbose_level_error(&String::from_utf8_lossy(rest), origin)
+                    })?;
+                    verbose.value = Some(parse_stowrc_verbose_numeric_value(rest, origin)?);
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: normalized_short_tokens_from_bytes(&bool_flags, &[]),
+                        expecting_value: None,
+                        path_value: None,
+                        verbose,
+                    }));
+                }
+                verbose.increments = verbose.increments.saturating_add(1);
+            },
+            b'p' | b'h' | b'V' | b'n' => {
+                bool_flags.push(cluster[index]);
+            },
+            other => {
+                return Err(unknown_stowrc_short_option_error(
+                    char::from_u32(u32::from(other)).unwrap_or('\u{FFFD}'),
+                    origin,
+                ));
+            },
+        }
+
+        index += 1;
+    }
+
+    if bool_flags.is_empty() && verbose.increments == 0 && verbose.value.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(ParsedResourceOption {
+            tokens: normalized_short_tokens_from_bytes(&bool_flags, &[]),
+            expecting_value: None,
+            path_value: None,
+            verbose,
+        }))
+    }
+}
+
+#[cfg(not(unix))]
 fn parse_short_stowrc_option(
     token: &OsString,
     origin: &StowrcTokenOrigin,
@@ -1654,6 +1780,32 @@ fn expand_path_value_with_display(
     })
 }
 
+#[cfg(unix)]
+fn expand_path_value_os_with_display(
+    raw_value: OsString,
+    option_name: ResourceValueOption,
+) -> Result<ExpandedPathValue, clap::Error> {
+    if let Some(raw_value) = raw_value.to_str() {
+        return expand_path_value_with_display(raw_value, option_name);
+    }
+
+    let env_expanded = expand_environment_value_os(raw_value, option_name)?;
+    let display = env_expanded
+        .display
+        .map(|display| unescape_tilde_markers(&display))
+        .or_else(|| {
+            let tilde_expanded = expand_tilde_value_with_display(env_expanded.value.clone());
+            tilde_expanded.display
+        });
+    let tilde_expanded = expand_tilde_value_with_display(env_expanded.value);
+
+    Ok(ExpandedPathValue {
+        value: tilde_expanded.value,
+        display,
+    })
+}
+
+#[cfg(not(unix))]
 fn expand_path_value_os_with_display(
     raw_value: OsString,
     option_name: ResourceValueOption,
@@ -1771,6 +1923,116 @@ fn expand_environment_value(
     Ok(ExpandedEnvironmentValue {
         value: output,
         display: changed_display.then_some(display),
+    })
+}
+
+#[cfg(unix)]
+fn expand_environment_value_os(
+    raw_value: OsString,
+    option_name: ResourceValueOption,
+) -> Result<ExpandedEnvironmentValue, clap::Error> {
+    let bytes = raw_value.as_os_str().as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut display = Vec::with_capacity(bytes.len());
+    let mut changed_display = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' {
+            if let Some(next) = bytes.get(index + 1) {
+                if *next == b'$' {
+                    output.push(*next);
+                    display.push(*next);
+                } else {
+                    output.push(b'\\');
+                    output.push(*next);
+                    display.push(b'\\');
+                    display.push(*next);
+                }
+                index += 2;
+            } else {
+                output.push(b'\\');
+                display.push(b'\\');
+                index += 1;
+            }
+            continue;
+        }
+
+        if byte == b'$' {
+            if bytes.get(index + 1) == Some(&b'{') {
+                let variable_start = index + 2;
+                let mut variable_end = variable_start;
+                let mut closed = false;
+                while variable_end < bytes.len() {
+                    if bytes[variable_end] == b'}' {
+                        closed = true;
+                        break;
+                    }
+                    variable_end += 1;
+                }
+                let variable = &bytes[variable_start..variable_end];
+                if closed && is_gnu_braced_env_name_bytes(variable) {
+                    let variable = std::str::from_utf8(variable)
+                        .expect("validated braced environment name is ASCII");
+                    let value = env_resource_value(variable, option_name)?;
+                    output.extend_from_slice(value.as_os_str().as_bytes());
+                    display.extend_from_slice(b"${");
+                    display.extend_from_slice(variable.as_bytes());
+                    display.push(b'}');
+                    changed_display = true;
+                    index = variable_end + 1;
+                    continue;
+                }
+
+                output.extend_from_slice(b"${");
+                output.extend_from_slice(variable);
+                display.extend_from_slice(b"${");
+                display.extend_from_slice(variable);
+                if closed {
+                    output.push(b'}');
+                    display.push(b'}');
+                    index = variable_end + 1;
+                } else {
+                    index = variable_end;
+                }
+                continue;
+            }
+
+            if let Some(next) = bytes.get(index + 1) {
+                if is_valid_var_start_byte(*next) {
+                    let variable_start = index + 1;
+                    let mut variable_end = variable_start + 1;
+                    while variable_end < bytes.len() && is_valid_var_char_byte(bytes[variable_end])
+                    {
+                        variable_end += 1;
+                    }
+                    let variable = std::str::from_utf8(&bytes[variable_start..variable_end])
+                        .expect("validated environment name is ASCII");
+                    let value = env_resource_value(variable, option_name)?;
+                    output.extend_from_slice(value.as_os_str().as_bytes());
+                    display.push(b'$');
+                    display.extend_from_slice(variable.as_bytes());
+                    changed_display = true;
+                    index = variable_end;
+                    continue;
+                }
+            }
+
+            output.push(b'$');
+            display.push(b'$');
+            index += 1;
+            continue;
+        }
+
+        output.push(byte);
+        display.push(byte);
+        index += 1;
+    }
+
+    Ok(ExpandedEnvironmentValue {
+        value: OsString::from_vec(output),
+        display: changed_display.then(|| String::from_utf8_lossy(&display).into_owned()),
     })
 }
 
@@ -2096,6 +2358,24 @@ fn is_gnu_braced_env_name(variable: &str) -> bool {
             .all(|ch| is_valid_var_char(ch) || ch.is_ascii_whitespace())
 }
 
+#[cfg(unix)]
+fn is_valid_var_start_byte(byte: u8) -> bool {
+    is_valid_var_char_byte(byte)
+}
+
+#[cfg(unix)]
+fn is_valid_var_char_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+#[cfg(unix)]
+fn is_gnu_braced_env_name_bytes(variable: &[u8]) -> bool {
+    !variable.is_empty()
+        && variable
+            .iter()
+            .all(|byte| is_valid_var_char_byte(*byte) || byte.is_ascii_whitespace())
+}
+
 fn normalize_verbose_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
     let mut normalized_args = Vec::with_capacity(argv.len());
     let mut expecting_option_value = false;
@@ -2312,6 +2592,7 @@ fn normalize_short_verbose_arg(arg: &OsString) -> Result<NormalizedShortArg, cla
     })
 }
 
+#[cfg(not(unix))]
 fn normalized_short_tokens(flags: String) -> Vec<OsString> {
     if flags.is_empty() {
         Vec::new()
@@ -2545,10 +2826,7 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
 }
 
 fn is_known_short_option(flag: char) -> bool {
-    matches!(
-        flag,
-        'h' | 'V' | 'S' | 'D' | 'R' | 'p' | 'n' | 'v' | 't' | 'd'
-    )
+    SHORT_OPTION_SPECS.contains(&flag)
 }
 
 fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<bool, clap::Error> {
@@ -2954,31 +3232,46 @@ mod tests {
         long_options.extend(["help".to_string(), "version".to_string()]);
         short_options.extend(['h', 'V']);
 
-        for option in long_options {
+        let compat_long_options = LONG_OPTION_SPECS
+            .iter()
+            .map(|spec| spec.name.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            compat_long_options, long_options,
+            "compat long option table must match clap-visible options exactly"
+        );
+
+        let compat_short_options = SHORT_OPTION_SPECS.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(
+            compat_short_options, short_options,
+            "compat short option table must match clap-visible options exactly"
+        );
+
+        for option in &long_options {
             assert!(
-                is_known_long_option(&option),
+                is_known_long_option(option),
                 "compat parser must know --{}",
                 option
             );
             assert_eq!(
                 matches!(
-                    resolve_long_option(&option).map(|spec| spec.kind),
+                    resolve_long_option(option).map(|spec| spec.kind),
                     Ok(LongOptionKind::Value(_))
                 ),
-                long_value_options.contains(&option),
+                long_value_options.contains(option),
                 "compat parser value shape must match --{}",
                 option
             );
         }
-        for option in short_options {
+        for option in &short_options {
             assert!(
-                is_known_short_option(option),
+                is_known_short_option(*option),
                 "compat parser must know -{}",
                 option
             );
             assert_eq!(
-                matches!(option, 't' | 'd'),
-                short_value_options.contains(&option),
+                matches!(*option, 't' | 'd'),
+                short_value_options.contains(option),
                 "compat parser value shape must match -{}",
                 option
             );
@@ -3390,6 +3683,27 @@ mod tests {
         let error = Args::try_parse_from(["rustow", "--version", "--bad-option"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         assert!(error.to_string().contains("Unknown option: bad-option"));
+    }
+
+    #[test]
+    fn test_invalid_option_precedes_invalid_verbose_for_public_and_runtime_parsers() {
+        let _lock = process_env_lock();
+        let public =
+            Args::try_parse_from(["rustow", "--bad-option", "--verbose=bad", "pkg"]).unwrap_err();
+        assert_eq!(public.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(public.to_string().contains("Unknown option: bad-option"));
+        assert!(!public.to_string().contains("verbosity level"));
+
+        let runtime = Args::try_parse_runtime_from_with_operation_groups([
+            "rustow",
+            "--bad-option",
+            "--verbose=bad",
+            "pkg",
+        ])
+        .unwrap_err();
+        assert_eq!(runtime.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(runtime.to_string().contains("Unknown option: bad-option"));
+        assert!(!runtime.to_string().contains("verbosity level"));
     }
 
     #[test]
@@ -4338,6 +4652,53 @@ mod tests {
         let _stow_dir_guard = OsEnvVarGuard::new("RUSTOW_NONUTF_STOW_DIR", stow_dir.as_os_str());
 
         write_file(&cwd.join(".stowrc"), "--dir=$RUSTOW_NONUTF_STOW_DIR\n");
+
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(stow_dir));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stowrc_short_attached_path_options_preserve_non_utf8_values() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        let stow_dir = non_utf8_child(temp_dir.path(), b"stow-\xff");
+        let target_dir = non_utf8_child(temp_dir.path(), b"target-\xfe");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        let mut stowrc = b"-d".to_vec();
+        stowrc.extend_from_slice(stow_dir.as_os_str().as_bytes());
+        stowrc.extend_from_slice(b"\n-pt");
+        stowrc.extend_from_slice(target_dir.as_os_str().as_bytes());
+        stowrc.push(b'\n');
+        fs::write(cwd.join(".stowrc"), stowrc).unwrap();
+
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(stow_dir));
+        assert_eq!(args.target, Some(target_dir));
+        assert!(args.compat);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stowrc_raw_path_expands_env_before_non_utf8_suffix() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        let home_dir = temp_dir.path().join("home");
+        let stow_dir = non_utf8_child(&home_dir, b"stow-\xff");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home_dir).unwrap();
+        let _home_guard = EnvVarGuard::new("HOME", home_dir.to_str().unwrap());
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        let mut stowrc = b"-d$HOME/".to_vec();
+        stowrc.extend_from_slice(b"stow-\xff\n");
+        fs::write(cwd.join(".stowrc"), stowrc).unwrap();
 
         let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, Some(stow_dir));

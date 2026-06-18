@@ -536,7 +536,8 @@ fn redact_rustow_error(error: RustowError, redactions: &RedactionTable) -> Rusto
         RustowError::InvalidPattern(pattern) => {
             RustowError::InvalidPattern(redact_owned_string(pattern, redactions))
         },
-        other => other,
+        RustowError::Io(error) => RustowError::Io(error),
+        RustowError::Regex(error) => RustowError::Regex(error),
     }
 }
 

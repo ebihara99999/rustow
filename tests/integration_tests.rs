@@ -3744,6 +3744,26 @@ fn test_binary_verbose_parse_errors_and_help_exit_codes() {
 }
 
 #[test]
+fn test_binary_attached_values_for_flag_options_are_rejected() {
+    for (arg, option) in [
+        ("--simulate=yes", "simulate"),
+        ("--help=yes", "help"),
+        ("--version=yes", "version"),
+    ] {
+        let output = run_rustow([arg, "pkg"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr);
+        assert!(
+            stderr.contains(&format!("Option {option} does not take a value")),
+            "stderr: {}",
+            stderr
+        );
+        assert!(stderr.contains("Usage:"), "stderr: {}", stderr);
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
 fn test_binary_long_option_abbreviation_diagnostics() {
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let stow_dir = temp_dir.path().join("stow");
@@ -4039,6 +4059,40 @@ fn test_binary_stowrc_literal_non_utf8_path_is_preserved() {
     stowrc.extend_from_slice(b"\n--target=");
     stowrc.extend_from_slice(target_dir.as_os_str().as_bytes());
     stowrc.extend_from_slice(b"\n");
+    fs::write(cwd.join(".stowrc"), stowrc).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustow"))
+        .arg("pkg")
+        .current_dir(&cwd)
+        .env("HOME", &home_dir)
+        .env_remove("STOW_DIR")
+        .output()
+        .expect("Failed to run rustow binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr);
+    assert!(target_dir.join("bin/tool").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_binary_stowrc_short_attached_non_utf8_paths_are_preserved() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = non_utf8_child(temp_dir.path(), b"stow-\xff");
+    let target_dir = non_utf8_child(temp_dir.path(), b"target-\xfe");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+
+    let mut stowrc = b"-d".to_vec();
+    stowrc.extend_from_slice(stow_dir.as_os_str().as_bytes());
+    stowrc.extend_from_slice(b"\n-t");
+    stowrc.extend_from_slice(target_dir.as_os_str().as_bytes());
+    stowrc.push(b'\n');
     fs::write(cwd.join(".stowrc"), stowrc).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_rustow"))
