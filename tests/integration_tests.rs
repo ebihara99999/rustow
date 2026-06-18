@@ -4429,6 +4429,7 @@ fn test_binary_stowrc_undefined_env_errors_before_cli_override() {
     assert!(stderr.contains(
         "--dir option references undefined environment variable $RUSTOW_TEST_UNDEFINED_STOWRC_VAR_FOR_COMPAT; aborting!"
     ));
+    assert!(stderr.contains("./.stowrc:1"));
 
     let cli_override = Command::new(env!("CARGO_BIN_EXE_rustow"))
         .args([
@@ -4449,6 +4450,40 @@ fn test_binary_stowrc_undefined_env_errors_before_cli_override() {
     assert!(stderr.contains(
         "--dir option references undefined environment variable $RUSTOW_TEST_UNDEFINED_STOWRC_VAR_FOR_COMPAT; aborting!"
     ));
+    assert!(stderr.contains("./.stowrc:1"));
+}
+
+#[test]
+fn test_binary_stowrc_undefined_env_errors_include_home_origin() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+
+    let stow_dir = home_dir.join("stow");
+    fs::create_dir_all(&stow_dir).unwrap();
+
+    fs::write(
+        &home_dir.join(".stowrc"),
+        "--dir=$RUSTOW_HOME_STOWRC_UNDEFINED\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustow"))
+        .args(["pkg"])
+        .current_dir(&cwd)
+        .env("HOME", &home_dir)
+        .env_remove("STOW_DIR")
+        .env_remove("RUSTOW_HOME_STOWRC_UNDEFINED")
+        .output()
+        .expect("Failed to run rustow binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr);
+    assert!(stderr.contains(
+        "--dir option references undefined environment variable $RUSTOW_HOME_STOWRC_UNDEFINED; aborting!"
+    ));
+    assert!(stderr.contains("~/.stowrc:1"));
 }
 
 #[test]
@@ -4676,6 +4711,62 @@ fn test_binary_stowrc_env_expanded_failure_output_is_redacted() {
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
     assert!(!stderr.contains("secret-value-from-env"));
     assert!(stderr.contains("$RUSTOW_SECRET_ROOT/target/bin"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_binary_stowrc_global_ignore_error_is_redacted() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = temp_dir.path().join("stow");
+    let target_dir = temp_dir.path().join("target");
+    let pkg_dir = stow_dir.join("pkg");
+
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&pkg_dir).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(pkg_dir.join("bin")).unwrap();
+    fs::write(pkg_dir.join("bin/tool"), "tool").unwrap();
+
+    let global_ignore = home_dir.join(".stow-global-ignore");
+    fs::write(&global_ignore, "*").unwrap();
+    let mut denied_permissions = fs::metadata(&global_ignore).unwrap().permissions();
+    denied_permissions.set_mode(0o0);
+    fs::set_permissions(&global_ignore, denied_permissions).unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(
+        [
+            "-d",
+            stow_dir.to_string_lossy().as_ref(),
+            "-t",
+            target_dir.to_string_lossy().as_ref(),
+            "pkg",
+        ],
+        &cwd,
+        &envs,
+    );
+
+    let mut restored_permissions = fs::metadata(&global_ignore).unwrap().permissions();
+    restored_permissions.set_mode(0o600);
+    fs::set_permissions(&global_ignore, restored_permissions).unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
+    assert!(stderr.contains("Failed to load ignore patterns for package 'pkg':"));
+    assert!(stderr.contains("~/.stow-global-ignore"));
+    assert!(!stderr.contains(home_dir.to_str().expect("home dir should be valid utf-8")));
 }
 
 #[cfg(unix)]

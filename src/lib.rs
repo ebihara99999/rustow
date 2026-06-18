@@ -74,6 +74,11 @@ fn run_with_operation_groups_and_path_displays(
             Ok(config) => {
                 // eprintln!("stderr: Successfully constructed config in lib::run: {:?}", config);
 
+                path_displays.push(PathDisplayOverride::new(
+                    config.home_dir.join(".stow-global-ignore"),
+                    "~/.stow-global-ignore".to_string(),
+                ));
+
                 let package_operations = package_operations_for_config(&config, operation_groups);
                 let diagnostic_path_displays = if redact_diagnostics {
                     path_displays.as_slice()

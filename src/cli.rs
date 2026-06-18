@@ -2,6 +2,10 @@ use clap::{Parser, builder::TypedValueParser};
 use std::ffi::OsString;
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
+#[cfg(unix)]
+use std::io::BufReader;
+use std::io::Read;
+#[cfg(not(unix))]
 use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -547,14 +551,16 @@ fn effective_path_displays(
     cli_argv: &[OsString],
 ) -> Vec<PathDisplayOverride> {
     let cli_overrides = cli_path_option_overrides(cli_argv);
-    resource_displays
+    let path_displays: Vec<PathDisplayOverride> = resource_displays
         .into_iter()
         .filter(|display| !cli_overrides.overrides(display.option_name))
         .map(|display| PathDisplayOverride {
             path: display.path,
             display: display.display,
         })
-        .collect()
+        .collect();
+
+    path_displays
 }
 
 #[derive(Debug, Default)]
@@ -743,12 +749,39 @@ fn stowrc_tokens_from_reader(
     let checkpoint = normalizer.checkpoint();
     let display_path = Arc::new(display_path.to_string());
     let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-    let mut line_number = 0;
+    let mut origin = StowrcTokenOrigin {
+        display_path: display_path.clone(),
+        line: 1,
+    };
+    let mut line_checkpoint = normalizer.checkpoint();
+    let mut push_error = None;
+
+    let mut token = Vec::new();
+    let mut token_started = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    let emit_token = |token: &mut Vec<u8>,
+                      normalizer: &mut StowrcNormalizer,
+                      origin: &StowrcTokenOrigin,
+                      push_error: &mut Option<clap::Error>| {
+        if token.is_empty() || push_error.is_some() {
+            token.clear();
+            return;
+        }
+
+        if let Err(error) = normalizer.push_token(StowrcToken {
+            value: OsString::from_vec(std::mem::take(token)),
+            origin: origin.clone(),
+        }) {
+            *push_error = Some(error);
+        }
+    };
 
     loop {
-        line.clear();
-        let bytes_read = match reader.read_until(b'\n', &mut line) {
+        let mut byte = [0_u8; 1];
+        let bytes_read = match reader.read(&mut byte) {
             Ok(bytes_read) => bytes_read,
             Err(err) if err.kind() == ErrorKind::PermissionDenied => {
                 normalizer.rewind(checkpoint);
@@ -766,53 +799,93 @@ fn stowrc_tokens_from_reader(
             },
         };
         if bytes_read == 0 {
-            break;
-        }
-        line_number += 1;
-
-        if line.ends_with(b"\n") {
-            line.pop();
-            if line.ends_with(b"\r") {
-                line.pop();
-            }
-        }
-
-        let origin = StowrcTokenOrigin {
-            display_path: display_path.clone(),
-            line: line_number,
-        };
-        let line_checkpoint = normalizer.checkpoint();
-        let mut push_error = None;
-        let tokenize_result = emit_stowrc_line_tokens_bytes(&line, |value| {
-            if push_error.is_some() {
-                return;
-            }
-            if let Err(error) = normalizer.push_token(StowrcToken {
-                value: OsString::from_vec(value),
-                origin: origin.clone(),
-            }) {
-                push_error = Some(error);
-            }
-        });
-        match tokenize_result {
-            Ok(true) => {
-                if let Some(error) = push_error {
-                    return Err(error);
-                }
-            },
-            Ok(false) => {
+            if escaped || in_single_quote || in_double_quote {
                 normalizer.rewind(line_checkpoint);
-            },
-            Err(err) => {
-                return Err(clap::Error::raw(
-                    clap::error::ErrorKind::InvalidValue,
-                    format!("{} in '{}:{}'", err, display_path, line_number),
-                ));
-            },
-        }
-    }
+                push_error = None;
+            } else {
+                emit_token(&mut token, normalizer, &origin, &mut push_error);
+            }
 
-    normalizer.finish_file()
+            if let Some(error) = push_error {
+                return Err(error);
+            }
+
+            return normalizer.finish_file();
+        }
+
+        let byte = byte[0];
+
+        if escaped {
+            if byte == b'\n' {
+                normalizer.rewind(line_checkpoint);
+                push_error = None;
+                token.clear();
+                token_started = false;
+                in_single_quote = false;
+                in_double_quote = false;
+                escaped = false;
+                origin.line += 1;
+                line_checkpoint = normalizer.checkpoint();
+                continue;
+            }
+
+            token.push(byte);
+            token_started = true;
+            escaped = false;
+            continue;
+        }
+
+        if byte == b'\\' && !in_single_quote {
+            escaped = true;
+            continue;
+        }
+
+        if byte == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            token_started = true;
+            continue;
+        }
+
+        if byte == b'\"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            token_started = true;
+            continue;
+        }
+
+        if byte == b'\n' {
+            if in_single_quote || in_double_quote {
+                normalizer.rewind(line_checkpoint);
+                push_error = None;
+                token.clear();
+            } else {
+                emit_token(&mut token, normalizer, &origin, &mut push_error);
+            }
+
+            token_started = false;
+            in_single_quote = false;
+            in_double_quote = false;
+            escaped = false;
+            if let Some(error) = push_error {
+                return Err(error);
+            }
+
+            origin.line += 1;
+            line_checkpoint = normalizer.checkpoint();
+            continue;
+        }
+
+        if byte.is_ascii_whitespace() && !in_single_quote && !in_double_quote {
+            if token_started {
+                emit_token(&mut token, normalizer, &origin, &mut push_error);
+            }
+
+            token_started = false;
+            continue;
+        }
+
+        token.push(byte);
+        token_started = true;
+    }
 }
 
 #[cfg(not(unix))]
@@ -1057,11 +1130,12 @@ fn long_option_abbreviation_candidates(option: &str) -> Vec<&'static str> {
     candidates
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ResourcePathValue {
     index: usize,
     option_name: ResourceValueOption,
     value_start: usize,
+    origin: StowrcTokenOrigin,
 }
 
 #[derive(Debug, Clone)]
@@ -1165,6 +1239,7 @@ impl StowrcNormalizer {
                     index: self.normalized.len(),
                     option_name: pending.option_name,
                     value_start,
+                    origin: pending.origin,
                 });
             }
             self.normalized.push(normalized_value);
@@ -1225,6 +1300,7 @@ impl StowrcNormalizer {
                 index: base_index + path_value.index,
                 option_name: path_value.option_name,
                 value_start: path_value.value_start,
+                origin: path_value.origin,
             });
         }
         if let Some(option_name) = parsed.expecting_value {
@@ -1308,6 +1384,7 @@ fn parse_long_stowrc_option(
                             index: 0,
                             option_name,
                             value_start: key.len() + 3,
+                            origin: origin.clone(),
                         }),
                         verbose: ResourceVerboseAction::default(),
                     }));
@@ -1450,6 +1527,7 @@ fn parse_short_stowrc_option(
                         index: 0,
                         option_name,
                         value_start: value_prefix.len(),
+                        origin: origin.clone(),
                     }),
                     verbose,
                 }));
@@ -1569,6 +1647,7 @@ fn parse_short_stowrc_option(
                         index: 0,
                         option_name,
                         value_start: prefix.len(),
+                        origin: origin.clone(),
                     }),
                     verbose,
                 }));
@@ -1672,68 +1751,6 @@ where
     Ok(true)
 }
 
-#[cfg(unix)]
-fn emit_stowrc_line_tokens_bytes<F>(line: &[u8], mut emit: F) -> Result<bool, String>
-where
-    F: FnMut(Vec<u8>),
-{
-    let mut token = Vec::new();
-    let mut token_started = false;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut index = 0;
-
-    while index < line.len() {
-        let byte = line[index];
-        if byte == b'\\' && !in_single_quote {
-            if let Some(next) = line.get(index + 1) {
-                token.push(*next);
-                token_started = true;
-                index += 2;
-                continue;
-            }
-            return Ok(false);
-        }
-
-        if byte == b'\'' && !in_double_quote {
-            in_single_quote = !in_single_quote;
-            token_started = true;
-            index += 1;
-            continue;
-        }
-
-        if byte == b'"' && !in_single_quote {
-            in_double_quote = !in_double_quote;
-            token_started = true;
-            index += 1;
-            continue;
-        }
-
-        if byte.is_ascii_whitespace() && !in_single_quote && !in_double_quote {
-            if token_started {
-                emit(std::mem::take(&mut token));
-                token_started = false;
-            }
-            index += 1;
-            continue;
-        }
-
-        token.push(byte);
-        token_started = true;
-        index += 1;
-    }
-
-    if in_single_quote || in_double_quote {
-        return Ok(false);
-    }
-
-    if token_started {
-        emit(token);
-    }
-
-    Ok(true)
-}
-
 #[cfg(test)]
 fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
@@ -1765,14 +1782,11 @@ fn expand_path_value_with_display(
     option_name: ResourceValueOption,
 ) -> Result<ExpandedPathValue, clap::Error> {
     let env_expanded = expand_environment_value(raw_value, option_name)?;
+    let tilde_expanded = expand_tilde_value_with_display(env_expanded.value.clone());
     let display = env_expanded
         .display
         .map(|display| unescape_tilde_markers(&display))
-        .or_else(|| {
-            let tilde_expanded = expand_tilde_value_with_display(env_expanded.value.clone());
-            tilde_expanded.display
-        });
-    let tilde_expanded = expand_tilde_value_with_display(env_expanded.value);
+        .or_else(|| tilde_expanded.display);
 
     Ok(ExpandedPathValue {
         value: tilde_expanded.value,
@@ -1790,14 +1804,11 @@ fn expand_path_value_os_with_display(
     }
 
     let env_expanded = expand_environment_value_os(raw_value, option_name)?;
+    let tilde_expanded = expand_tilde_value_with_display(env_expanded.value.clone());
     let display = env_expanded
         .display
         .map(|display| unescape_tilde_markers(&display))
-        .or_else(|| {
-            let tilde_expanded = expand_tilde_value_with_display(env_expanded.value.clone());
-            tilde_expanded.display
-        });
-    let tilde_expanded = expand_tilde_value_with_display(env_expanded.value);
+        .or_else(|| tilde_expanded.display);
 
     Ok(ExpandedPathValue {
         value: tilde_expanded.value,
@@ -2200,7 +2211,8 @@ fn expand_final_resource_path_values(
         if should_expand {
             let (prefix, raw_value) =
                 split_resource_path_token(&normalized[path_value.index], path_value.value_start);
-            let expanded = expand_path_value_os_with_display(raw_value, path_value.option_name)?;
+            let expanded = expand_path_value_os_with_display(raw_value, path_value.option_name)
+                .map_err(|error| resource_path_error_with_origin(&error, &path_value.origin))?;
             let mut expanded_token = prefix;
             expanded_token.push(&expanded.value);
             let redacted_path_value = expanded.value;
@@ -2217,6 +2229,13 @@ fn expand_final_resource_path_values(
     }
 
     Ok(path_displays)
+}
+
+fn resource_path_error_with_origin(error: &clap::Error, origin: &StowrcTokenOrigin) -> clap::Error {
+    clap::Error::raw(
+        error.kind(),
+        format!("{} in '{}:{}'", error, origin.display_path, origin.line),
+    )
 }
 
 #[cfg(unix)]
@@ -4379,6 +4398,7 @@ mod tests {
         assert!(error.to_string().contains(
             "--dir option references undefined environment variable $RUSTOW_UNDEFINED_STOWRC_VAR; aborting!"
         ));
+        assert!(error.to_string().contains("./.stowrc:1"));
     }
 
     #[test]
@@ -4427,6 +4447,35 @@ mod tests {
         assert!(error.to_string().contains(
             "--dir option references undefined environment variable $RUSTOW_CLI_OVERRIDE_UNDEFINED; aborting!"
         ));
+        assert!(error.to_string().contains("./.stowrc:1"));
+    }
+
+    #[test]
+    fn test_stowrc_undefined_env_errors_include_home_origin() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let _home_guard = EnvVarGuard::new("HOME", home_dir.to_str().unwrap());
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        unsafe {
+            std::env::remove_var("RUSTOW_HOME_STOWRC_UNDEFINED");
+        }
+
+        write_file(
+            &home_dir.join(".stowrc"),
+            "--dir=$RUSTOW_HOME_STOWRC_UNDEFINED\n",
+        );
+
+        let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
+        assert!(error.to_string().contains(
+            "--dir option references undefined environment variable $RUSTOW_HOME_STOWRC_UNDEFINED; aborting!"
+        ));
+        assert!(error.to_string().contains("~/.stowrc:1"));
     }
 
     #[test]
@@ -4680,6 +4729,28 @@ mod tests {
         assert_eq!(args.dir, Some(stow_dir));
         assert_eq!(args.target, Some(target_dir));
         assert!(args.compat);
+    }
+
+    #[test]
+    fn test_stowrc_short_attached_undefined_env_errors_include_origin() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        unsafe {
+            std::env::remove_var("RUSTOW_SHORT_STOWRC_UNDEFINED");
+        }
+
+        write_file(&cwd.join(".stowrc"), "-d$RUSTOW_SHORT_STOWRC_UNDEFINED\n");
+
+        let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--dir option references undefined environment variable $RUSTOW_SHORT_STOWRC_UNDEFINED; aborting!"));
+        assert!(error.to_string().contains("./.stowrc:1"));
     }
 
     #[cfg(unix)]
