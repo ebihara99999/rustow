@@ -13,7 +13,7 @@
 - **Dry Run Mode**: Preview operations before execution with `--simulate`
 - **Verbose Logging**: Detailed output with configurable verbosity levels
 - **File Adoption**: Migrate existing files into Stow packages with `--adopt`
-- **Cross-Platform**: Works on Unix-like systems with symlink support
+- **Cross-Platform**: Supports Linux, macOS, and Windows release packaging (platform-specific artifacts are generated)
 
 ## 🚀 Quick Start
 
@@ -76,6 +76,7 @@ When you run `rustow package1` from `/path/to/stow/`, it creates symlinks in the
 ### Basic Operations
 
 - `rustow PACKAGE...` - Stow packages (create symlinks)
+- `-S, --stow` - Explicitly request stow mode (default action)
 - `-D, --delete` - Unstow packages (remove symlinks)
 - `-R, --restow` - Restow packages (unstow then stow)
 
@@ -89,6 +90,11 @@ When you run `rustow package1` from `/path/to/stow/`, it creates symlinks in the
 - `--dotfiles` - Enable dot- prefix processing for dotfiles
 - `--adopt` - Move conflicting files into stow directory
 - `--no-folding` - Disable tree folding optimization
+- `-p, --compat` - Use GNU Stow compatible search mode for package symlinks (`--compat`)
+
+### Ignore and Include
+
+- `--ignore=REGEXP` - Ignore files matching regex in addition to built-in/local/global ignore lists
 
 ### Conflict Resolution
 
@@ -98,7 +104,18 @@ When you run `rustow package1` from `/path/to/stow/`, it creates symlinks in the
 ### Output Control
 
 - `-n, --simulate` - Dry run mode (show what would be done)
-- `-v, --verbose[=LEVEL]` - Increase verbosity (0-5)
+- `-v, --verbose[=LEVEL]` - Increase verbosity
+- `--help` - Show command help
+- `-V, --version` - Show binary version
+
+### Resource Files
+
+Rustow also reads configuration from resource files:
+
+- `~/.stowrc`
+- `./.stowrc` (current directory)
+
+Options in resource files are merged with CLI arguments (CLI args have higher priority), and resource values support environment variable and `~` expansion.
 
 ## 📋 Examples
 
