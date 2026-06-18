@@ -17,6 +17,7 @@ use crate::stow::{
     delete_packages, mixed_packages, restow_packages, stow_packages,
     validate_package_for_operation_with_display,
 };
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
 /// Runs the rustow application logic.
@@ -30,6 +31,7 @@ pub fn run_parsed(parsed_args: ParsedArgs) -> Result<(), RustowError> {
         parsed_args.args,
         parsed_args.operation_groups,
         Vec::new(),
+        false,
     )
 }
 
@@ -44,6 +46,7 @@ pub fn run_runtime_parsed(parsed_args: RuntimeParsedArgs) -> Result<(), RustowEr
         parsed_args.args,
         parsed_args.operation_groups,
         path_displays,
+        true,
     )
 }
 
@@ -52,13 +55,14 @@ pub fn run_with_operation_groups(
     args: Args,
     operation_groups: Vec<OperationGroup>,
 ) -> Result<(), RustowError> {
-    run_with_operation_groups_and_path_displays(args, operation_groups, Vec::new())
+    run_with_operation_groups_and_path_displays(args, operation_groups, Vec::new(), false)
 }
 
 fn run_with_operation_groups_and_path_displays(
     args: Args,
     operation_groups: Vec<OperationGroup>,
     mut path_displays: Vec<PathDisplayOverride>,
+    redact_diagnostics: bool,
 ) -> Result<(), RustowError> {
     let result = (|| {
         // eprintln!("stderr: Successfully parsed args in lib::run: {:?}", args.clone());
@@ -71,11 +75,20 @@ fn run_with_operation_groups_and_path_displays(
                 // eprintln!("stderr: Successfully constructed config in lib::run: {:?}", config);
 
                 let package_operations = package_operations_for_config(&config, operation_groups);
-                preflight_package_operations(&config, &package_operations, &path_displays)?;
+                let diagnostic_path_displays = if redact_diagnostics {
+                    path_displays.as_slice()
+                } else {
+                    &[]
+                };
+                preflight_package_operations(
+                    &config,
+                    &package_operations,
+                    diagnostic_path_displays,
+                )?;
                 let reports = execute_config_operations(&config, &package_operations)?;
 
                 // Process reports for logging/output
-                process_reports(&reports, &config, &path_displays);
+                process_reports(&reports, &config, diagnostic_path_displays);
 
                 let conflict_count = reports
                     .iter()
@@ -109,7 +122,11 @@ fn run_with_operation_groups_and_path_displays(
         }
     })();
 
-    result.map_err(|error| redact_runtime_error(error, &path_displays))
+    if redact_diagnostics {
+        result.map_err(|error| redact_runtime_error(error, &path_displays))
+    } else {
+        result
+    }
 }
 
 fn reject_ambiguous_mixed_args(args: &Args) -> Result<(), RustowError> {
@@ -373,25 +390,25 @@ impl RedactionTable {
         Self { replacements }
     }
 
-    fn redact(&self, text: &str) -> String {
+    fn redact<'a>(&self, text: &'a str) -> Cow<'a, str> {
         if self.replacements.is_empty() {
-            return text.to_string();
+            return Cow::Borrowed(text);
         }
 
         self.replacements
             .iter()
-            .fold(text.to_string(), |redacted, (path, display)| {
-                replace_path_occurrences(&redacted, path, display)
+            .fold(Cow::Borrowed(text), |redacted, (path, display)| {
+                replace_path_occurrences(redacted, path, display)
             })
     }
 
     fn redact_path(&self, path: PathBuf) -> PathBuf {
         let display = path.display().to_string();
         let redacted = self.redact(&display);
-        if redacted == display {
+        if redacted.as_ref() == display {
             path
         } else {
-            PathBuf::from(redacted)
+            PathBuf::from(redacted.into_owned())
         }
     }
 }
@@ -429,25 +446,37 @@ fn is_bare_relative_redaction_path(path: &Path) -> bool {
     path.is_relative() && path.components().count() == 1
 }
 
-fn replace_path_occurrences(text: &str, needle: &str, replacement: &str) -> String {
-    let mut output = String::new();
-    let mut remaining = text;
+fn replace_path_occurrences<'a>(
+    text: Cow<'a, str>,
+    needle: &str,
+    replacement: &str,
+) -> Cow<'a, str> {
+    let source = text.as_ref();
+    let mut output: Option<String> = None;
+    let mut copied_until = 0;
+    let mut search_start = 0;
 
-    while let Some(index) = remaining.find(needle) {
+    while let Some(relative_index) = source[search_start..].find(needle) {
+        let index = search_start + relative_index;
         let end = index + needle.len();
-        output.push_str(&remaining[..index]);
 
-        if is_path_boundary_before(remaining, index) && is_path_boundary_after(remaining, end) {
+        if is_path_boundary_before(source, index) && is_path_boundary_after(source, end) {
+            let output = output.get_or_insert_with(|| String::with_capacity(source.len()));
+            output.push_str(&source[copied_until..index]);
             output.push_str(replacement);
-        } else {
-            output.push_str(needle);
+            copied_until = end;
         }
 
-        remaining = &remaining[end..];
+        search_start = end;
     }
 
-    output.push_str(remaining);
-    output
+    match output {
+        Some(mut output) => {
+            output.push_str(&source[copied_until..]);
+            Cow::Owned(output)
+        },
+        None => text,
+    }
 }
 
 fn is_path_boundary_before(text: &str, index: usize) -> bool {
@@ -496,9 +525,9 @@ fn redact_rustow_error(error: RustowError, redactions: &RedactionTable) -> Rusto
         RustowError::Stow(error) => RustowError::Stow(redact_stow_error(error, redactions)),
         RustowError::Fs(error) => RustowError::Fs(redact_fs_error(error, redactions)),
         RustowError::Ignore(error) => RustowError::Ignore(redact_ignore_error(error, redactions)),
-        RustowError::Cli(message) => RustowError::Cli(redactions.redact(&message)),
+        RustowError::Cli(message) => RustowError::Cli(redactions.redact(&message).into_owned()),
         RustowError::InvalidPattern(pattern) => {
-            RustowError::InvalidPattern(redactions.redact(&pattern))
+            RustowError::InvalidPattern(redactions.redact(&pattern).into_owned())
         },
         other => other,
     }
@@ -507,19 +536,19 @@ fn redact_rustow_error(error: RustowError, redactions: &RedactionTable) -> Rusto
 fn redact_config_error(error: ConfigError, redactions: &RedactionTable) -> ConfigError {
     match error {
         ConfigError::InvalidTargetDir(message) => {
-            ConfigError::InvalidTargetDir(redactions.redact(&message))
+            ConfigError::InvalidTargetDir(redactions.redact(&message).into_owned())
         },
         ConfigError::InvalidStowDir(message) => {
-            ConfigError::InvalidStowDir(redactions.redact(&message))
+            ConfigError::InvalidStowDir(redactions.redact(&message).into_owned())
         },
         ConfigError::InvalidPackageName(message) => {
-            ConfigError::InvalidPackageName(redactions.redact(&message))
+            ConfigError::InvalidPackageName(redactions.redact(&message).into_owned())
         },
         ConfigError::InvalidRegexPattern(message) => {
-            ConfigError::InvalidRegexPattern(redactions.redact(&message))
+            ConfigError::InvalidRegexPattern(redactions.redact(&message).into_owned())
         },
         ConfigError::InvalidOperation(message) => {
-            ConfigError::InvalidOperation(redactions.redact(&message))
+            ConfigError::InvalidOperation(redactions.redact(&message).into_owned())
         },
         ConfigError::InvalidVerbosityLevel(level) => ConfigError::InvalidVerbosityLevel(level),
     }
@@ -527,15 +556,17 @@ fn redact_config_error(error: ConfigError, redactions: &RedactionTable) -> Confi
 
 fn redact_stow_error(error: StowError, redactions: &RedactionTable) -> StowError {
     match error {
-        StowError::Conflict(message) => StowError::Conflict(redactions.redact(&message)),
+        StowError::Conflict(message) => {
+            StowError::Conflict(redactions.redact(&message).into_owned())
+        },
         StowError::PackageNotFound(package) => {
-            StowError::PackageNotFound(redactions.redact(&package))
+            StowError::PackageNotFound(redactions.redact(&package).into_owned())
         },
         StowError::InvalidPackageStructure(message) => {
-            StowError::InvalidPackageStructure(redactions.redact(&message))
+            StowError::InvalidPackageStructure(redactions.redact(&message).into_owned())
         },
         StowError::OperationFailed(message) => {
-            StowError::OperationFailed(redactions.redact(&message))
+            StowError::OperationFailed(redactions.redact(&message).into_owned())
         },
     }
 }
@@ -543,10 +574,10 @@ fn redact_stow_error(error: StowError, redactions: &RedactionTable) -> StowError
 fn redact_ignore_error(error: IgnoreError, redactions: &RedactionTable) -> IgnoreError {
     match error {
         IgnoreError::LoadPatternsError(message) => {
-            IgnoreError::LoadPatternsError(redactions.redact(&message))
+            IgnoreError::LoadPatternsError(redactions.redact(&message).into_owned())
         },
         IgnoreError::InvalidPattern(pattern) => {
-            IgnoreError::InvalidPattern(redactions.redact(&pattern))
+            IgnoreError::InvalidPattern(redactions.redact(&pattern).into_owned())
         },
     }
 }
@@ -609,13 +640,33 @@ fn redact_fs_error(error: FsError, redactions: &RedactionTable) -> FsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let original = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.original).unwrap();
+        }
+    }
 
     #[test]
     fn test_replace_path_occurrences_requires_leading_boundary() {
         let text = "real: /tmp/secret/file; unrelated: /backup/tmp/secret/file";
 
         assert_eq!(
-            replace_path_occurrences(text, "/tmp/secret", "$RUSTOW_SECRET"),
+            replace_path_occurrences(Cow::Borrowed(text), "/tmp/secret", "$RUSTOW_SECRET"),
             "real: $RUSTOW_SECRET/file; unrelated: /backup/tmp/secret/file"
         );
     }
@@ -628,9 +679,19 @@ mod tests {
         )]);
 
         assert_eq!(
-            redactions.redact("Failed to canonicalize stow directory '$RUSTOW_STOW_DIR'"),
+            redactions
+                .redact("Failed to canonicalize stow directory '$RUSTOW_STOW_DIR'")
+                .as_ref(),
             "Failed to canonicalize stow directory '$RUSTOW_STOW_DIR'"
         );
+    }
+
+    #[test]
+    fn test_redaction_table_borrows_when_no_replacements_apply() {
+        let redactions = RedactionTable::new(&[]);
+        let redacted = redactions.redact("No path redaction needed");
+
+        assert!(matches!(redacted, Cow::Borrowed(_)));
     }
 
     #[test]
@@ -641,7 +702,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            redactions.redact("Path secret/stow/pkg is hidden"),
+            redactions.redact("Path secret/stow/pkg is hidden").as_ref(),
             "Path $RUSTOW_STOW_DIR/pkg is hidden"
         );
     }
@@ -658,5 +719,23 @@ mod tests {
 
         assert!(!redacted.contains("secret\\\\root"));
         assert!(redacted.contains("$RUSTOW_SECRET_ROOT/stow/pkg/bin/tool"));
+    }
+
+    #[test]
+    fn test_public_run_keeps_returned_error_paths_unredacted() {
+        let _lock = crate::test_sync::IsolatedProcessEnv::new();
+        let temp_dir = tempdir().unwrap();
+        let stow_dir = temp_dir.path().join("stow");
+        let target_dir = temp_dir.path().join("target");
+        fs::create_dir_all(&stow_dir).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(stow_dir.join("pkg"), "not a directory").unwrap();
+        let _cwd_guard = CurrentDirGuard::set(temp_dir.path());
+
+        let args = Args::parse_from(["rustow", "-d", "stow", "-t", "target", "pkg"]);
+        let error = run(args).unwrap_err().to_string();
+
+        assert!(error.contains(stow_dir.join("pkg").to_string_lossy().as_ref()));
+        assert!(!error.contains("\"stow/pkg\""));
     }
 }

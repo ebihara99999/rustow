@@ -383,6 +383,31 @@ fn ambiguous_long_option_error(option: &str) -> clap::Error {
     )
 }
 
+fn unknown_stowrc_long_option_error(option: &str, origin: &StowrcTokenOrigin) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    clap::Error::raw(
+        clap::error::ErrorKind::UnknownArgument,
+        format!(
+            "Unknown option: {option} in '{}:{}'\n\n{usage}",
+            origin.display_path, origin.line
+        ),
+    )
+}
+
+fn ambiguous_stowrc_long_option_error(option: &str, origin: &StowrcTokenOrigin) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    let candidates = long_option_abbreviation_candidates(option).join(", ");
+    clap::Error::raw(
+        clap::error::ErrorKind::UnknownArgument,
+        format!(
+            "Option {option} is ambiguous ({candidates}) in '{}:{}'\n\n{usage}",
+            origin.display_path, origin.line
+        ),
+    )
+}
+
 #[cfg(test)]
 fn is_known_long_option(option: &str) -> bool {
     resolve_long_option(option).is_ok()
@@ -403,20 +428,18 @@ fn merge_stowrc_args(argv: &[OsString]) -> Result<MergedArgs, clap::Error> {
         });
     }
 
-    let mut stowrc_args = Vec::new();
+    let mut stowrc_args = StowrcNormalizer::new();
     if let Some(home_dir) = env::var_os("HOME") {
         let home_path = home_stowrc_path(home_dir);
-        let home_entries = read_stowrc_file(&home_path)?;
-        stowrc_args.extend(home_entries);
+        read_stowrc_file(&home_path, "~/.stowrc", &mut stowrc_args)?;
     }
 
     if let Ok(current_dir) = env::current_dir() {
         let local_path = current_dir.join(".stowrc");
-        let local_entries = read_stowrc_file(&local_path)?;
-        stowrc_args.extend(local_entries);
+        read_stowrc_file(&local_path, "./.stowrc", &mut stowrc_args)?;
     }
 
-    let merged_resource_args = normalize_stowrc_tokens(stowrc_args)?;
+    let merged_resource_args = stowrc_args.finish()?;
 
     merged_argv.push(argv[0].clone());
     merged_argv.extend(merged_resource_args.argv);
@@ -577,7 +600,7 @@ struct StowrcToken {
 
 #[derive(Debug, Clone)]
 struct StowrcTokenOrigin {
-    path: Arc<PathBuf>,
+    display_path: Arc<String>,
     line: usize,
 }
 
@@ -602,37 +625,40 @@ fn home_stowrc_path(home_dir: OsString) -> PathBuf {
     }
 }
 
-fn read_stowrc_file(path: &Path) -> Result<Vec<StowrcToken>, clap::Error> {
-    let file = match open_stowrc_file(path)? {
+fn read_stowrc_file(
+    path: &Path,
+    display_path: &str,
+    normalizer: &mut StowrcNormalizer,
+) -> Result<(), clap::Error> {
+    let file = match open_stowrc_file(path, display_path)? {
         Some(file) => file,
-        None => return Ok(Vec::new()),
+        None => return Ok(()),
     };
 
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(Vec::new()),
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
         Err(err) => {
             return Err(clap::Error::raw(
                 clap::error::ErrorKind::Io,
                 format!(
                     "failed to inspect resource file '{}': {}",
-                    path.display(),
-                    err
+                    display_path, err
                 ),
             ));
         },
     };
 
     if !metadata.is_file() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
-    stowrc_tokens_from_reader(path, file)
+    stowrc_tokens_from_reader(display_path, file, normalizer)
 }
 
 #[cfg(unix)]
-fn open_stowrc_file(path: &Path) -> Result<Option<fs::File>, clap::Error> {
+fn open_stowrc_file(path: &Path, display_path: &str) -> Result<Option<fs::File>, clap::Error> {
     match fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -643,56 +669,68 @@ fn open_stowrc_file(path: &Path) -> Result<Option<fs::File>, clap::Error> {
         Err(err) if err.kind() == ErrorKind::PermissionDenied => Ok(None),
         Err(err) => Err(clap::Error::raw(
             clap::error::ErrorKind::Io,
-            format!("failed to open resource file '{}': {}", path.display(), err),
+            format!("failed to open resource file '{}': {}", display_path, err),
         )),
     }
 }
 
 #[cfg(not(unix))]
-fn open_stowrc_file(path: &Path) -> Result<Option<fs::File>, clap::Error> {
+fn open_stowrc_file(path: &Path, display_path: &str) -> Result<Option<fs::File>, clap::Error> {
     match fs::File::open(path) {
         Ok(file) => Ok(Some(file)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) if err.kind() == ErrorKind::PermissionDenied => Ok(None),
         Err(err) => Err(clap::Error::raw(
             clap::error::ErrorKind::Io,
-            format!("failed to open resource file '{}': {}", path.display(), err),
+            format!("failed to open resource file '{}': {}", display_path, err),
         )),
     }
 }
 
-fn stowrc_tokens_from_reader(path: &Path, file: fs::File) -> Result<Vec<StowrcToken>, clap::Error> {
-    let mut tokens = Vec::new();
-    let path = Arc::new(path.to_path_buf());
+fn stowrc_tokens_from_reader(
+    display_path: &str,
+    file: fs::File,
+    normalizer: &mut StowrcNormalizer,
+) -> Result<(), clap::Error> {
+    let checkpoint = normalizer.checkpoint();
+    let display_path = Arc::new(display_path.to_string());
     for (index, line) in BufReader::new(file).lines().enumerate() {
         let line = match line {
             Ok(line) => line,
-            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(Vec::new()),
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                normalizer.rewind(checkpoint);
+                return Ok(());
+            },
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                normalizer.rewind(checkpoint);
+                return Ok(());
+            },
             Err(err) => {
                 return Err(clap::Error::raw(
                     clap::error::ErrorKind::Io,
-                    format!("failed to read resource file '{}': {}", path.display(), err),
+                    format!("failed to read resource file '{}': {}", display_path, err),
                 ));
             },
         };
         let origin = StowrcTokenOrigin {
-            path: path.clone(),
+            display_path: display_path.clone(),
             line: index + 1,
         };
         let line_tokens = tokenize_stowrc_line(&line).map_err(|err| {
             clap::Error::raw(
                 clap::error::ErrorKind::InvalidValue,
-                format!("{} in '{}:{}'", err, path.display(), index + 1),
+                format!("{} in '{}:{}'", err, display_path, index + 1),
             )
         })?;
-        tokens.extend(line_tokens.into_iter().map(|value| StowrcToken {
-            value,
-            origin: origin.clone(),
-        }));
+        for value in line_tokens {
+            normalizer.push_token(StowrcToken {
+                value,
+                origin: origin.clone(),
+            })?;
+        }
     }
 
-    Ok(tokens)
+    normalizer.finish_file()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -890,7 +928,14 @@ struct ParsedResourceOption {
     tokens: Vec<OsString>,
     expecting_value: Option<ResourceValueExpectation>,
     path_value: Option<ResourcePathValue>,
-    expecting_verbose_value: bool,
+    verbose: ResourceVerboseAction,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ResourceVerboseAction {
+    increments: u8,
+    value: Option<u8>,
+    expects_value: bool,
 }
 
 #[derive(Debug)]
@@ -899,185 +944,291 @@ struct NormalizedStowrcArgs {
     path_displays: Vec<ResourcePathDisplay>,
 }
 
-fn normalize_stowrc_tokens(
-    raw_tokens: Vec<StowrcToken>,
-) -> Result<NormalizedStowrcArgs, clap::Error> {
-    let mut normalized = Vec::new();
-    let mut expecting_value: Option<PendingResourceValue> = None;
-    let mut expecting_verbose_value = false;
-    let mut path_values = Vec::new();
-    let mut after_double_dash = false;
+#[derive(Debug, Clone)]
+struct StowrcNormalizerCheckpoint {
+    normalized_len: usize,
+    path_values_len: usize,
+    expecting_value: Option<PendingResourceValue>,
+    expecting_verbose_value: bool,
+    after_double_dash: bool,
+    resource_verbosity: u8,
+    saw_resource_verbose: bool,
+}
 
-    for token in raw_tokens {
+#[derive(Debug)]
+struct StowrcNormalizer {
+    normalized: Vec<OsString>,
+    expecting_value: Option<PendingResourceValue>,
+    expecting_verbose_value: bool,
+    path_values: Vec<ResourcePathValue>,
+    after_double_dash: bool,
+    resource_verbosity: u8,
+    saw_resource_verbose: bool,
+}
+
+impl StowrcNormalizer {
+    fn new() -> Self {
+        Self {
+            normalized: Vec::new(),
+            expecting_value: None,
+            expecting_verbose_value: false,
+            path_values: Vec::new(),
+            after_double_dash: false,
+            resource_verbosity: 0,
+            saw_resource_verbose: false,
+        }
+    }
+
+    fn checkpoint(&self) -> StowrcNormalizerCheckpoint {
+        StowrcNormalizerCheckpoint {
+            normalized_len: self.normalized.len(),
+            path_values_len: self.path_values.len(),
+            expecting_value: self.expecting_value.clone(),
+            expecting_verbose_value: self.expecting_verbose_value,
+            after_double_dash: self.after_double_dash,
+            resource_verbosity: self.resource_verbosity,
+            saw_resource_verbose: self.saw_resource_verbose,
+        }
+    }
+
+    fn rewind(&mut self, checkpoint: StowrcNormalizerCheckpoint) {
+        self.normalized.truncate(checkpoint.normalized_len);
+        self.path_values.truncate(checkpoint.path_values_len);
+        self.expecting_value = checkpoint.expecting_value;
+        self.expecting_verbose_value = checkpoint.expecting_verbose_value;
+        self.after_double_dash = checkpoint.after_double_dash;
+        self.resource_verbosity = checkpoint.resource_verbosity;
+        self.saw_resource_verbose = checkpoint.saw_resource_verbose;
+    }
+
+    fn push_token(&mut self, token: StowrcToken) -> Result<(), clap::Error> {
         let token_value = token.value;
 
-        if let Some(pending) = expecting_value {
+        if let Some(pending) = self.expecting_value.take() {
             let normalized_value = format!("{}{}", pending.value_prefix, token_value);
             let value_start = pending.value_prefix.len();
             if pending.option_name.is_path_option() {
-                path_values.push(ResourcePathValue {
-                    index: normalized.len(),
+                self.path_values.push(ResourcePathValue {
+                    index: self.normalized.len(),
                     option_name: pending.option_name,
                     value_start,
                 });
             }
-            normalized.push(OsString::from(normalized_value));
-            expecting_value = None;
-            continue;
+            self.normalized.push(OsString::from(normalized_value));
+            return Ok(());
         }
 
-        if expecting_verbose_value {
-            expecting_verbose_value = false;
+        if self.expecting_verbose_value {
+            self.expecting_verbose_value = false;
             if is_verbose_numeric_token(&token_value) {
-                normalized.push(OsString::from(token_value));
-                continue;
+                self.set_resource_verbosity(parse_verbose_numeric_value(&token_value)?);
+                return Ok(());
             }
+            self.increment_resource_verbosity();
         }
 
-        if after_double_dash {
-            continue;
+        if self.after_double_dash {
+            return Ok(());
         }
 
         if token_value == "--" {
             // Packages are ignored in resource files.
-            after_double_dash = true;
-            continue;
+            self.after_double_dash = true;
+            return Ok(());
         }
 
         if !token_value.starts_with('-') {
             // Treated as package names in resource files.
-            continue;
+            return Ok(());
         }
 
         if token_value.starts_with("--") {
-            if let Some(parsed) = parse_long_stowrc_option(&token_value) {
-                let base_index = normalized.len();
-                normalized.extend(parsed.tokens);
-                if let Some(path_value) = parsed.path_value {
-                    path_values.push(ResourcePathValue {
-                        index: base_index + path_value.index,
-                        option_name: path_value.option_name,
-                        value_start: path_value.value_start,
-                    });
-                }
-                if let Some(option_name) = parsed.expecting_value {
-                    expecting_value = Some(PendingResourceValue {
-                        option_name: option_name.option_name,
-                        origin: token.origin,
-                        value_prefix: option_name.value_prefix,
-                    });
-                }
-                expecting_verbose_value = parsed.expecting_verbose_value;
+            if let Some(parsed) = parse_long_stowrc_option(&token_value, &token.origin)? {
+                self.apply_parsed_option(parsed, token.origin);
             }
 
-            continue;
+            return Ok(());
         }
 
         if token_value.len() > 1 {
-            if let Some(parsed) = parse_short_stowrc_option(&token_value) {
-                let base_index = normalized.len();
-                normalized.extend(parsed.tokens);
-                if let Some(path_value) = parsed.path_value {
-                    path_values.push(ResourcePathValue {
-                        index: base_index + path_value.index,
-                        option_name: path_value.option_name,
-                        value_start: path_value.value_start,
-                    });
-                }
-                expecting_value = parsed
-                    .expecting_value
-                    .map(|option_name| PendingResourceValue {
-                        option_name: option_name.option_name,
-                        origin: token.origin,
-                        value_prefix: option_name.value_prefix,
-                    });
-                expecting_verbose_value = parsed.expecting_verbose_value;
+            if let Some(parsed) = parse_short_stowrc_option(&token_value)? {
+                self.apply_parsed_option(parsed, token.origin);
             }
         }
+
+        Ok(())
     }
 
-    if let Some(pending) = expecting_value {
-        return Err(stowrc_missing_value_error(&pending));
+    fn apply_parsed_option(&mut self, parsed: ParsedResourceOption, origin: StowrcTokenOrigin) {
+        let base_index = self.normalized.len();
+        self.normalized.extend(parsed.tokens);
+        if let Some(path_value) = parsed.path_value {
+            self.path_values.push(ResourcePathValue {
+                index: base_index + path_value.index,
+                option_name: path_value.option_name,
+                value_start: path_value.value_start,
+            });
+        }
+        if let Some(option_name) = parsed.expecting_value {
+            self.expecting_value = Some(PendingResourceValue {
+                option_name: option_name.option_name,
+                origin,
+                value_prefix: option_name.value_prefix,
+            });
+        }
+        self.apply_verbose_action(parsed.verbose);
     }
 
-    let path_displays = expand_final_resource_path_values(&mut normalized, &path_values)?;
+    fn apply_verbose_action(&mut self, verbose: ResourceVerboseAction) {
+        if let Some(value) = verbose.value {
+            self.set_resource_verbosity(value);
+        }
+        for _ in 0..verbose.increments {
+            self.increment_resource_verbosity();
+        }
+        self.expecting_verbose_value = verbose.expects_value;
+    }
 
-    Ok(NormalizedStowrcArgs {
-        argv: normalized,
-        path_displays,
-    })
+    fn set_resource_verbosity(&mut self, value: u8) {
+        self.resource_verbosity = value;
+        self.saw_resource_verbose = true;
+    }
+
+    fn increment_resource_verbosity(&mut self) {
+        self.resource_verbosity = self.resource_verbosity.saturating_add(1);
+        self.saw_resource_verbose = true;
+    }
+
+    fn finish_file(&mut self) -> Result<(), clap::Error> {
+        if let Some(pending) = self.expecting_value.take() {
+            return Err(stowrc_missing_value_error(&pending));
+        }
+        if self.expecting_verbose_value {
+            self.expecting_verbose_value = false;
+            self.increment_resource_verbosity();
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<NormalizedStowrcArgs, clap::Error> {
+        self.finish_file()?;
+        if self.saw_resource_verbose {
+            self.normalized.push(OsString::from(format!(
+                "--verbose={}",
+                self.resource_verbosity
+            )));
+        }
+        let path_displays =
+            expand_final_resource_path_values(&mut self.normalized, &self.path_values)?;
+
+        Ok(NormalizedStowrcArgs {
+            argv: self.normalized,
+            path_displays,
+        })
+    }
 }
 
-fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
+fn parse_long_stowrc_option(
+    token: &str,
+    origin: &StowrcTokenOrigin,
+) -> Result<Option<ParsedResourceOption>, clap::Error> {
     let token = token.trim();
     let long_token = token.trim_start_matches("--");
     if long_token.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     if let Some((key, _value)) = long_token.split_once('=') {
-        if let Some(option_name) = map_long_value_option(key) {
-            if option_name.is_path_option() {
-                return Some(ParsedResourceOption {
-                    tokens: vec![OsString::from(token)],
-                    expecting_value: None,
-                    path_value: Some(ResourcePathValue {
-                        index: 0,
-                        option_name,
-                        value_start: key.len() + 3,
-                    }),
-                    expecting_verbose_value: false,
-                });
-            }
-            return Some(ParsedResourceOption {
-                tokens: vec![OsString::from(token)],
-                expecting_value: None,
-                path_value: None,
-                expecting_verbose_value: false,
-            });
+        match resolve_long_option(key) {
+            Ok(spec) => match spec.kind {
+                LongOptionKind::Value(option_name) if option_name.is_path_option() => {
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: vec![OsString::from(token)],
+                        expecting_value: None,
+                        path_value: Some(ResourcePathValue {
+                            index: 0,
+                            option_name,
+                            value_start: key.len() + 3,
+                        }),
+                        verbose: ResourceVerboseAction::default(),
+                    }));
+                },
+                LongOptionKind::Value(_) => {
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: vec![OsString::from(token)],
+                        expecting_value: None,
+                        path_value: None,
+                        verbose: ResourceVerboseAction::default(),
+                    }));
+                },
+                LongOptionKind::Verbose => {
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: Vec::new(),
+                        expecting_value: None,
+                        path_value: None,
+                        verbose: ResourceVerboseAction {
+                            value: Some(parse_verbose_numeric_value(_value)?),
+                            ..ResourceVerboseAction::default()
+                        },
+                    }));
+                },
+                LongOptionKind::Bool
+                | LongOptionKind::Mode(_)
+                | LongOptionKind::Help
+                | LongOptionKind::Version => {},
+            },
+            Err(LongOptionResolveError::Ambiguous) => {
+                return Err(ambiguous_stowrc_long_option_error(key, origin));
+            },
+            Err(LongOptionResolveError::Unknown) => {
+                return Err(unknown_stowrc_long_option_error(key, origin));
+            },
         }
 
-        return Some(ParsedResourceOption {
+        return Ok(Some(ParsedResourceOption {
             tokens: vec![OsString::from(token)],
             expecting_value: None,
             path_value: None,
-            expecting_verbose_value: false,
-        });
+            verbose: ResourceVerboseAction::default(),
+        }));
     }
 
     match resolve_long_option(long_token) {
         Ok(spec) => match spec.kind {
-            LongOptionKind::Mode(_) => None,
-            LongOptionKind::Value(option_name) => Some(ParsedResourceOption {
+            LongOptionKind::Mode(_) => Ok(None),
+            LongOptionKind::Value(option_name) => Ok(Some(ParsedResourceOption {
                 tokens: Vec::new(),
                 expecting_value: Some(ResourceValueExpectation {
                     option_name,
                     value_prefix: format!("--{}=", long_token),
                 }),
                 path_value: None,
-                expecting_verbose_value: false,
-            }),
-            LongOptionKind::Verbose => Some(ParsedResourceOption {
-                tokens: vec![OsString::from(token)],
+                verbose: ResourceVerboseAction::default(),
+            })),
+            LongOptionKind::Verbose => Ok(Some(ParsedResourceOption {
+                tokens: Vec::new(),
                 expecting_value: None,
                 path_value: None,
-                expecting_verbose_value: true,
-            }),
+                verbose: ResourceVerboseAction {
+                    expects_value: true,
+                    ..ResourceVerboseAction::default()
+                },
+            })),
             LongOptionKind::Bool | LongOptionKind::Help | LongOptionKind::Version => {
-                Some(ParsedResourceOption {
+                Ok(Some(ParsedResourceOption {
                     tokens: vec![OsString::from(token)],
                     expecting_value: None,
                     path_value: None,
-                    expecting_verbose_value: false,
-                })
+                    verbose: ResourceVerboseAction::default(),
+                }))
             },
         },
-        Err(_) => Some(ParsedResourceOption {
-            tokens: vec![OsString::from(token)],
-            expecting_value: None,
-            path_value: None,
-            expecting_verbose_value: false,
-        }),
+        Err(LongOptionResolveError::Ambiguous) => {
+            Err(ambiguous_stowrc_long_option_error(long_token, origin))
+        },
+        Err(LongOptionResolveError::Unknown) => {
+            Err(unknown_stowrc_long_option_error(long_token, origin))
+        },
     }
 }
 
@@ -1088,13 +1239,14 @@ fn map_long_value_option(token: &str) -> Option<ResourceValueOption> {
     }
 }
 
-fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
+fn parse_short_stowrc_option(token: &str) -> Result<Option<ParsedResourceOption>, clap::Error> {
     let cluster = &token[1..];
     if cluster.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut bool_flags = String::new();
+    let mut verbose = ResourceVerboseAction::default();
 
     for (index, flag) in cluster.char_indices() {
         match flag {
@@ -1111,26 +1263,26 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                 if token_remainder.is_empty() {
                     if bool_flags.is_empty() {
                         let value_prefix = format!("-{flag}");
-                        return Some(ParsedResourceOption {
+                        return Ok(Some(ParsedResourceOption {
                             tokens: Vec::new(),
                             expecting_value: Some(ResourceValueExpectation {
                                 option_name,
                                 value_prefix,
                             }),
                             path_value: None,
-                            expecting_verbose_value: false,
-                        });
+                            verbose,
+                        }));
                     }
                     let value_prefix = format!("-{}{}", bool_flags, flag);
-                    return Some(ParsedResourceOption {
+                    return Ok(Some(ParsedResourceOption {
                         tokens: Vec::new(),
                         expecting_value: Some(ResourceValueExpectation {
                             option_name,
                             value_prefix,
                         }),
                         path_value: None,
-                        expecting_verbose_value: false,
-                    });
+                        verbose,
+                    }));
                 }
 
                 let prefix = if bool_flags.is_empty() {
@@ -1138,7 +1290,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                 } else {
                     format!("-{}{}", bool_flags, flag)
                 };
-                return Some(ParsedResourceOption {
+                return Ok(Some(ParsedResourceOption {
                     tokens: vec![OsString::from(format!("{prefix}{token_remainder}"))],
                     expecting_value: None,
                     path_value: Some(ResourcePathValue {
@@ -1146,40 +1298,62 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                         option_name,
                         value_start: prefix.len(),
                     }),
-                    expecting_verbose_value: false,
-                });
+                    verbose,
+                }));
             },
-            'p' | 'v' | 'h' | 'V' | 'n' => {
+            'v' => {
+                let rest = &cluster[index + flag.len_utf8()..];
+                if rest.is_empty() {
+                    verbose.expects_value = true;
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: normalized_short_tokens(bool_flags),
+                        expecting_value: None,
+                        path_value: None,
+                        verbose,
+                    }));
+                }
+                if starts_with_verbose_numeric_value(rest) {
+                    verbose.value = Some(parse_verbose_numeric_value(rest)?);
+                    return Ok(Some(ParsedResourceOption {
+                        tokens: normalized_short_tokens(bool_flags),
+                        expecting_value: None,
+                        path_value: None,
+                        verbose,
+                    }));
+                }
+                verbose.increments = verbose.increments.saturating_add(1);
+            },
+            'p' | 'h' | 'V' | 'n' => {
                 bool_flags.push(flag);
             },
             other if other.is_ascii_alphabetic() => {
-                return Some(ParsedResourceOption {
+                return Ok(Some(ParsedResourceOption {
                     tokens: vec![OsString::from(token)],
                     expecting_value: None,
                     path_value: None,
-                    expecting_verbose_value: false,
-                });
+                    verbose: ResourceVerboseAction::default(),
+                }));
             },
             _ => {
-                return Some(ParsedResourceOption {
+                return Ok(Some(ParsedResourceOption {
                     tokens: vec![OsString::from(token)],
                     expecting_value: None,
                     path_value: None,
-                    expecting_verbose_value: false,
-                });
+                    verbose: ResourceVerboseAction::default(),
+                }));
             },
         }
     }
 
-    if bool_flags.is_empty() {
-        None
+    if bool_flags.is_empty() && verbose.increments == 0 && verbose.value.is_none() {
+        Ok(None)
     } else {
-        Some(ParsedResourceOption {
-            tokens: vec![format!("-{bool_flags}").into()],
+        Ok(Some(ParsedResourceOption {
+            tokens: normalized_short_tokens(bool_flags),
             expecting_value: None,
             path_value: None,
-            expecting_verbose_value: short_verbose_cluster_accepts_next_value(token),
-        })
+            verbose,
+        }))
     }
 }
 
@@ -1584,7 +1758,7 @@ fn stowrc_missing_value_error(pending: &PendingResourceValue) -> clap::Error {
         format!(
             "resource file option '{}' requires a value in '{}:{}'",
             pending.option_name.option_name(),
-            pending.origin.path.display(),
+            pending.origin.display_path,
             pending.origin.line
         ),
     )
@@ -1775,7 +1949,7 @@ fn normalize_verbose_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Erro
         }
 
         if arg_string.starts_with('-') && arg_string.len() > 1 {
-            let normalized_short = normalize_short_verbose_arg(&arg_string)?;
+            let normalized_short = normalize_short_verbose_arg(arg)?;
             expecting_option_value = normalized_short.expects_option_value;
             expecting_verbose_value = normalized_short.expects_verbose_value;
             normalized_args.extend(normalized_short.tokens);
@@ -1795,7 +1969,72 @@ struct NormalizedShortArg {
     expects_verbose_value: bool,
 }
 
-fn normalize_short_verbose_arg(arg: &str) -> Result<NormalizedShortArg, clap::Error> {
+#[cfg(unix)]
+fn normalize_short_verbose_arg(arg: &OsString) -> Result<NormalizedShortArg, clap::Error> {
+    let bytes = arg.as_os_str().as_bytes();
+    let mut kept_flags = Vec::new();
+    let mut index = 1;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b't' | b'd' => {
+                kept_flags.push(bytes[index]);
+                let rest = &bytes[index + 1..];
+                return Ok(NormalizedShortArg {
+                    tokens: normalized_short_tokens_from_bytes(&kept_flags, rest),
+                    expects_option_value: rest.is_empty(),
+                    expects_verbose_value: false,
+                });
+            },
+            b'v' => {
+                let rest = &bytes[index + 1..];
+                if rest.is_empty() {
+                    return Ok(NormalizedShortArg {
+                        tokens: normalized_short_tokens_from_bytes(&kept_flags, &[]),
+                        expects_option_value: false,
+                        expects_verbose_value: true,
+                    });
+                }
+                if rest.first().is_some_and(u8::is_ascii_digit) {
+                    let rest = std::str::from_utf8(rest)
+                        .map_err(|_| verbose_level_error(&String::from_utf8_lossy(rest)))?;
+                    parse_verbose_numeric_value(rest)?;
+                    return Ok(NormalizedShortArg {
+                        tokens: normalized_short_tokens_from_bytes(&kept_flags, &[]),
+                        expects_option_value: false,
+                        expects_verbose_value: false,
+                    });
+                }
+            },
+            byte => kept_flags.push(byte),
+        }
+
+        index += 1;
+    }
+
+    Ok(NormalizedShortArg {
+        tokens: normalized_short_tokens_from_bytes(&kept_flags, &[]),
+        expects_option_value: false,
+        expects_verbose_value: false,
+    })
+}
+
+#[cfg(unix)]
+fn normalized_short_tokens_from_bytes(flags: &[u8], rest: &[u8]) -> Vec<OsString> {
+    if flags.is_empty() {
+        Vec::new()
+    } else {
+        let mut token = Vec::with_capacity(1 + flags.len() + rest.len());
+        token.push(b'-');
+        token.extend_from_slice(flags);
+        token.extend_from_slice(rest);
+        vec![OsString::from_vec(token)]
+    }
+}
+
+#[cfg(not(unix))]
+fn normalize_short_verbose_arg(arg: &OsString) -> Result<NormalizedShortArg, clap::Error> {
+    let arg = arg.to_string_lossy();
     let cluster = &arg[1..];
     let mut kept_flags = String::new();
 
@@ -2500,6 +2739,60 @@ mod tests {
                 "compat parser value shape must match -{}",
                 option
             );
+        }
+
+        let expected_long_specs = [
+            (
+                "target",
+                "target",
+                LongOptionKind::Value(ResourceValueOption::Target),
+            ),
+            (
+                "dir",
+                "dir",
+                LongOptionKind::Value(ResourceValueOption::Dir),
+            ),
+            ("stow", "stow", LongOptionKind::Mode(OperationMode::Stow)),
+            (
+                "delete",
+                "delete",
+                LongOptionKind::Mode(OperationMode::Delete),
+            ),
+            (
+                "restow",
+                "restow",
+                LongOptionKind::Mode(OperationMode::Restow),
+            ),
+            ("adopt", "adopt", LongOptionKind::Bool),
+            ("no-folding", "no-folding", LongOptionKind::Bool),
+            ("dotfiles", "dotfiles", LongOptionKind::Bool),
+            ("compat", "compat", LongOptionKind::Bool),
+            (
+                "override",
+                "override",
+                LongOptionKind::Value(ResourceValueOption::Override),
+            ),
+            (
+                "defer",
+                "defer",
+                LongOptionKind::Value(ResourceValueOption::Defer),
+            ),
+            (
+                "ignore",
+                "ignore",
+                LongOptionKind::Value(ResourceValueOption::Ignore),
+            ),
+            ("simulate", "simulate", LongOptionKind::Bool),
+            ("no", "simulate", LongOptionKind::Bool),
+            ("verbose", "verbose", LongOptionKind::Verbose),
+            ("help", "help", LongOptionKind::Help),
+            ("version", "version", LongOptionKind::Version),
+        ];
+
+        for (name, canonical, kind) in expected_long_specs {
+            let spec = resolve_long_option(name).unwrap();
+            assert_eq!(spec.canonical, canonical, "--{} canonical drifted", name);
+            assert_eq!(spec.kind, kind, "--{} kind drifted", name);
         }
     }
 
@@ -3379,10 +3672,12 @@ mod tests {
                 .to_string()
                 .contains("Option ver is ambiguous (verbose, version)")
         );
+        assert!(error.to_string().contains("./.stowrc:1"));
 
         write_file(&cwd.join(".stowrc"), "--bad-option\n");
         let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
         assert!(error.to_string().contains("Unknown option: bad-option"));
+        assert!(error.to_string().contains("./.stowrc:1"));
     }
 
     #[test]
@@ -3423,7 +3718,50 @@ mod tests {
                 .to_string()
                 .contains("resource file option '--target' requires a value")
         );
-        assert!(error.to_string().contains(".stowrc:1"));
+        assert!(error.to_string().contains("./.stowrc:1"));
+    }
+
+    #[test]
+    fn test_stowrc_missing_value_does_not_cross_resource_file_boundary() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let home_dir = temp_dir.path().join("secret-home-from-stowrc-origin");
+        let cwd = temp_dir.path().join("secret-cwd-from-stowrc-origin");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let _home_guard = EnvVarGuard::new("HOME", home_dir.to_str().unwrap());
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&home_dir.join(".stowrc"), "--target\n");
+        write_file(&cwd.join(".stowrc"), "--dir=/local-stow\n");
+
+        let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("resource file option '--target' requires a value"));
+        assert!(message.contains("~/.stowrc:1"));
+        assert!(!message.contains("secret-home-from-stowrc-origin"));
+        assert!(!message.contains("secret-cwd-from-stowrc-origin"));
+    }
+
+    #[test]
+    fn test_stowrc_trailing_verbose_does_not_consume_numeric_cli_package() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "--verbose\n");
+        let args = parse_runtime_args(["rustow", "2"]);
+        assert_eq!(args.verbose, 1);
+        assert_eq!(args.packages, vec!["2"]);
+
+        write_file(&cwd.join(".stowrc"), "-v\n");
+        let args = parse_runtime_args(["rustow", "2"]);
+        assert_eq!(args.verbose, 1);
+        assert_eq!(args.packages, vec!["2"]);
     }
 
     #[test]
@@ -3760,6 +4098,32 @@ mod tests {
 
         let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.dir, Some(stow_dir));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_short_attached_path_options_preserve_non_utf8_values() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let stow_dir = non_utf8_child(temp_dir.path(), b"stow-\xff");
+        let target_dir = non_utf8_child(temp_dir.path(), b"target-\xfe");
+
+        let mut dir_arg = b"-d".to_vec();
+        dir_arg.extend_from_slice(stow_dir.as_os_str().as_bytes());
+        let mut target_arg = b"-pt".to_vec();
+        target_arg.extend_from_slice(target_dir.as_os_str().as_bytes());
+
+        let args = Args::parse_from([
+            OsString::from("rustow"),
+            OsString::from_vec(dir_arg),
+            OsString::from_vec(target_arg),
+            OsString::from("pkg"),
+        ]);
+
+        assert_eq!(args.dir, Some(stow_dir));
+        assert_eq!(args.target, Some(target_dir));
+        assert!(args.compat);
     }
 
     #[cfg(unix)]

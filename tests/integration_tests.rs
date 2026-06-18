@@ -3973,12 +3973,14 @@ fn test_binary_stowrc_long_option_diagnostics_match_gnu_style() {
     let ambiguous_stderr = String::from_utf8_lossy(&ambiguous.stderr);
     assert_eq!(ambiguous.status.code(), Some(2));
     assert!(ambiguous_stderr.contains("Option ver is ambiguous (verbose, version)"));
+    assert!(ambiguous_stderr.contains("./.stowrc:1"));
 
     fs::write(cwd.join(".stowrc"), "--bad-option\n").unwrap();
     let unknown = run_rustow_with(["pkg"], &cwd, &envs);
     let unknown_stderr = String::from_utf8_lossy(&unknown.stderr);
     assert_eq!(unknown.status.code(), Some(2));
     assert!(unknown_stderr.contains("Unknown option: bad-option"));
+    assert!(unknown_stderr.contains("./.stowrc:1"));
 }
 
 #[test]
@@ -4001,6 +4003,68 @@ fn test_binary_stowrc_rejects_missing_value_without_consuming_cli_package() {
         String::from_utf8_lossy(&output.stderr)
             .contains("resource file option '--target' requires a value")
     );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("./.stowrc:1"));
+}
+
+#[test]
+fn test_binary_stowrc_missing_value_does_not_cross_resource_file_boundary() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("secret-home-from-stowrc-origin");
+    let cwd = temp_dir.path().join("secret-cwd-from-stowrc-origin");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(home_dir.join(".stowrc"), "--target\n").unwrap();
+    fs::write(cwd.join(".stowrc"), "--dir=/local-stow\n").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr);
+    assert!(stderr.contains("resource file option '--target' requires a value"));
+    assert!(stderr.contains("~/.stowrc:1"));
+    assert!(!stderr.contains("secret-home-from-stowrc-origin"));
+    assert!(!stderr.contains("secret-cwd-from-stowrc-origin"));
+}
+
+#[test]
+fn test_binary_stowrc_trailing_verbose_does_not_consume_numeric_package() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = temp_dir.path().join("stow");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("2/bin")).unwrap();
+    fs::write(stow_dir.join("2/bin/tool"), "tool").unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    for (index, verbose_option) in ["--verbose", "-v"].into_iter().enumerate() {
+        let target_dir = temp_dir.path().join(format!("target-{index}"));
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(
+            cwd.join(".stowrc"),
+            format!(
+                "--dir={}\n--target={}\n{}\n",
+                stow_dir.display(),
+                target_dir.display(),
+                verbose_option
+            ),
+        )
+        .unwrap();
+
+        let output = run_rustow_with(["2"], &cwd, &envs);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr);
+        assert!(target_dir.join("bin/tool").exists());
+    }
 }
 
 #[test]
