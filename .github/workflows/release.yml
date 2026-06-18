@@ -4,52 +4,57 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (tag must already exist). Recommended to use vX.Y.Z.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
 jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-
   build-release:
-    name: Build Release
-    needs: create-release
-    runs-on: ${{ matrix.os }}
+    name: Build Release Binaries
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            suffix: ""
+            binary_suffix: ''
             archive: tar.gz
+            needs_musl: false
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            suffix: ""
+            binary_suffix: ''
             archive: tar.gz
+            needs_musl: true
           - os: macos-latest
             target: x86_64-apple-darwin
-            suffix: ""
+            binary_suffix: ''
             archive: tar.gz
+            needs_musl: false
           - os: macos-latest
             target: aarch64-apple-darwin
-            suffix: ""
+            binary_suffix: ''
             archive: tar.gz
-
+            needs_musl: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_suffix: '.exe'
+            archive: tar.gz
+            needs_musl: false
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,45 +64,68 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl-tools (Linux musl only)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - name: Install musl-tools
+        if: matrix.needs_musl
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
-      - name: Prepare binary
+      - name: Package release artifact
+        shell: bash
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/rustow${{ matrix.suffix }} staging/
+          cp "target/${{ matrix.target }}/release/rustow${{ matrix.binary_suffix }}" staging/
           cp README.md LICENSE staging/
-          cd staging
-          tar czf ../rustow-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }} *
+          tar -czf "rustow-${RELEASE_TAG}-${{ matrix.target }}.${{ matrix.archive }}" -C staging .
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload artifact for publish
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./rustow-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
-          asset_name: rustow-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
-          asset_content_type: application/octet-stream 
+          name: rustow-release-${{ matrix.target }}
+          path: rustow-${RELEASE_TAG}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish to GitHub Releases
+    runs-on: ubuntu-latest
+    needs: build-release
+    if: ${{ env.RELEASE_TAG != '' }}
+    steps:
+      - name: Validate release tag
+        run: |
+          if [[ "${RELEASE_TAG}" != v* ]]; then
+            echo "Invalid RELEASE_TAG: ${RELEASE_TAG}. Use a tag like v1.2.3."
+            exit 1
+          fi
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rustow-release-*
+          path: dist
+          merge-multiple: true
+          if-no-files-found: error
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sum_file="rustow-${RELEASE_TAG}-sha256sums.txt"
+          : > "$sum_file"
+          while IFS= read -r file; do
+            sha256sum "$file" >> "$sum_file"
+          done < <(find . -maxdepth 1 -name '*.tar.gz' -print | sort)
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          generate_release_notes: true

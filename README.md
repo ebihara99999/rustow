@@ -222,6 +222,37 @@ cargo audit
 cargo deny check
 ```
 
+## 🚀 Release
+
+This repository has an automated GitHub Actions release workflow that builds release binaries and uploads them to GitHub Releases.
+
+### Standard release flow (automatic)
+
+1. Merge changes to `main`.
+2. Create a tag on the target commit:
+
+   ```bash
+   git tag -a vX.Y.Z -m "Release vX.Y.Z"
+   ```
+
+3. Push the tag:
+
+   ```bash
+   git push origin vX.Y.Z
+   ```
+
+4. The `Release` workflow runs automatically and uploads:
+   - `rustow-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+   - `rustow-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz`
+   - `rustow-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+   - `rustow-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+   - `rustow-vX.Y.Z-x86_64-pc-windows-msvc.tar.gz`
+   - `rustow-vX.Y.Z-sha256sums.txt`
+
+### Manual release (re-run for an existing tag)
+
+If you need to rerun release packaging, use `workflow_dispatch` in GitHub Actions and specify an existing tag name (for example `vX.Y.Z`).
+
 ## 🤝 Contributing
 ### Getting Started
 
