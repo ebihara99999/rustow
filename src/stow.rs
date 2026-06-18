@@ -1,15 +1,12 @@
-// Placeholder for stow module
-// This file can be populated with stow logic later.
-
 use crate::config::Config;
 use crate::dotfiles;
 use crate::error::{FsError, RustowError, StowError};
 use crate::fs_utils::{self};
 use crate::ignore::{self, IgnorePatterns};
+use crate::path_utils::{normalize_path_components, resolve_symlink_target};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-// Define modules inline for now
 mod conflict_resolver {
     use crate::stow::{ActionType, TargetAction};
     use std::collections::HashMap;
@@ -241,59 +238,11 @@ mod pattern_matcher {
     }
 }
 
+pub use crate::stow_types::{
+    ActionType, StowItem, StowItemType, TargetAction, TargetActionReport, TargetActionReportStatus,
+};
 use conflict_resolver::ConflictResolver;
 use pattern_matcher::PatternMatcher;
-
-// --- Action Planning Enums and Structs ---
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionType {
-    CreateSymlink,   // Create a symbolic link
-    DeleteSymlink,   // Delete a symbolic link
-    CreateDirectory, // Create a directory (for folding)
-    DeleteDirectory, // Delete an empty directory (during unstow)
-    AdoptFile,       // Move a file from target to stow dir, then link (for --adopt)
-    AdoptDirectory,  // Move a directory from target to stow dir, then link (for --adopt)
-    Skip,            // Skip an operation (e.g., due to --defer or already correct state)
-    Conflict,        // A conflict was detected that cannot be resolved by options
-                     // Maybe add more specific conflict types later if needed
-}
-
-// Re-define TargetAction based on the design document
-// The existing one in tests/integration_tests.rs is a placeholder.
-// We'll keep the existing one for now in stow.rs to avoid breaking tests immediately,
-// but we should aim to replace it or make it compatible.
-// For now, let's rename the existing one slightly to avoid direct collision if needed.
-// Actually, let's define the proper one here. Tests will need to adapt.
-
-#[derive(Debug, Clone)]
-pub struct TargetAction {
-    pub source_item: Option<StowItem>, // Original item from the package
-    pub target_path: PathBuf,          // Absolute path in the target directory
-    pub link_target_path: Option<PathBuf>, // Path the symlink should point to (relative to link's parent dir)
-    pub action_type: ActionType,
-    pub conflict_details: Option<String>, // Description of the conflict
-}
-
-// StowItem re-definition from design document
-// The existing one in tests/integration_tests.rs is a placeholder.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)] // Added PartialEq, Eq, Hash as per design doc
-pub enum StowItemType {
-    File,
-    Directory,
-    Symlink, // Represents a symlink within the package itself (less common for typical stow usage)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)] // Added PartialEq, Eq, Hash
-pub struct StowItem {
-    pub package_relative_path: PathBuf, // Path relative to the package root (e.g., "bin/script", "dot-config/nvim/init.vim")
-    pub source_path: PathBuf,           // Absolute path to the item in the stow directory
-    pub item_type: StowItemType,        // Type of the item in the stow package
-    // Name of the item as it should appear in the target directory after dotfiles processing.
-    // For "file.txt", it's "file.txt". For "dot-bashrc" with --dotfiles, it's ".bashrc".
-    // For "dir/dot-foo", it's "dir/.foo".
-    pub target_name_after_dotfiles_processing: PathBuf,
-}
 
 fn plan_actions(
     package_name: &str,
@@ -1321,21 +1270,6 @@ fn is_parent_target_of_conflict(parent_path: &Path, all_actions: &[TargetAction]
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TargetActionReportStatus {
-    Success,
-    Skipped,           // For simulation or if no action was needed
-    ConflictPrevented, // For when a planned conflict action is "executed" (i.e. prevented)
-    Failure(String),   // Contains an error message
-}
-
-#[derive(Debug, Clone)]
-pub struct TargetActionReport {
-    pub original_action: TargetAction, // The action that was planned
-    pub status: TargetActionReportStatus,
-    pub message: Option<String>, // Additional details, e.g., error message or simulation output
-}
-
 fn execute_actions(
     actions: &[TargetAction],
     config: &Config,
@@ -2113,12 +2047,7 @@ where
 fn reports_allow_refolding(reports: &[TargetActionReport], config: &Config) -> bool {
     !config.simulate
         && !config.no_folding
-        && reports.iter().all(|report| {
-            !matches!(
-                report.status,
-                TargetActionReportStatus::ConflictPrevented | TargetActionReportStatus::Failure(_)
-            )
-        })
+        && reports.iter().all(|report| !report.status.is_blocking())
 }
 
 /// Execute a skip action
@@ -2857,39 +2786,6 @@ fn path_has_symlink_ancestor(path: &Path, root: &Path) -> bool {
     false
 }
 
-/// Resolve symlink target to absolute path
-fn resolve_symlink_target(symlink_path: &Path, link_target: &Path) -> PathBuf {
-    if link_target.is_absolute() {
-        link_target.to_path_buf()
-    } else {
-        symlink_path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(link_target)
-    }
-}
-
-/// Normalize path by resolving .. and . components manually
-fn normalize_path_components(path: &Path) -> PathBuf {
-    let mut normalized_components = Vec::new();
-
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                normalized_components.pop();
-            },
-            std::path::Component::CurDir => {
-                // Skip current directory components
-            },
-            other => {
-                normalized_components.push(other);
-            },
-        }
-    }
-
-    normalized_components.iter().collect()
-}
-
 /// Check if a directory is empty
 fn is_directory_empty(dir_path: &Path) -> Result<bool, RustowError> {
     Ok(read_directory_entries(dir_path)?
@@ -3084,12 +2980,7 @@ fn validate_relative_package_name(package_name: &str) -> Result<(), RustowError>
 }
 
 fn target_action_reports_have_blocking_status(reports: &[TargetActionReport]) -> bool {
-    reports.iter().any(|report| {
-        matches!(
-            report.status,
-            TargetActionReportStatus::ConflictPrevented | TargetActionReportStatus::Failure(_)
-        )
-    })
+    reports.iter().any(|report| report.status.is_blocking())
 }
 
 /// Validate that the package path exists and is a directory

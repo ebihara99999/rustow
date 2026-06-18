@@ -1,28 +1,7 @@
-pub mod cli;
-pub mod config; // Enabled config module
-pub mod dotfiles;
-pub mod error;
-pub mod fs_utils;
-pub mod ignore;
-pub mod stow;
-#[cfg(test)]
-mod test_sync;
-
 use rustow::cli::Args;
 
 fn main() {
-    // Print all arguments received by main to stderr for debugging purposes.
-    // These can be removed or commented out in production.
-    // let all_args: Vec<String> = std::env::args().collect();
-    // eprintln!("stderr: main received args: {:?}", all_args);
-    // if all_args.len() == 1 && all_args[0].contains("rustow") {
-    //     eprintln!("stderr: Attempting to parse arguments for main binary execution context...");
-    // }
-    // let raw_cli_args: Vec<String> = std::env::args().collect();
-    // eprintln!("stderr: Raw CLI args (non-test execution): {:?}", raw_cli_args);
-
     let parsed_args = Args::parse_runtime_with_operation_groups();
-    // eprintln!("stderr: Successfully parsed args in main: {:?}", args.clone());
 
     if let Err(e) = rustow::run_runtime_parsed(parsed_args) {
         eprintln!("Error: {}", e);

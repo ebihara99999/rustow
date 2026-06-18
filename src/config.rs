@@ -47,97 +47,24 @@ impl Config {
         args: Args,
         path_displays: &mut Vec<PathDisplayOverride>,
     ) -> RustowResult<Self> {
-        // 1. Determine StowMode
-        let mode: StowMode = if args.delete {
-            StowMode::Delete
-        } else if args.restow {
-            StowMode::Restow
-        } else {
-            StowMode::Stow
-        };
+        let mode = stow_mode_from_args(&args);
 
-        // 2. Resolve stow_dir
-        let stow_dir_path_unresolved: PathBuf = match args.dir {
-            Some(path) => path,
-            None => match env::var("STOW_DIR") {
-                Ok(val) => PathBuf::from(val),
-                Err(_) => env::current_dir().map_err(|e| {
-                    RustowError::Config(ConfigError::InvalidStowDir(format!(
-                        "Failed to get current directory for stow_dir: {}",
-                        e
-                    )))
-                })?,
-            },
-        };
+        let stow_dir_path_unresolved = unresolved_stow_dir(&args)?;
         let stow_dir_display = crate::cli::path_display(&stow_dir_path_unresolved, path_displays);
-        let stow_dir: PathBuf =
-            fs_utils::canonicalize_path(&stow_dir_path_unresolved).map_err(|e| match e {
-                RustowError::Fs(FsError::Canonicalize { source, .. }) => {
-                    RustowError::Config(ConfigError::InvalidStowDir(format!(
-                        "Failed to canonicalize stow directory '{}': {}",
-                        stow_dir_display, source
-                    )))
-                },
-                RustowError::Fs(fs_error) => {
-                    RustowError::Config(ConfigError::InvalidStowDir(format!(
-                        "Failed to canonicalize stow directory '{}': {}",
-                        stow_dir_display, fs_error
-                    )))
-                },
-                _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
-                    "An unexpected error occurred while canonicalizing stow directory '{}': {}",
-                    stow_dir_display, e
-                ))),
-            })?;
+        let stow_dir = canonicalize_stow_dir(&stow_dir_path_unresolved, &stow_dir_display)?;
         path_displays.push(PathDisplayOverride::new(
             stow_dir.clone(),
             stow_dir_display.clone(),
         ));
 
-        // 3. Resolve target_dir
-        let (target_dir_path_unresolved, target_dir_display): (PathBuf, String) = match args.target
-        {
-            Some(path) => {
-                let display = crate::cli::path_display(&path, path_displays);
-                (path, display)
-            },
-            None => {
-                let path = stow_dir.parent().ok_or_else(|| {
-                        RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                            "Stow directory '{}' has no parent, cannot determine default target directory",
-                            stow_dir_display
-                        )))
-                    })?.to_path_buf();
-                let display = display_parent(&stow_dir_display).unwrap_or_else(|| {
-                    let unresolved_display = stow_dir_path_unresolved.display().to_string();
-                    if stow_dir_display == unresolved_display {
-                        crate::cli::path_display(&path, path_displays)
-                    } else {
-                        format!("{}{}..", stow_dir_display, std::path::MAIN_SEPARATOR)
-                    }
-                });
-                (path, display)
-            },
-        };
-        let target_dir: PathBuf = fs_utils::canonicalize_path(&target_dir_path_unresolved)
-            .map_err(|e| match e {
-                RustowError::Fs(FsError::Canonicalize { source, .. }) => {
-                    RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                        "Failed to canonicalize target directory '{}': {}",
-                        target_dir_display, source
-                    )))
-                },
-                RustowError::Fs(fs_error) => {
-                    RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                        "Failed to canonicalize target directory '{}': {}",
-                        target_dir_display, fs_error
-                    )))
-                },
-                _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
-                    "An unexpected error occurred while canonicalizing target directory '{}': {}",
-                    target_dir_display, e
-                ))),
-            })?;
+        let (target_dir_path_unresolved, target_dir_display) = unresolved_target_dir(
+            &args,
+            &stow_dir,
+            &stow_dir_path_unresolved,
+            &stow_dir_display,
+            path_displays,
+        )?;
+        let target_dir = canonicalize_target_dir(&target_dir_path_unresolved, &target_dir_display)?;
         path_displays.push(PathDisplayOverride::new(
             target_dir.clone(),
             target_dir_display,
@@ -149,43 +76,9 @@ impl Config {
             ))
         })?;
 
-        // Compile override and defer patterns
-        let mut overrides_compiled: Vec<Regex> = Vec::new();
-        for pattern_str in &args.override_conflicts {
-            match Regex::new(pattern_str) {
-                Ok(re) => overrides_compiled.push(re),
-                Err(e) => {
-                    return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                        format!("Invalid --override pattern '{}': {}", pattern_str, e),
-                    )));
-                },
-            }
-        }
-
-        let mut defers_compiled: Vec<Regex> = Vec::new();
-        for pattern_str in &args.defer_conflicts {
-            match Regex::new(pattern_str) {
-                Ok(re) => defers_compiled.push(re),
-                Err(e) => {
-                    return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                        format!("Invalid --defer pattern '{}': {}", pattern_str, e),
-                    )));
-                },
-            }
-        }
-
-        // Compile ignore patterns
-        let mut ignore_patterns_compiled: Vec<Regex> = Vec::new();
-        for pattern_str in &args.ignore_patterns {
-            match Regex::new(pattern_str) {
-                Ok(re) => ignore_patterns_compiled.push(re),
-                Err(e) => {
-                    return Err(RustowError::Config(ConfigError::InvalidRegexPattern(
-                        format!("Invalid --ignore pattern '{}': {}", pattern_str, e),
-                    )));
-                },
-            }
-        }
+        let overrides = compile_regex_patterns(&args.override_conflicts, "--override")?;
+        let defers = compile_regex_patterns(&args.defer_conflicts, "--defer")?;
+        let ignore_patterns = compile_regex_patterns(&args.ignore_patterns, "--ignore")?;
 
         Ok(Self {
             target_dir,
@@ -197,14 +90,141 @@ impl Config {
             adopt: args.adopt,
             no_folding: args.no_folding,
             dotfiles: args.dotfiles,
-            overrides: overrides_compiled,
-            defers: defers_compiled,
-            ignore_patterns: ignore_patterns_compiled,
+            overrides,
+            defers,
+            ignore_patterns,
             simulate: args.simulate,
             verbosity: args.verbose,
             home_dir,
         })
     }
+}
+
+fn stow_mode_from_args(args: &Args) -> StowMode {
+    if args.delete {
+        StowMode::Delete
+    } else if args.restow {
+        StowMode::Restow
+    } else {
+        StowMode::Stow
+    }
+}
+
+fn unresolved_stow_dir(args: &Args) -> RustowResult<PathBuf> {
+    match &args.dir {
+        Some(path) => Ok(path.clone()),
+        None => match env::var("STOW_DIR") {
+            Ok(val) => Ok(PathBuf::from(val)),
+            Err(_) => env::current_dir().map_err(|e| {
+                RustowError::Config(ConfigError::InvalidStowDir(format!(
+                    "Failed to get current directory for stow_dir: {}",
+                    e
+                )))
+            }),
+        },
+    }
+}
+
+fn canonicalize_stow_dir(path: &Path, display: &str) -> RustowResult<PathBuf> {
+    fs_utils::canonicalize_path(path).map_err(|e| match e {
+        RustowError::Fs(FsError::Canonicalize { source, .. }) => {
+            RustowError::Config(ConfigError::InvalidStowDir(format!(
+                "Failed to canonicalize stow directory '{}': {}",
+                display, source
+            )))
+        },
+        RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidStowDir(format!(
+            "Failed to canonicalize stow directory '{}': {}",
+            display, fs_error
+        ))),
+        _ => RustowError::Config(ConfigError::InvalidStowDir(format!(
+            "An unexpected error occurred while canonicalizing stow directory '{}': {}",
+            display, e
+        ))),
+    })
+}
+
+fn unresolved_target_dir(
+    args: &Args,
+    stow_dir: &Path,
+    stow_dir_path_unresolved: &Path,
+    stow_dir_display: &str,
+    path_displays: &[PathDisplayOverride],
+) -> RustowResult<(PathBuf, String)> {
+    match &args.target {
+        Some(path) => {
+            let display = crate::cli::path_display(path, path_displays);
+            Ok((path.clone(), display))
+        },
+        None => {
+            let path = stow_dir
+                .parent()
+                .ok_or_else(|| {
+                    RustowError::Config(ConfigError::InvalidTargetDir(format!(
+                        "Stow directory '{}' has no parent, cannot determine default target directory",
+                        stow_dir_display
+                    )))
+                })?
+                .to_path_buf();
+            let display = default_target_display(
+                &path,
+                stow_dir_path_unresolved,
+                stow_dir_display,
+                path_displays,
+            );
+
+            Ok((path, display))
+        },
+    }
+}
+
+fn default_target_display(
+    target_path: &Path,
+    stow_dir_path_unresolved: &Path,
+    stow_dir_display: &str,
+    path_displays: &[PathDisplayOverride],
+) -> String {
+    display_parent(stow_dir_display).unwrap_or_else(|| {
+        let unresolved_display = stow_dir_path_unresolved.display().to_string();
+        if stow_dir_display == unresolved_display {
+            crate::cli::path_display(target_path, path_displays)
+        } else {
+            format!("{}{}..", stow_dir_display, std::path::MAIN_SEPARATOR)
+        }
+    })
+}
+
+fn canonicalize_target_dir(path: &Path, display: &str) -> RustowResult<PathBuf> {
+    fs_utils::canonicalize_path(path).map_err(|e| match e {
+        RustowError::Fs(FsError::Canonicalize { source, .. }) => {
+            RustowError::Config(ConfigError::InvalidTargetDir(format!(
+                "Failed to canonicalize target directory '{}': {}",
+                display, source
+            )))
+        },
+        RustowError::Fs(fs_error) => RustowError::Config(ConfigError::InvalidTargetDir(format!(
+            "Failed to canonicalize target directory '{}': {}",
+            display, fs_error
+        ))),
+        _ => RustowError::Config(ConfigError::InvalidTargetDir(format!(
+            "An unexpected error occurred while canonicalizing target directory '{}': {}",
+            display, e
+        ))),
+    })
+}
+
+fn compile_regex_patterns(patterns: &[String], option_label: &str) -> RustowResult<Vec<Regex>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern).map_err(|e| {
+                RustowError::Config(ConfigError::InvalidRegexPattern(format!(
+                    "Invalid {} pattern '{}': {}",
+                    option_label, pattern, e
+                )))
+            })
+        })
+        .collect()
 }
 
 fn display_parent(display: &str) -> Option<String> {
