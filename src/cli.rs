@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::ffi::{CStr, CString};
 use std::io::{BufRead, BufReader};
 #[cfg(unix)]
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::{env, fs, io::ErrorKind, path::Path};
 
 const MAX_VERBOSITY: u8 = 5;
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationMode {
     Stow,
     Delete,
@@ -261,7 +261,7 @@ fn parse_args_from_argv(argv: &[OsString]) -> Result<Args, clap::Error> {
     }
 
     let verbose = parse_verbose_level(argv)?;
-    let mut args = <Args as Parser>::try_parse_from(normalize_verbose_args(argv))?;
+    let mut args = <Args as Parser>::try_parse_from(normalize_verbose_args(argv)?)?;
     args.verbose = verbose;
     Ok(args)
 }
@@ -309,25 +309,49 @@ fn validate_cli_option_tokens(argv: &[OsString]) -> Result<(), clap::Error> {
             let (key, has_attached_value) = long_token
                 .split_once('=')
                 .map_or((long_token, false), |(key, _)| (key, true));
-            if !is_known_long_option(key) {
-                return Err(unknown_option_error(&arg));
-            }
-            if map_long_value_option(key).is_some() {
-                expecting_option_value = !has_attached_value;
+            let spec = match resolve_long_option(key) {
+                Ok(spec) => spec,
+                Err(LongOptionResolveError::Ambiguous) => {
+                    return Err(ambiguous_option_error(&format!("--{key}")));
+                },
+                Err(LongOptionResolveError::Unknown) => return Err(unknown_option_error(&arg)),
+            };
+            match spec.kind {
+                LongOptionKind::Value(_) => {
+                    expecting_option_value = !has_attached_value;
+                },
+                LongOptionKind::Verbose => {},
+                LongOptionKind::Bool
+                | LongOptionKind::Mode(_)
+                | LongOptionKind::Help
+                | LongOptionKind::Version => {
+                    if has_attached_value {
+                        return Err(unknown_option_error(&arg));
+                    }
+                },
             }
             continue;
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
-            let mut flags = arg[1..].chars().peekable();
-            while let Some(flag) = flags.next() {
+            let flags: Vec<char> = arg[1..].chars().collect();
+            let mut index = 0;
+            while index < flags.len() {
+                let flag = flags[index];
                 if !is_known_short_option(flag) {
                     return Err(unknown_option_error(&format!("-{flag}")));
                 }
+                if flag == 'v' {
+                    let rest = flags.iter().skip(index + 1).collect::<String>();
+                    if is_verbose_numeric_token(&rest) {
+                        break;
+                    }
+                }
                 if matches!(flag, 't' | 'd') {
-                    expecting_option_value = flags.peek().is_none();
+                    expecting_option_value = index + 1 == flags.len();
                     break;
                 }
+                index += 1;
             }
         }
     }
@@ -344,8 +368,18 @@ fn unknown_option_error(option: &str) -> clap::Error {
     )
 }
 
+fn ambiguous_option_error(option: &str) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    clap::Error::raw(
+        clap::error::ErrorKind::UnknownArgument,
+        format!("ambiguous option '{option}'\n\n{usage}"),
+    )
+}
+
+#[cfg(test)]
 fn is_known_long_option(option: &str) -> bool {
-    map_long_value_option(option).is_some() || map_long_bool_option(option)
+    resolve_long_option(option).is_ok()
 }
 
 #[derive(Debug)]
@@ -680,6 +714,144 @@ impl ResourceValueOption {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LongOptionKind {
+    Bool,
+    Value(ResourceValueOption),
+    Mode(OperationMode),
+    Verbose,
+    Help,
+    Version,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LongOptionSpec {
+    name: &'static str,
+    canonical: &'static str,
+    kind: LongOptionKind,
+}
+
+const LONG_OPTION_SPECS: &[LongOptionSpec] = &[
+    LongOptionSpec {
+        name: "target",
+        canonical: "target",
+        kind: LongOptionKind::Value(ResourceValueOption::Target),
+    },
+    LongOptionSpec {
+        name: "dir",
+        canonical: "dir",
+        kind: LongOptionKind::Value(ResourceValueOption::Dir),
+    },
+    LongOptionSpec {
+        name: "stow",
+        canonical: "stow",
+        kind: LongOptionKind::Mode(OperationMode::Stow),
+    },
+    LongOptionSpec {
+        name: "delete",
+        canonical: "delete",
+        kind: LongOptionKind::Mode(OperationMode::Delete),
+    },
+    LongOptionSpec {
+        name: "restow",
+        canonical: "restow",
+        kind: LongOptionKind::Mode(OperationMode::Restow),
+    },
+    LongOptionSpec {
+        name: "adopt",
+        canonical: "adopt",
+        kind: LongOptionKind::Bool,
+    },
+    LongOptionSpec {
+        name: "no-folding",
+        canonical: "no-folding",
+        kind: LongOptionKind::Bool,
+    },
+    LongOptionSpec {
+        name: "dotfiles",
+        canonical: "dotfiles",
+        kind: LongOptionKind::Bool,
+    },
+    LongOptionSpec {
+        name: "compat",
+        canonical: "compat",
+        kind: LongOptionKind::Bool,
+    },
+    LongOptionSpec {
+        name: "override",
+        canonical: "override",
+        kind: LongOptionKind::Value(ResourceValueOption::Override),
+    },
+    LongOptionSpec {
+        name: "defer",
+        canonical: "defer",
+        kind: LongOptionKind::Value(ResourceValueOption::Defer),
+    },
+    LongOptionSpec {
+        name: "ignore",
+        canonical: "ignore",
+        kind: LongOptionKind::Value(ResourceValueOption::Ignore),
+    },
+    LongOptionSpec {
+        name: "simulate",
+        canonical: "simulate",
+        kind: LongOptionKind::Bool,
+    },
+    LongOptionSpec {
+        name: "no",
+        canonical: "simulate",
+        kind: LongOptionKind::Bool,
+    },
+    LongOptionSpec {
+        name: "verbose",
+        canonical: "verbose",
+        kind: LongOptionKind::Verbose,
+    },
+    LongOptionSpec {
+        name: "help",
+        canonical: "help",
+        kind: LongOptionKind::Help,
+    },
+    LongOptionSpec {
+        name: "version",
+        canonical: "version",
+        kind: LongOptionKind::Version,
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LongOptionResolveError {
+    Unknown,
+    Ambiguous,
+}
+
+fn resolve_long_option(option: &str) -> Result<LongOptionSpec, LongOptionResolveError> {
+    if option.is_empty() {
+        return Err(LongOptionResolveError::Unknown);
+    }
+
+    if let Some(spec) = LONG_OPTION_SPECS.iter().find(|spec| spec.name == option) {
+        return Ok(*spec);
+    }
+
+    let mut matched = None;
+    for spec in LONG_OPTION_SPECS
+        .iter()
+        .filter(|spec| spec.name.starts_with(option))
+    {
+        if let Some(previous) = matched {
+            let previous: LongOptionSpec = previous;
+            if previous.canonical != spec.canonical {
+                return Err(LongOptionResolveError::Ambiguous);
+            }
+        } else {
+            matched = Some(*spec);
+        }
+    }
+
+    matched.ok_or(LongOptionResolveError::Unknown)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResourcePathValue {
     index: usize,
@@ -699,6 +871,7 @@ struct ParsedResourceOption {
     tokens: Vec<OsString>,
     expecting_value: Option<ResourceValueExpectation>,
     path_value: Option<ResourcePathValue>,
+    expecting_verbose_value: bool,
 }
 
 #[derive(Debug)]
@@ -712,6 +885,7 @@ fn normalize_stowrc_tokens(
 ) -> Result<NormalizedStowrcArgs, clap::Error> {
     let mut normalized = Vec::new();
     let mut expecting_value: Option<PendingResourceValue> = None;
+    let mut expecting_verbose_value = false;
     let mut path_values = Vec::new();
     let mut after_double_dash = false;
 
@@ -731,6 +905,14 @@ fn normalize_stowrc_tokens(
             normalized.push(OsString::from(normalized_value));
             expecting_value = None;
             continue;
+        }
+
+        if expecting_verbose_value {
+            expecting_verbose_value = false;
+            if is_verbose_numeric_token(&token_value) {
+                normalized.push(OsString::from(token_value));
+                continue;
+            }
         }
 
         if after_double_dash {
@@ -766,6 +948,7 @@ fn normalize_stowrc_tokens(
                         value_prefix: option_name.value_prefix,
                     });
                 }
+                expecting_verbose_value = parsed.expecting_verbose_value;
             }
 
             continue;
@@ -789,6 +972,7 @@ fn normalize_stowrc_tokens(
                         origin: token.origin,
                         value_prefix: option_name.value_prefix,
                     });
+                expecting_verbose_value = parsed.expecting_verbose_value;
             }
         }
     }
@@ -812,10 +996,6 @@ fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
         return None;
     }
 
-    if long_token == "stow" || long_token == "delete" || long_token == "restow" {
-        return None;
-    }
-
     if let Some((key, _value)) = long_token.split_once('=') {
         if let Some(option_name) = map_long_value_option(key) {
             if option_name.is_path_option() {
@@ -827,12 +1007,14 @@ fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                         option_name,
                         value_start: key.len() + 3,
                     }),
+                    expecting_verbose_value: false,
                 });
             }
             return Some(ParsedResourceOption {
                 tokens: vec![OsString::from(token)],
                 expecting_value: None,
                 path_value: None,
+                expecting_verbose_value: false,
             });
         }
 
@@ -840,60 +1022,49 @@ fn parse_long_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
             tokens: vec![OsString::from(token)],
             expecting_value: None,
             path_value: None,
+            expecting_verbose_value: false,
         });
     }
 
-    if let Some(option_name) = map_long_value_option(long_token) {
-        return Some(ParsedResourceOption {
-            tokens: Vec::new(),
-            expecting_value: Some(ResourceValueExpectation {
-                option_name,
-                value_prefix: format!("--{}=", long_token),
+    match resolve_long_option(long_token) {
+        Ok(spec) => match spec.kind {
+            LongOptionKind::Mode(_) => None,
+            LongOptionKind::Value(option_name) => Some(ParsedResourceOption {
+                tokens: Vec::new(),
+                expecting_value: Some(ResourceValueExpectation {
+                    option_name,
+                    value_prefix: format!("--{}=", long_token),
+                }),
+                path_value: None,
+                expecting_verbose_value: false,
             }),
-            path_value: None,
-        });
-    }
-
-    if map_long_bool_option(long_token) {
-        return Some(ParsedResourceOption {
+            LongOptionKind::Verbose => Some(ParsedResourceOption {
+                tokens: vec![OsString::from(token)],
+                expecting_value: None,
+                path_value: None,
+                expecting_verbose_value: true,
+            }),
+            LongOptionKind::Bool | LongOptionKind::Help | LongOptionKind::Version => {
+                Some(ParsedResourceOption {
+                    tokens: vec![OsString::from(token)],
+                    expecting_value: None,
+                    path_value: None,
+                    expecting_verbose_value: false,
+                })
+            },
+        },
+        Err(_) => Some(ParsedResourceOption {
             tokens: vec![OsString::from(token)],
             expecting_value: None,
             path_value: None,
-        });
+            expecting_verbose_value: false,
+        }),
     }
-
-    Some(ParsedResourceOption {
-        tokens: vec![OsString::from(token)],
-        expecting_value: None,
-        path_value: None,
-    })
-}
-
-fn map_long_bool_option(token: &str) -> bool {
-    matches!(
-        token,
-        "stow"
-            | "delete"
-            | "restow"
-            | "compat"
-            | "adopt"
-            | "no-folding"
-            | "dotfiles"
-            | "simulate"
-            | "verbose"
-            | "help"
-            | "version"
-            | "no"
-    )
 }
 
 fn map_long_value_option(token: &str) -> Option<ResourceValueOption> {
-    match token {
-        "target" => Some(ResourceValueOption::Target),
-        "dir" => Some(ResourceValueOption::Dir),
-        "ignore" => Some(ResourceValueOption::Ignore),
-        "defer" => Some(ResourceValueOption::Defer),
-        "override" => Some(ResourceValueOption::Override),
+    match resolve_long_option(token).map(|spec| spec.kind) {
+        Ok(LongOptionKind::Value(option_name)) => Some(option_name),
         _ => None,
     }
 }
@@ -930,6 +1101,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                                 value_prefix,
                             }),
                             path_value: None,
+                            expecting_verbose_value: false,
                         });
                     }
                     let value_prefix =
@@ -941,6 +1113,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                             value_prefix,
                         }),
                         path_value: None,
+                        expecting_verbose_value: false,
                     });
                 }
 
@@ -957,6 +1130,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                         option_name,
                         value_start: prefix.len(),
                     }),
+                    expecting_verbose_value: false,
                 });
             },
             'p' | 'v' | 'h' | 'V' | 'n' => {
@@ -968,6 +1142,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                     tokens: vec![OsString::from(token)],
                     expecting_value: None,
                     path_value: None,
+                    expecting_verbose_value: false,
                 });
             },
             _ => {
@@ -975,6 +1150,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                     tokens: vec![OsString::from(token)],
                     expecting_value: None,
                     path_value: None,
+                    expecting_verbose_value: false,
                 });
             },
         }
@@ -987,6 +1163,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
             tokens: vec![format!("-{}", bool_flags.iter().collect::<String>()).into()],
             expecting_value: None,
             path_value: None,
+            expecting_verbose_value: short_verbose_cluster_accepts_next_value(token),
         })
     }
 }
@@ -1051,11 +1228,14 @@ fn expand_path_value(
     option_name: ResourceValueOption,
 ) -> Result<String, clap::Error> {
     let expanded = expand_path_value_with_display(raw_value, option_name)?;
-    Ok(expanded.value)
+    Ok(expanded
+        .value
+        .into_string()
+        .expect("test path value should be valid UTF-8"))
 }
 
 struct ExpandedPathValue {
-    value: String,
+    value: OsString,
     display: Option<String>,
 }
 
@@ -1064,11 +1244,14 @@ fn expand_path_value_with_display(
     option_name: ResourceValueOption,
 ) -> Result<ExpandedPathValue, clap::Error> {
     let env_expanded = expand_environment_value(raw_value, option_name)?;
-    let tilde_expanded = expand_tilde_value_with_display(&env_expanded.value);
     let display = env_expanded
         .display
         .map(|display| unescape_tilde_markers(&display))
-        .or(tilde_expanded.display);
+        .or_else(|| {
+            let tilde_expanded = expand_tilde_value_with_display(env_expanded.value.clone());
+            tilde_expanded.display
+        });
+    let tilde_expanded = expand_tilde_value_with_display(env_expanded.value);
 
     Ok(ExpandedPathValue {
         value: tilde_expanded.value,
@@ -1077,12 +1260,12 @@ fn expand_path_value_with_display(
 }
 
 struct ExpandedEnvironmentValue {
-    value: String,
+    value: OsString,
     display: Option<String>,
 }
 
 struct ExpandedTildeValue {
-    value: String,
+    value: OsString,
     display: Option<String>,
 }
 
@@ -1090,7 +1273,7 @@ fn expand_environment_value(
     raw_value: &str,
     option_name: ResourceValueOption,
 ) -> Result<ExpandedEnvironmentValue, clap::Error> {
-    let mut output = String::new();
+    let mut output = OsString::new();
     let mut display = String::new();
     let mut changed_display = false;
     let mut chars = raw_value.chars().peekable();
@@ -1099,16 +1282,16 @@ fn expand_environment_value(
         if ch == '\\' {
             if let Some(next) = chars.next() {
                 if next == '$' {
-                    output.push(next);
+                    push_char_os(&mut output, next);
                     display.push(next);
                 } else {
-                    output.push('\\');
-                    output.push(next);
+                    output.push("\\");
+                    push_char_os(&mut output, next);
                     display.push('\\');
                     display.push(next);
                 }
             } else {
-                output.push('\\');
+                output.push("\\");
                 display.push('\\');
             }
             continue;
@@ -1127,18 +1310,18 @@ fn expand_environment_value(
                     variable.push(next);
                 }
                 if !closed || !is_gnu_braced_env_name(&variable) {
-                    output.push_str("${");
-                    output.push_str(&variable);
+                    output.push("${");
+                    output.push(&variable);
                     display.push_str("${");
                     display.push_str(&variable);
                     if closed {
-                        output.push('}');
+                        output.push("}");
                         display.push('}');
                     }
                     continue;
                 }
                 let value = env_resource_value(&variable, option_name)?;
-                output.push_str(&value);
+                output.push(value);
                 display.push_str(&format!("${{{}}}", variable));
                 changed_display = true;
                 continue;
@@ -1158,19 +1341,19 @@ fn expand_environment_value(
                     }
 
                     let value = env_resource_value(&variable, option_name)?;
-                    output.push_str(&value);
+                    output.push(value);
                     display.push_str(&format!("${}", variable));
                     changed_display = true;
                     continue;
                 }
             }
 
-            output.push('$');
+            output.push("$");
             display.push('$');
             continue;
         }
 
-        output.push(ch);
+        push_char_os(&mut output, ch);
         display.push(ch);
     }
 
@@ -1183,10 +1366,10 @@ fn expand_environment_value(
 fn env_resource_value(
     variable: &str,
     option_name: ResourceValueOption,
-) -> Result<String, clap::Error> {
+) -> Result<OsString, clap::Error> {
     // GNU Stow 2.4.1 aborts here via _safe_expand_env_var despite a nearby
     // source comment mentioning Perl's empty-string fallback.
-    env::var(variable).map_err(|_| undefined_env_var_error(variable, option_name))
+    env::var_os(variable).ok_or_else(|| undefined_env_var_error(variable, option_name))
 }
 
 fn undefined_env_var_error(variable: &str, option_name: ResourceValueOption) -> clap::Error {
@@ -1200,38 +1383,89 @@ fn undefined_env_var_error(variable: &str, option_name: ResourceValueOption) -> 
     )
 }
 
-fn expand_tilde_value_with_display(value: &str) -> ExpandedTildeValue {
-    let tilde_expanded = if let Some(rest) = value.strip_prefix('~') {
+fn expand_tilde_value_with_display(value: OsString) -> ExpandedTildeValue {
+    expand_tilde_value_with_display_impl(value)
+}
+
+#[cfg(not(unix))]
+fn expand_tilde_value_with_display_impl(value: OsString) -> ExpandedTildeValue {
+    let value_string = value.to_string_lossy().into_owned();
+    let tilde_expanded = if let Some(rest) = value_string.strip_prefix('~') {
         let user_end = rest.find('/').unwrap_or(rest.len());
         let user = &rest[..user_end];
         let suffix = &rest[user_end..];
-        let mut output = String::new();
+        let mut output = OsString::new();
 
         if user.is_empty() {
             if let Some(home_dir) = current_user_home_dir() {
-                output.push_str(&home_dir.to_string_lossy());
+                output.push(home_dir);
             } else {
-                output.push('~');
+                output.push("~");
             }
         } else if let Some(user_home) = home_dir_for_user(user) {
-            output.push_str(&user_home.to_string_lossy());
+            output.push(user_home);
         } else {
             // GNU Stow's Perl tilde expansion substitutes undef here, which
             // effectively removes the unknown user part of the path.
         }
 
-        output.push_str(suffix);
+        output.push(unescape_tilde_markers(suffix));
 
         output
     } else {
-        value.to_string()
+        unescape_tilde_markers_os(value)
     };
 
-    let tilde_expanded = unescape_tilde_markers(&tilde_expanded);
-    let display = value
+    let display = value_string
         .starts_with('~')
-        .then(|| unescape_tilde_markers(value))
-        .filter(|display| display != &tilde_expanded);
+        .then(|| unescape_tilde_markers(&value_string))
+        .filter(|display| display.as_str() != tilde_expanded.to_string_lossy());
+
+    ExpandedTildeValue {
+        value: tilde_expanded,
+        display,
+    }
+}
+
+#[cfg(unix)]
+fn expand_tilde_value_with_display_impl(value: OsString) -> ExpandedTildeValue {
+    let display_source = value.as_os_str().to_str().map(str::to_owned);
+    let value_bytes = value.as_os_str().as_bytes();
+    let tilde_expanded = if let Some(rest) = value_bytes.strip_prefix(b"~") {
+        let user_end = rest
+            .iter()
+            .position(|byte| *byte == b'/')
+            .unwrap_or(rest.len());
+        let user = &rest[..user_end];
+        let suffix = &rest[user_end..];
+        let mut output = Vec::new();
+
+        if user.is_empty() {
+            if let Some(home_dir) = current_user_home_dir() {
+                output.extend_from_slice(home_dir.as_os_str().as_bytes());
+            } else {
+                output.push(b'~');
+            }
+        } else if let Ok(user) = std::str::from_utf8(user) {
+            if let Some(user_home) = home_dir_for_user(user) {
+                output.extend_from_slice(user_home.as_os_str().as_bytes());
+            }
+        } else {
+            // GNU Stow's Perl tilde expansion substitutes undef here, which
+            // effectively removes the unknown user part of the path.
+        }
+
+        output.extend_from_slice(&unescape_tilde_bytes(suffix));
+        OsString::from_vec(output)
+    } else {
+        unescape_tilde_markers_os(value)
+    };
+
+    let display = display_source
+        .as_deref()
+        .filter(|value| value.starts_with('~'))
+        .map(unescape_tilde_markers)
+        .filter(|display| display.as_str() != tilde_expanded.to_string_lossy());
 
     ExpandedTildeValue {
         value: tilde_expanded,
@@ -1241,6 +1475,37 @@ fn expand_tilde_value_with_display(value: &str) -> ExpandedTildeValue {
 
 fn unescape_tilde_markers(value: &str) -> String {
     value.replace("\\~", "~")
+}
+
+fn push_char_os(output: &mut OsString, ch: char) {
+    let mut buffer = [0; 4];
+    output.push(ch.encode_utf8(&mut buffer));
+}
+
+#[cfg(not(unix))]
+fn unescape_tilde_markers_os(value: OsString) -> OsString {
+    OsString::from(unescape_tilde_markers(&value.to_string_lossy()))
+}
+
+#[cfg(unix)]
+fn unescape_tilde_markers_os(value: OsString) -> OsString {
+    OsString::from_vec(unescape_tilde_bytes(&value.into_vec()))
+}
+
+#[cfg(unix)]
+fn unescape_tilde_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'~') {
+            output.push(b'~');
+            index += 2;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    output
 }
 
 fn expand_final_resource_path_values(
@@ -1269,11 +1534,9 @@ fn expand_final_resource_path_values(
             } else {
                 let (prefix, raw_value) = raw_value.split_at(path_value.value_start);
                 let expanded = expand_path_value_with_display(raw_value, path_value.option_name)?;
-                (
-                    format!("{}{}", prefix, expanded.value),
-                    expanded.value,
-                    expanded.display,
-                )
+                let mut expanded_token = OsString::from(prefix);
+                expanded_token.push(&expanded.value);
+                (expanded_token, expanded.value, expanded.display)
             };
             if let Some(display) = redacted_display {
                 path_displays.push(ResourcePathDisplay {
@@ -1282,7 +1545,7 @@ fn expand_final_resource_path_values(
                     display,
                 });
             }
-            normalized[path_value.index] = expanded_token.into();
+            normalized[path_value.index] = expanded_token;
         }
     }
 
@@ -1412,9 +1675,10 @@ fn is_gnu_braced_env_name(variable: &str) -> bool {
             .all(|ch| is_valid_var_char(ch) || ch.is_ascii_whitespace())
 }
 
-fn normalize_verbose_args(argv: &[OsString]) -> Vec<OsString> {
+fn normalize_verbose_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
     let mut normalized_args = Vec::with_capacity(argv.len());
     let mut expecting_option_value = false;
+    let mut expecting_verbose_value = false;
     let mut after_double_dash = false;
 
     for (index, arg) in argv.iter().enumerate() {
@@ -1435,41 +1699,164 @@ fn normalize_verbose_args(argv: &[OsString]) -> Vec<OsString> {
         }
 
         let arg_string = arg.to_string_lossy();
+        if expecting_verbose_value {
+            expecting_verbose_value = false;
+            if is_verbose_numeric_token(&arg_string) {
+                continue;
+            }
+        }
+
         if arg_string == "--" {
             after_double_dash = true;
             normalized_args.push(arg.clone());
             continue;
         }
 
-        if is_option_requiring_separate_value(&arg_string) {
-            expecting_option_value = true;
-            normalized_args.push(arg.clone());
+        if let Some(long_token) = arg_string.strip_prefix("--") {
+            let (key, attached_value) = long_token
+                .split_once('=')
+                .map_or((long_token, None), |(key, value)| (key, Some(value)));
+            match resolve_long_option(key) {
+                Ok(spec) => {
+                    let canonical = format!("--{}", spec.canonical);
+                    match spec.kind {
+                        LongOptionKind::Value(_) => {
+                            if attached_value.is_some() {
+                                normalized_args
+                                    .push(canonicalize_attached_long_arg(arg, spec.canonical));
+                            } else {
+                                expecting_option_value = true;
+                                normalized_args.push(OsString::from(canonical));
+                            }
+                        },
+                        LongOptionKind::Verbose => {
+                            if let Some(value) = attached_value {
+                                parse_verbose_numeric_value(value)?;
+                            } else {
+                                expecting_verbose_value = true;
+                            }
+                        },
+                        LongOptionKind::Bool
+                        | LongOptionKind::Mode(_)
+                        | LongOptionKind::Help
+                        | LongOptionKind::Version => {
+                            if attached_value.is_some() {
+                                normalized_args
+                                    .push(canonicalize_attached_long_arg(arg, spec.canonical));
+                            } else {
+                                normalized_args.push(OsString::from(canonical));
+                            }
+                        },
+                    }
+                },
+                Err(LongOptionResolveError::Ambiguous) => {
+                    return Err(ambiguous_option_error(&format!("--{key}")));
+                },
+                Err(LongOptionResolveError::Unknown) => normalized_args.push(arg.clone()),
+            }
             continue;
         }
 
-        if arg_string.starts_with('-')
-            && !arg_string.starts_with("--")
-            && short_option_cluster_consumes_value(&arg_string, &mut OperationMode::Stow)
-        {
-            expecting_option_value = short_option_cluster_needs_next_value(&arg_string);
+        if arg_string.starts_with('-') && arg_string.len() > 1 {
+            let normalized_short = normalize_short_verbose_arg(&arg_string)?;
+            expecting_option_value = normalized_short.expects_option_value;
+            expecting_verbose_value = normalized_short.expects_verbose_value;
+            normalized_args.extend(normalized_short.tokens);
+            continue;
         }
 
-        normalized_args.extend(normalize_verbose_arg(arg).unwrap_or_else(|| vec![arg.clone()]));
+        normalized_args.push(arg.clone());
     }
 
-    normalized_args
+    Ok(normalized_args)
 }
 
-fn normalize_verbose_arg(arg: &OsString) -> Option<Vec<OsString>> {
-    let arg = arg.to_str()?;
-    let level = arg.strip_prefix("--verbose=")?;
-    let level = parse_numeric_verbose_level(level)?;
+#[derive(Debug)]
+struct NormalizedShortArg {
+    tokens: Vec<OsString>,
+    expects_option_value: bool,
+    expects_verbose_value: bool,
+}
 
-    if level == 0 {
-        return Some(Vec::new());
+fn normalize_short_verbose_arg(arg: &str) -> Result<NormalizedShortArg, clap::Error> {
+    let chars: Vec<char> = arg.chars().skip(1).collect();
+    let mut kept_flags = String::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let flag = chars[index];
+        if matches!(flag, 't' | 'd') {
+            kept_flags.push(flag);
+            let rest = chars.iter().skip(index + 1).collect::<String>();
+            kept_flags.push_str(&rest);
+            return Ok(NormalizedShortArg {
+                tokens: normalized_short_tokens(kept_flags),
+                expects_option_value: rest.is_empty(),
+                expects_verbose_value: false,
+            });
+        }
+
+        if flag == 'v' {
+            let rest = chars.iter().skip(index + 1).collect::<String>();
+            if rest.is_empty() {
+                return Ok(NormalizedShortArg {
+                    tokens: normalized_short_tokens(kept_flags),
+                    expects_option_value: false,
+                    expects_verbose_value: true,
+                });
+            }
+            if is_verbose_numeric_token(&rest) {
+                parse_verbose_numeric_value(&rest)?;
+                return Ok(NormalizedShortArg {
+                    tokens: normalized_short_tokens(kept_flags),
+                    expects_option_value: false,
+                    expects_verbose_value: false,
+                });
+            }
+            index += 1;
+            continue;
+        }
+
+        kept_flags.push(flag);
+        index += 1;
     }
 
-    Some(vec![OsString::from("-v")])
+    Ok(NormalizedShortArg {
+        tokens: normalized_short_tokens(kept_flags),
+        expects_option_value: false,
+        expects_verbose_value: false,
+    })
+}
+
+fn normalized_short_tokens(flags: String) -> Vec<OsString> {
+    if flags.is_empty() {
+        Vec::new()
+    } else {
+        vec![OsString::from(format!("-{flags}"))]
+    }
+}
+
+#[cfg(unix)]
+fn canonicalize_attached_long_arg(arg: &OsString, canonical: &str) -> OsString {
+    let mut normalized = OsString::from(format!("--{canonical}="));
+    if let Some(value_start) = arg
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .position(|byte| *byte == b'=')
+    {
+        normalized.push(std::ffi::OsStr::from_bytes(
+            &arg.as_os_str().as_bytes()[value_start + 1..],
+        ));
+    }
+    normalized
+}
+
+#[cfg(not(unix))]
+fn canonicalize_attached_long_arg(arg: &OsString, canonical: &str) -> OsString {
+    let arg = arg.to_string_lossy();
+    let value = arg.split_once('=').map_or("", |(_, value)| value);
+    OsString::from(format!("--{canonical}={value}"))
 }
 
 fn parse_numeric_verbose_level(level: &str) -> Option<u8> {
@@ -1479,12 +1866,21 @@ fn parse_numeric_verbose_level(level: &str) -> Option<u8> {
         .filter(|level| *level <= MAX_VERBOSITY)
 }
 
+fn parse_verbose_numeric_value(level: &str) -> Result<u8, clap::Error> {
+    parse_numeric_verbose_level(level).ok_or_else(|| verbose_level_error(level))
+}
+
+fn is_verbose_numeric_token(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
 fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
     let mut verbosity = 0;
     let mut expecting_option_value = false;
     let mut after_double_dash = false;
+    let mut args = argv.iter().skip(1).peekable();
 
-    for arg in argv.iter().skip(1) {
+    while let Some(arg) = args.next() {
         let arg = arg.to_string_lossy();
 
         if after_double_dash {
@@ -1501,31 +1897,53 @@ fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
             continue;
         }
 
-        if is_option_requiring_separate_value(&arg) {
-            expecting_option_value = true;
-            continue;
-        }
-
-        if arg.starts_with("--verbose=") {
-            let level = arg
-                .strip_prefix("--verbose=")
-                .and_then(parse_numeric_verbose_level)
-                .ok_or_else(|| verbose_level_error(&arg))?;
-            verbosity = level;
-            continue;
-        }
-
-        if arg == "--verbose" {
-            increment_verbose_level(&mut verbosity)?;
-            continue;
-        }
-
-        if arg.starts_with("--") {
+        if let Some(long_token) = arg.strip_prefix("--") {
+            let (key, attached_value) = long_token
+                .split_once('=')
+                .map_or((long_token, None), |(key, value)| (key, Some(value)));
+            match resolve_long_option(key) {
+                Ok(spec) => match spec.kind {
+                    LongOptionKind::Value(_) => {
+                        expecting_option_value = attached_value.is_none();
+                    },
+                    LongOptionKind::Verbose => {
+                        if let Some(value) = attached_value {
+                            verbosity = parse_verbose_numeric_value(value)?;
+                        } else if let Some(next) = args.peek() {
+                            let next = next.to_string_lossy();
+                            if is_verbose_numeric_token(&next) {
+                                verbosity = parse_verbose_numeric_value(&next)?;
+                                args.next();
+                            } else {
+                                increment_verbose_level(&mut verbosity)?;
+                            }
+                        } else {
+                            increment_verbose_level(&mut verbosity)?;
+                        }
+                    },
+                    LongOptionKind::Bool
+                    | LongOptionKind::Mode(_)
+                    | LongOptionKind::Help
+                    | LongOptionKind::Version => {},
+                },
+                Err(LongOptionResolveError::Ambiguous) => {
+                    return Err(ambiguous_option_error(&format!("--{key}")));
+                },
+                Err(LongOptionResolveError::Unknown) => {},
+            }
             continue;
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
-            parse_short_verbose_cluster(&arg, &mut verbosity)?;
+            if parse_short_verbose_cluster(&arg, &mut verbosity)? {
+                if let Some(next) = args.peek() {
+                    let next = next.to_string_lossy();
+                    if is_verbose_numeric_token(&next) {
+                        verbosity = parse_verbose_numeric_value(&next)?;
+                        args.next();
+                    }
+                }
+            }
             if short_option_cluster_consumes_value(&arg, &mut OperationMode::Stow) {
                 expecting_option_value = short_option_cluster_needs_next_value(&arg);
             }
@@ -1562,36 +1980,41 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
             let (key, has_attached_value) = long_token
                 .split_once('=')
                 .map_or((long_token, false), |(key, _)| (key, true));
-            if key == "help" {
-                if has_attached_value {
-                    return None;
-                }
-                saw_help = true;
-                continue;
+            let spec = match resolve_long_option(key) {
+                Ok(spec) => spec,
+                Err(_) => return None,
+            };
+            match spec.kind {
+                LongOptionKind::Help => {
+                    if has_attached_value {
+                        return None;
+                    }
+                    saw_help = true;
+                },
+                LongOptionKind::Version => {
+                    if has_attached_value {
+                        return None;
+                    }
+                    saw_version = true;
+                },
+                LongOptionKind::Value(_) => {
+                    expecting_option_value = !has_attached_value;
+                },
+                LongOptionKind::Verbose => {},
+                LongOptionKind::Bool | LongOptionKind::Mode(_) => {
+                    if has_attached_value {
+                        return None;
+                    }
+                },
             }
-            if key == "version" {
-                if has_attached_value {
-                    return None;
-                }
-                saw_version = true;
-                continue;
-            }
-            if map_long_value_option(key).is_some() {
-                expecting_option_value = !has_attached_value;
-                continue;
-            }
-            if key == "verbose" || map_long_bool_option(key) {
-                if has_attached_value && key != "verbose" {
-                    return None;
-                }
-                continue;
-            }
-            return None;
+            continue;
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
-            let mut flags = arg[1..].chars().peekable();
-            while let Some(flag) = flags.next() {
+            let flags: Vec<char> = arg[1..].chars().collect();
+            let mut index = 0;
+            while index < flags.len() {
+                let flag = flags[index];
                 if !is_known_short_option(flag) {
                     return None;
                 }
@@ -1602,10 +2025,19 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
                     saw_version = true;
                 }
 
+                if flag == 'v' {
+                    let rest = flags.iter().skip(index + 1).collect::<String>();
+                    if is_verbose_numeric_token(&rest) {
+                        break;
+                    }
+                }
+
                 if matches!(flag, 't' | 'd') {
-                    expecting_option_value = flags.peek().is_none();
+                    expecting_option_value = index + 1 == flags.len();
                     break;
                 }
+
+                index += 1;
             }
             continue;
         }
@@ -1627,18 +2059,59 @@ fn is_known_short_option(flag: char) -> bool {
     )
 }
 
-fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<(), clap::Error> {
-    for flag in arg[1..].chars() {
+fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<bool, clap::Error> {
+    let chars: Vec<char> = arg.chars().skip(1).collect();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let flag = chars[index];
         if short_cluster_stops_value_parsing(flag) {
             break;
         }
 
         if flag == 'v' {
+            let rest = chars.iter().skip(index + 1).collect::<String>();
+            if rest.is_empty() {
+                increment_verbose_level(verbosity)?;
+                return Ok(true);
+            }
+            if is_verbose_numeric_token(&rest) {
+                *verbosity = parse_verbose_numeric_value(&rest)?;
+                return Ok(false);
+            }
             increment_verbose_level(verbosity)?;
         }
+
+        index += 1;
     }
 
-    Ok(())
+    Ok(false)
+}
+
+fn short_verbose_cluster_accepts_next_value(arg: &str) -> bool {
+    let chars: Vec<char> = arg.chars().skip(1).collect();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let flag = chars[index];
+        if short_cluster_stops_value_parsing(flag) {
+            return false;
+        }
+
+        if flag == 'v' {
+            let rest = chars.iter().skip(index + 1).collect::<String>();
+            if rest.is_empty() {
+                return true;
+            }
+            if is_verbose_numeric_token(&rest) {
+                return false;
+            }
+        }
+
+        index += 1;
+    }
+
+    false
 }
 
 fn short_cluster_stops_value_parsing(flag: char) -> bool {
@@ -1665,6 +2138,7 @@ fn parse_operation_groups(argv: &[OsString]) -> Vec<OperationGroup> {
     let mut groups: Vec<OperationGroup> = Vec::new();
     let mut current_mode = OperationMode::Stow;
     let mut expecting_option_value = false;
+    let mut expecting_verbose_value = false;
     let mut after_double_dash = false;
 
     for arg in argv.iter().skip(1) {
@@ -1675,8 +2149,15 @@ fn parse_operation_groups(argv: &[OsString]) -> Vec<OperationGroup> {
             continue;
         }
 
+        if expecting_verbose_value {
+            expecting_verbose_value = false;
+            if is_verbose_numeric_token(&arg) {
+                continue;
+            }
+        }
+
         if after_double_dash {
-            push_package_operation(&mut groups, current_mode.clone(), arg.into_owned());
+            push_package_operation(&mut groups, current_mode, arg.into_owned());
             continue;
         }
 
@@ -1691,8 +2172,21 @@ fn parse_operation_groups(argv: &[OsString]) -> Vec<OperationGroup> {
         }
 
         if arg.starts_with("--") {
-            if let Some(mode) = long_operation_mode(&arg) {
-                current_mode = mode;
+            if let Some(long_token) = arg.strip_prefix("--") {
+                let (key, attached_value) = long_token
+                    .split_once('=')
+                    .map_or((long_token, None), |(key, value)| (key, Some(value)));
+                if let Ok(spec) = resolve_long_option(key) {
+                    match spec.kind {
+                        LongOptionKind::Mode(mode) if attached_value.is_none() => {
+                            current_mode = mode;
+                        },
+                        LongOptionKind::Verbose if attached_value.is_none() => {
+                            expecting_verbose_value = true;
+                        },
+                        _ => {},
+                    }
+                }
             }
             continue;
         }
@@ -1700,11 +2194,13 @@ fn parse_operation_groups(argv: &[OsString]) -> Vec<OperationGroup> {
         if arg.starts_with('-') && arg.len() > 1 {
             if short_option_cluster_consumes_value(&arg, &mut current_mode) {
                 expecting_option_value = short_option_cluster_needs_next_value(&arg);
+            } else {
+                expecting_verbose_value = short_verbose_cluster_accepts_next_value(&arg);
             }
             continue;
         }
 
-        push_package_operation(&mut groups, current_mode.clone(), arg.into_owned());
+        push_package_operation(&mut groups, current_mode, arg.into_owned());
     }
 
     groups
@@ -1724,15 +2220,6 @@ fn push_package_operation(groups: &mut Vec<OperationGroup>, mode: OperationMode,
     });
 }
 
-fn long_operation_mode(arg: &str) -> Option<OperationMode> {
-    match arg {
-        "--stow" => Some(OperationMode::Stow),
-        "--delete" => Some(OperationMode::Delete),
-        "--restow" => Some(OperationMode::Restow),
-        _ => None,
-    }
-}
-
 fn short_operation_mode(flag: char) -> Option<OperationMode> {
     match flag {
         'S' => Some(OperationMode::Stow),
@@ -1743,10 +2230,22 @@ fn short_operation_mode(flag: char) -> Option<OperationMode> {
 }
 
 fn is_option_requiring_separate_value(arg: &str) -> bool {
-    matches!(
-        arg,
-        "-t" | "--target" | "-d" | "--dir" | "--override" | "--defer" | "--ignore"
-    )
+    if matches!(arg, "-t" | "-d") {
+        return true;
+    }
+
+    let Some(long_token) = arg.strip_prefix("--") else {
+        return false;
+    };
+    let (key, has_attached_value) = long_token
+        .split_once('=')
+        .map_or((long_token, false), |(key, _)| (key, true));
+
+    !has_attached_value
+        && matches!(
+            resolve_long_option(key).map(|spec| spec.kind),
+            Ok(LongOptionKind::Value(_))
+        )
 }
 
 fn short_option_cluster_consumes_value(arg: &str, current_mode: &mut OperationMode) -> bool {
@@ -1782,6 +2281,8 @@ mod tests {
     use std::fs::{self, File};
     use std::io::Write;
     #[cfg(unix)]
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
@@ -1812,9 +2313,29 @@ mod tests {
         original_value: Option<String>,
     }
 
+    #[cfg(unix)]
+    struct OsEnvVarGuard {
+        key: &'static str,
+        original_value: Option<OsString>,
+    }
+
     impl EnvVarGuard {
         fn new(key: &'static str, value: &str) -> Self {
             let original_value = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key,
+                original_value,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl OsEnvVarGuard {
+        fn new(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let original_value = std::env::var_os(key);
             unsafe {
                 std::env::set_var(key, value);
             }
@@ -1856,6 +2377,24 @@ mod tests {
                 None => unsafe { std::env::remove_var(self.key) },
             }
         }
+    }
+
+    #[cfg(unix)]
+    impl Drop for OsEnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original_value {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_child(parent: &std::path::Path, child: &[u8]) -> PathBuf {
+        let mut bytes = parent.as_os_str().as_bytes().to_vec();
+        bytes.push(b'/');
+        bytes.extend_from_slice(child);
+        PathBuf::from(OsString::from_vec(bytes))
     }
 
     fn write_file(path: &std::path::Path, content: &str) -> std::path::PathBuf {
@@ -2030,6 +2569,31 @@ mod tests {
     }
 
     #[test]
+    fn test_verbose_optional_numeric_values_match_gnu() {
+        let _lock = process_env_lock();
+        let args = Args::parse_from(["rustow", "--verbose", "2", "mypackage"]);
+        assert_eq!(args.verbose, 2);
+        assert_eq!(args.packages, vec!["mypackage"]);
+
+        let args = Args::parse_from(["rustow", "--verbose", "0", "mypackage"]);
+        assert_eq!(args.verbose, 0);
+        assert_eq!(args.packages, vec!["mypackage"]);
+
+        let args = Args::parse_from(["rustow", "-v", "0", "mypackage"]);
+        assert_eq!(args.verbose, 0);
+        assert_eq!(args.packages, vec!["mypackage"]);
+
+        let args = Args::parse_from(["rustow", "-v2", "mypackage"]);
+        assert_eq!(args.verbose, 2);
+        assert_eq!(args.packages, vec!["mypackage"]);
+
+        let args = Args::parse_from(["rustow", "-pv2", "mypackage"]);
+        assert!(args.compat);
+        assert_eq!(args.verbose, 2);
+        assert_eq!(args.packages, vec!["mypackage"]);
+    }
+
+    #[test]
     fn test_verbose_option_cluster_with_compat_before() {
         let _lock = process_env_lock();
         let args = Args::parse_from(["rustow", "-pv", "mypackage"]);
@@ -2054,6 +2618,30 @@ mod tests {
         let error = Args::try_parse_from(["rustow", "--verbose=6", "mypackage"]).unwrap_err();
 
         assert!(error.to_string().contains("between 0 and 5"));
+
+        let error = Args::try_parse_from(["rustow", "-v6", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("between 0 and 5"));
+    }
+
+    #[test]
+    fn test_long_option_abbreviations_match_gnu() {
+        let _lock = process_env_lock();
+        let args = Args::parse_from([
+            "rustow",
+            "--targ",
+            "/target/dir",
+            "--sim",
+            "--no-f",
+            "mypackage",
+        ]);
+
+        assert_eq!(args.target, Some(PathBuf::from("/target/dir")));
+        assert!(args.simulate);
+        assert!(args.no_folding);
+        assert_eq!(args.packages, vec!["mypackage"]);
+
+        let error = Args::try_parse_from(["rustow", "--ver", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("ambiguous option '--ver'"));
     }
 
     #[test]
@@ -2390,6 +2978,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_operation_groups_skips_verbose_optional_numeric_values() {
+        let _lock = process_env_lock();
+        let parsed_args = Args::parse_from_with_operation_groups([
+            "rustow",
+            "--delete",
+            "--verbose",
+            "2",
+            "old",
+            "--stow",
+            "-v0",
+            "new",
+        ]);
+
+        assert_eq!(
+            parsed_args.operation_groups,
+            vec![
+                OperationGroup {
+                    mode: OperationMode::Delete,
+                    packages: vec!["old".to_string()],
+                },
+                OperationGroup {
+                    mode: OperationMode::Stow,
+                    packages: vec!["new".to_string()],
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn test_parse_operation_groups_defaults_to_stow_until_mode_changes() {
         let _lock = process_env_lock();
         let parsed_args = Args::parse_from_with_operation_groups([
@@ -2641,6 +3258,50 @@ mod tests {
         let args_override = parse_runtime_args(["rustow", "--dir", "/cli-dir", "my-package"]);
         assert_eq!(args_override.dir, Some(PathBuf::from("/cli-dir")));
         drop(home_guard);
+    }
+
+    #[test]
+    fn test_stowrc_verbose_optional_numeric_values_match_gnu() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(&cwd.join(".stowrc"), "--verbose 2\n");
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.verbose, 2);
+        assert_eq!(args.packages, vec!["pkg"]);
+
+        write_file(&cwd.join(".stowrc"), "-v2\n");
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.verbose, 2);
+        assert_eq!(args.packages, vec!["pkg"]);
+    }
+
+    #[test]
+    fn test_stowrc_long_option_abbreviations_match_gnu() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+
+        write_file(
+            &cwd.join(".stowrc"),
+            "--targ=/abbr-target\n--sim\n--verb 2\n",
+        );
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.target, Some(PathBuf::from("/abbr-target")));
+        assert!(args.simulate);
+        assert_eq!(args.verbose, 2);
+        assert_eq!(args.packages, vec!["pkg"]);
+
+        write_file(&cwd.join(".stowrc"), "--ver\n");
+        let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
+        assert!(error.to_string().contains("ambiguous option '--ver'"));
     }
 
     #[test]
@@ -3000,6 +3661,42 @@ mod tests {
             Some(PathBuf::from("$HOME/.stowrc_noparse"))
         );
         drop(home_guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stowrc_env_path_preserves_non_utf8_value() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        let stow_dir = non_utf8_child(temp_dir.path(), b"stow-\xff");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+        let _stow_dir_guard = OsEnvVarGuard::new("RUSTOW_NONUTF_STOW_DIR", stow_dir.as_os_str());
+
+        write_file(&cwd.join(".stowrc"), "--dir=$RUSTOW_NONUTF_STOW_DIR\n");
+
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(stow_dir));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stowrc_tilde_path_preserves_non_utf8_home() {
+        let _lock = process_env_lock();
+        let _guard = StowDirEnvGuard::new();
+        let temp_dir = tempdir().unwrap();
+        let cwd = temp_dir.path().join("cwd");
+        let home_dir = non_utf8_child(temp_dir.path(), b"home-\xff");
+        fs::create_dir_all(&cwd).unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&cwd);
+        let _home_guard = OsEnvVarGuard::new("HOME", home_dir.as_os_str());
+
+        write_file(&cwd.join(".stowrc"), "--dir=~/stow\n");
+
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.dir, Some(home_dir.join("stow")));
     }
 
     #[test]

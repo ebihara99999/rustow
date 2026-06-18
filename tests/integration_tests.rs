@@ -3632,6 +3632,35 @@ fn test_binary_verbose_numeric_level_is_accepted() {
 }
 
 #[test]
+fn test_binary_verbose_optional_value_does_not_become_package() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_dir = stow_dir.join("pkg");
+    let numeric_package_dir = stow_dir.join("2");
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::create_dir_all(numeric_package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+    fs::write(numeric_package_dir.join("bin/two"), "two").unwrap();
+
+    let output = run_rustow([
+        "--verbose",
+        "2",
+        "-d",
+        stow_dir.to_str().unwrap(),
+        "-t",
+        target_dir.to_str().unwrap(),
+        "pkg",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(!target_dir.join("bin/two").exists());
+}
+
+#[test]
 fn test_binary_compat_verbosity_cluster_preserves_verbosity() {
     let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
     let package_dir = stow_dir.join("pkg");
@@ -3785,6 +3814,88 @@ fn test_binary_stowrc_options_from_current_and_home_are_prepared() {
         target_home.join("bin").exists(),
         "cli flags should override resource files"
     );
+}
+
+#[test]
+fn test_binary_stowrc_verbose_optional_value_does_not_become_package() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = temp_dir.path().join("stow");
+    let target_dir = temp_dir.path().join("target");
+    let package_dir = stow_dir.join("pkg");
+    let numeric_package_dir = stow_dir.join("2");
+
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::create_dir_all(numeric_package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+    fs::write(numeric_package_dir.join("bin/two"), "two").unwrap();
+    fs::write(
+        cwd.join(".stowrc"),
+        format!(
+            "--dir={}\n--target={}\n--verbose 2\n",
+            stow_dir.to_string_lossy(),
+            target_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target_dir.join("bin/tool").exists());
+    assert!(!target_dir.join("bin/two").exists());
+}
+
+#[test]
+fn test_binary_stowrc_long_option_abbreviations_are_accepted() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = temp_dir.path().join("stow");
+    let target_dir = temp_dir.path().join("target");
+    let package_dir = stow_dir.join("pkg");
+
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::create_dir_all(package_dir.join("bin")).unwrap();
+    fs::write(package_dir.join("bin/tool"), "tool").unwrap();
+    fs::write(
+        cwd.join(".stowrc"),
+        format!(
+            "--dir={}\n--targ={}\n--sim\n",
+            stow_dir.to_string_lossy(),
+            target_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(["pkg"], &cwd, &envs);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "rustow failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!target_dir.join("bin/tool").exists());
 }
 
 #[test]
