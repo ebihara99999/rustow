@@ -225,6 +225,8 @@ impl Args {
     {
         let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
         if help_or_version_arg(&argv).is_some() {
+            // Clap returns DisplayHelp/DisplayVersion errors here; keeping this
+            // branch before .stowrc loading preserves GNU-style precedence.
             let args = parse_args_from_argv(&argv)?;
             return Ok(RuntimeParsedArgs {
                 parsed_args: ParsedArgs {
@@ -403,6 +405,42 @@ fn ambiguous_stowrc_long_option_error(option: &str, origin: &StowrcTokenOrigin) 
         clap::error::ErrorKind::UnknownArgument,
         format!(
             "Option {option} is ambiguous ({candidates}) in '{}:{}'\n\n{usage}",
+            origin.display_path, origin.line
+        ),
+    )
+}
+
+fn stowrc_long_option_value_error(option: &str, origin: &StowrcTokenOrigin) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    clap::Error::raw(
+        clap::error::ErrorKind::InvalidValue,
+        format!(
+            "Option {option} does not take a value in '{}:{}'\n\n{usage}",
+            origin.display_path, origin.line
+        ),
+    )
+}
+
+fn unknown_stowrc_short_option_error(option: char, origin: &StowrcTokenOrigin) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    clap::Error::raw(
+        clap::error::ErrorKind::UnknownArgument,
+        format!(
+            "Unknown option: {option} in '{}:{}'\n\n{usage}",
+            origin.display_path, origin.line
+        ),
+    )
+}
+
+fn stowrc_verbose_level_error(value: &str, origin: &StowrcTokenOrigin) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    clap::Error::raw(
+        clap::error::ErrorKind::InvalidValue,
+        format!(
+            "verbosity level must be a non-negative integer: {value} in '{}:{}'\n\n{usage}",
             origin.display_path, origin.line
         ),
     )
@@ -594,7 +632,7 @@ fn cli_path_option_overrides(argv: &[OsString]) -> CliPathOptionOverrides {
 
 #[derive(Debug, Clone)]
 struct StowrcToken {
-    value: String,
+    value: OsString,
     origin: StowrcTokenOrigin,
 }
 
@@ -687,6 +725,88 @@ fn open_stowrc_file(path: &Path, display_path: &str) -> Result<Option<fs::File>,
     }
 }
 
+#[cfg(unix)]
+fn stowrc_tokens_from_reader(
+    display_path: &str,
+    file: fs::File,
+    normalizer: &mut StowrcNormalizer,
+) -> Result<(), clap::Error> {
+    let checkpoint = normalizer.checkpoint();
+    let display_path = Arc::new(display_path.to_string());
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0;
+
+    loop {
+        line.clear();
+        let bytes_read = match reader.read_until(b'\n', &mut line) {
+            Ok(bytes_read) => bytes_read,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                normalizer.rewind(checkpoint);
+                return Ok(());
+            },
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                normalizer.rewind(checkpoint);
+                return Ok(());
+            },
+            Err(err) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::Io,
+                    format!("failed to read resource file '{}': {}", display_path, err),
+                ));
+            },
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        line_number += 1;
+
+        if line.ends_with(b"\n") {
+            line.pop();
+            if line.ends_with(b"\r") {
+                line.pop();
+            }
+        }
+
+        let origin = StowrcTokenOrigin {
+            display_path: display_path.clone(),
+            line: line_number,
+        };
+        let line_checkpoint = normalizer.checkpoint();
+        let mut push_error = None;
+        let tokenize_result = emit_stowrc_line_tokens_bytes(&line, |value| {
+            if push_error.is_some() {
+                return;
+            }
+            if let Err(error) = normalizer.push_token(StowrcToken {
+                value: OsString::from_vec(value),
+                origin: origin.clone(),
+            }) {
+                push_error = Some(error);
+            }
+        });
+        match tokenize_result {
+            Ok(true) => {
+                if let Some(error) = push_error {
+                    return Err(error);
+                }
+            },
+            Ok(false) => {
+                normalizer.rewind(line_checkpoint);
+            },
+            Err(err) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::InvalidValue,
+                    format!("{} in '{}:{}'", err, display_path, line_number),
+                ));
+            },
+        }
+    }
+
+    normalizer.finish_file()
+}
+
+#[cfg(not(unix))]
 fn stowrc_tokens_from_reader(
     display_path: &str,
     file: fs::File,
@@ -716,17 +836,34 @@ fn stowrc_tokens_from_reader(
             display_path: display_path.clone(),
             line: index + 1,
         };
-        let line_tokens = tokenize_stowrc_line(&line).map_err(|err| {
-            clap::Error::raw(
-                clap::error::ErrorKind::InvalidValue,
-                format!("{} in '{}:{}'", err, display_path, index + 1),
-            )
-        })?;
-        for value in line_tokens {
-            normalizer.push_token(StowrcToken {
-                value,
+        let line_checkpoint = normalizer.checkpoint();
+        let mut push_error = None;
+        let tokenize_result = emit_stowrc_line_tokens(&line, |value| {
+            if push_error.is_some() {
+                return;
+            }
+            if let Err(error) = normalizer.push_token(StowrcToken {
+                value: OsString::from(value),
                 origin: origin.clone(),
-            })?;
+            }) {
+                push_error = Some(error);
+            }
+        });
+        match tokenize_result {
+            Ok(true) => {
+                if let Some(error) = push_error {
+                    return Err(error);
+                }
+            },
+            Ok(false) => {
+                normalizer.rewind(line_checkpoint);
+            },
+            Err(err) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::InvalidValue,
+                    format!("{} in '{}:{}'", err, display_path, index + 1),
+                ));
+            },
         }
     }
 
@@ -1002,10 +1139,15 @@ impl StowrcNormalizer {
     }
 
     fn push_token(&mut self, token: StowrcToken) -> Result<(), clap::Error> {
-        let token_value = token.value;
+        let StowrcToken {
+            value: token_value,
+            origin,
+        } = token;
+        let token_text = token_value.to_string_lossy();
 
         if let Some(pending) = self.expecting_value.take() {
-            let normalized_value = format!("{}{}", pending.value_prefix, token_value);
+            let mut normalized_value = OsString::from(&pending.value_prefix);
+            normalized_value.push(&token_value);
             let value_start = pending.value_prefix.len();
             if pending.option_name.is_path_option() {
                 self.path_values.push(ResourcePathValue {
@@ -1014,14 +1156,17 @@ impl StowrcNormalizer {
                     value_start,
                 });
             }
-            self.normalized.push(OsString::from(normalized_value));
+            self.normalized.push(normalized_value);
             return Ok(());
         }
 
         if self.expecting_verbose_value {
             self.expecting_verbose_value = false;
-            if is_verbose_numeric_token(&token_value) {
-                self.set_resource_verbosity(parse_verbose_numeric_value(&token_value)?);
+            if is_verbose_numeric_token(&token_text) {
+                self.set_resource_verbosity(parse_stowrc_verbose_numeric_value(
+                    &token_text,
+                    &origin,
+                )?);
                 return Ok(());
             }
             self.increment_resource_verbosity();
@@ -1031,28 +1176,28 @@ impl StowrcNormalizer {
             return Ok(());
         }
 
-        if token_value == "--" {
+        if token_text == "--" {
             // Packages are ignored in resource files.
             self.after_double_dash = true;
             return Ok(());
         }
 
-        if !token_value.starts_with('-') {
+        if !token_text.starts_with('-') {
             // Treated as package names in resource files.
             return Ok(());
         }
 
-        if token_value.starts_with("--") {
-            if let Some(parsed) = parse_long_stowrc_option(&token_value, &token.origin)? {
-                self.apply_parsed_option(parsed, token.origin);
+        if token_text.starts_with("--") {
+            if let Some(parsed) = parse_long_stowrc_option(&token_value, &origin)? {
+                self.apply_parsed_option(parsed, origin);
             }
 
             return Ok(());
         }
 
-        if token_value.len() > 1 {
-            if let Some(parsed) = parse_short_stowrc_option(&token_value)? {
-                self.apply_parsed_option(parsed, token.origin);
+        if token_text.len() > 1 {
+            if let Some(parsed) = parse_short_stowrc_option(&token_value, &origin)? {
+                self.apply_parsed_option(parsed, origin);
             }
         }
 
@@ -1129,11 +1274,12 @@ impl StowrcNormalizer {
 }
 
 fn parse_long_stowrc_option(
-    token: &str,
+    token: &OsString,
     origin: &StowrcTokenOrigin,
 ) -> Result<Option<ParsedResourceOption>, clap::Error> {
-    let token = token.trim();
-    let long_token = token.trim_start_matches("--");
+    let token_text = token.to_string_lossy();
+    let token_text = token_text.trim();
+    let long_token = token_text.trim_start_matches("--");
     if long_token.is_empty() {
         return Ok(None);
     }
@@ -1143,7 +1289,7 @@ fn parse_long_stowrc_option(
             Ok(spec) => match spec.kind {
                 LongOptionKind::Value(option_name) if option_name.is_path_option() => {
                     return Ok(Some(ParsedResourceOption {
-                        tokens: vec![OsString::from(token)],
+                        tokens: vec![token.clone()],
                         expecting_value: None,
                         path_value: Some(ResourcePathValue {
                             index: 0,
@@ -1155,7 +1301,7 @@ fn parse_long_stowrc_option(
                 },
                 LongOptionKind::Value(_) => {
                     return Ok(Some(ParsedResourceOption {
-                        tokens: vec![OsString::from(token)],
+                        tokens: vec![token.clone()],
                         expecting_value: None,
                         path_value: None,
                         verbose: ResourceVerboseAction::default(),
@@ -1167,7 +1313,7 @@ fn parse_long_stowrc_option(
                         expecting_value: None,
                         path_value: None,
                         verbose: ResourceVerboseAction {
-                            value: Some(parse_verbose_numeric_value(_value)?),
+                            value: Some(parse_stowrc_verbose_numeric_value(_value, origin)?),
                             ..ResourceVerboseAction::default()
                         },
                     }));
@@ -1175,7 +1321,9 @@ fn parse_long_stowrc_option(
                 LongOptionKind::Bool
                 | LongOptionKind::Mode(_)
                 | LongOptionKind::Help
-                | LongOptionKind::Version => {},
+                | LongOptionKind::Version => {
+                    return Err(stowrc_long_option_value_error(key, origin));
+                },
             },
             Err(LongOptionResolveError::Ambiguous) => {
                 return Err(ambiguous_stowrc_long_option_error(key, origin));
@@ -1184,13 +1332,6 @@ fn parse_long_stowrc_option(
                 return Err(unknown_stowrc_long_option_error(key, origin));
             },
         }
-
-        return Ok(Some(ParsedResourceOption {
-            tokens: vec![OsString::from(token)],
-            expecting_value: None,
-            path_value: None,
-            verbose: ResourceVerboseAction::default(),
-        }));
     }
 
     match resolve_long_option(long_token) {
@@ -1216,7 +1357,7 @@ fn parse_long_stowrc_option(
             })),
             LongOptionKind::Bool | LongOptionKind::Help | LongOptionKind::Version => {
                 Ok(Some(ParsedResourceOption {
-                    tokens: vec![OsString::from(token)],
+                    tokens: vec![OsString::from(token_text)],
                     expecting_value: None,
                     path_value: None,
                     verbose: ResourceVerboseAction::default(),
@@ -1239,7 +1380,12 @@ fn map_long_value_option(token: &str) -> Option<ResourceValueOption> {
     }
 }
 
-fn parse_short_stowrc_option(token: &str) -> Result<Option<ParsedResourceOption>, clap::Error> {
+fn parse_short_stowrc_option(
+    token: &OsString,
+    origin: &StowrcTokenOrigin,
+) -> Result<Option<ParsedResourceOption>, clap::Error> {
+    let token_text = token.to_string_lossy();
+    let token = token_text.as_ref();
     let cluster = &token[1..];
     if cluster.is_empty() {
         return Ok(None);
@@ -1313,7 +1459,7 @@ fn parse_short_stowrc_option(token: &str) -> Result<Option<ParsedResourceOption>
                     }));
                 }
                 if starts_with_verbose_numeric_value(rest) {
-                    verbose.value = Some(parse_verbose_numeric_value(rest)?);
+                    verbose.value = Some(parse_stowrc_verbose_numeric_value(rest, origin)?);
                     return Ok(Some(ParsedResourceOption {
                         tokens: normalized_short_tokens(bool_flags),
                         expecting_value: None,
@@ -1326,21 +1472,8 @@ fn parse_short_stowrc_option(token: &str) -> Result<Option<ParsedResourceOption>
             'p' | 'h' | 'V' | 'n' => {
                 bool_flags.push(flag);
             },
-            other if other.is_ascii_alphabetic() => {
-                return Ok(Some(ParsedResourceOption {
-                    tokens: vec![OsString::from(token)],
-                    expecting_value: None,
-                    path_value: None,
-                    verbose: ResourceVerboseAction::default(),
-                }));
-            },
-            _ => {
-                return Ok(Some(ParsedResourceOption {
-                    tokens: vec![OsString::from(token)],
-                    expecting_value: None,
-                    path_value: None,
-                    verbose: ResourceVerboseAction::default(),
-                }));
+            other => {
+                return Err(unknown_stowrc_short_option_error(other, origin));
             },
         }
     }
@@ -1357,8 +1490,11 @@ fn parse_short_stowrc_option(token: &str) -> Result<Option<ParsedResourceOption>
     }
 }
 
-fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
-    let mut tokens = Vec::new();
+#[cfg(any(test, not(unix)))]
+fn emit_stowrc_line_tokens<F>(line: &str, mut emit: F) -> Result<bool, String>
+where
+    F: FnMut(String),
+{
     let mut token = String::new();
     let mut token_started = false;
     let mut in_single_quote = false;
@@ -1372,7 +1508,7 @@ fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
                 token_started = true;
                 continue;
             }
-            return Ok(Vec::new());
+            return Ok(false);
         }
 
         if ch == '\'' && !in_double_quote {
@@ -1389,8 +1525,7 @@ fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
 
         if ch.is_whitespace() && !in_single_quote && !in_double_quote {
             if token_started {
-                tokens.push(token.clone());
-                token.clear();
+                emit(std::mem::take(&mut token));
                 token_started = false;
             }
             continue;
@@ -1401,13 +1536,84 @@ fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
     }
 
     if in_single_quote || in_double_quote {
-        return Ok(Vec::new());
+        return Ok(false);
     }
 
     if token_started {
-        tokens.push(token);
+        emit(token);
     }
 
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn emit_stowrc_line_tokens_bytes<F>(line: &[u8], mut emit: F) -> Result<bool, String>
+where
+    F: FnMut(Vec<u8>),
+{
+    let mut token = Vec::new();
+    let mut token_started = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut index = 0;
+
+    while index < line.len() {
+        let byte = line[index];
+        if byte == b'\\' && !in_single_quote {
+            if let Some(next) = line.get(index + 1) {
+                token.push(*next);
+                token_started = true;
+                index += 2;
+                continue;
+            }
+            return Ok(false);
+        }
+
+        if byte == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            token_started = true;
+            index += 1;
+            continue;
+        }
+
+        if byte == b'"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            token_started = true;
+            index += 1;
+            continue;
+        }
+
+        if byte.is_ascii_whitespace() && !in_single_quote && !in_double_quote {
+            if token_started {
+                emit(std::mem::take(&mut token));
+                token_started = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        token.push(byte);
+        token_started = true;
+        index += 1;
+    }
+
+    if in_single_quote || in_double_quote {
+        return Ok(false);
+    }
+
+    if token_started {
+        emit(token);
+    }
+
+    Ok(true)
+}
+
+#[cfg(test)]
+fn tokenize_stowrc_line(line: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    if !emit_stowrc_line_tokens(line, |token| tokens.push(token))? {
+        tokens.clear();
+    }
     Ok(tokens)
 }
 
@@ -1446,6 +1652,22 @@ fn expand_path_value_with_display(
         value: tilde_expanded.value,
         display,
     })
+}
+
+fn expand_path_value_os_with_display(
+    raw_value: OsString,
+    option_name: ResourceValueOption,
+) -> Result<ExpandedPathValue, clap::Error> {
+    match raw_value.into_string() {
+        Ok(raw_value) => expand_path_value_with_display(&raw_value, option_name),
+        Err(raw_value) => {
+            let tilde_expanded = expand_tilde_value_with_display(raw_value);
+            Ok(ExpandedPathValue {
+                value: tilde_expanded.value,
+                display: tilde_expanded.display,
+            })
+        },
+    }
 }
 
 struct ExpandedEnvironmentValue {
@@ -1714,19 +1936,13 @@ fn expand_final_resource_path_values(
         };
 
         if should_expand {
-            let raw_value = normalized[path_value.index].to_string_lossy();
-            let (expanded_token, redacted_path_value, redacted_display) = if path_value.value_start
-                == 0
-            {
-                let expanded = expand_path_value_with_display(&raw_value, path_value.option_name)?;
-                (expanded.value.clone(), expanded.value, expanded.display)
-            } else {
-                let (prefix, raw_value) = raw_value.split_at(path_value.value_start);
-                let expanded = expand_path_value_with_display(raw_value, path_value.option_name)?;
-                let mut expanded_token = OsString::from(prefix);
-                expanded_token.push(&expanded.value);
-                (expanded_token, expanded.value, expanded.display)
-            };
+            let (prefix, raw_value) =
+                split_resource_path_token(&normalized[path_value.index], path_value.value_start);
+            let expanded = expand_path_value_os_with_display(raw_value, path_value.option_name)?;
+            let mut expanded_token = prefix;
+            expanded_token.push(&expanded.value);
+            let redacted_path_value = expanded.value;
+            let redacted_display = expanded.display;
             if let Some(display) = redacted_display {
                 path_displays.push(ResourcePathDisplay {
                     option_name: path_value.option_name,
@@ -1739,6 +1955,22 @@ fn expand_final_resource_path_values(
     }
 
     Ok(path_displays)
+}
+
+#[cfg(unix)]
+fn split_resource_path_token(token: &OsString, value_start: usize) -> (OsString, OsString) {
+    let bytes = token.as_os_str().as_bytes();
+    (
+        OsString::from_vec(bytes[..value_start].to_vec()),
+        OsString::from_vec(bytes[value_start..].to_vec()),
+    )
+}
+
+#[cfg(not(unix))]
+fn split_resource_path_token(token: &OsString, value_start: usize) -> (OsString, OsString) {
+    let token = token.to_string_lossy();
+    let (prefix, value) = token.split_at(value_start);
+    (OsString::from(prefix), OsString::from(value))
 }
 
 fn final_resource_path_value_index(
@@ -2114,6 +2346,17 @@ fn canonicalize_attached_long_arg(arg: &OsString, canonical: &str) -> OsString {
 fn parse_verbose_numeric_value(level: &str) -> Result<u8, clap::Error> {
     if !is_verbose_numeric_token(level) {
         return Err(verbose_level_error(level));
+    }
+
+    Ok(level.parse::<u8>().unwrap_or(u8::MAX))
+}
+
+fn parse_stowrc_verbose_numeric_value(
+    level: &str,
+    origin: &StowrcTokenOrigin,
+) -> Result<u8, clap::Error> {
+    if !is_verbose_numeric_token(level) {
+        return Err(stowrc_verbose_level_error(level, origin));
     }
 
     Ok(level.parse::<u8>().unwrap_or(u8::MAX))

@@ -519,15 +519,22 @@ fn redact_runtime_error(error: RustowError, path_displays: &[PathDisplayOverride
     redact_rustow_error(error, &redactions)
 }
 
+fn redact_owned_string(value: String, redactions: &RedactionTable) -> String {
+    match redactions.redact(&value) {
+        Cow::Borrowed(_) => value,
+        Cow::Owned(redacted) => redacted,
+    }
+}
+
 fn redact_rustow_error(error: RustowError, redactions: &RedactionTable) -> RustowError {
     match error {
         RustowError::Config(error) => RustowError::Config(redact_config_error(error, redactions)),
         RustowError::Stow(error) => RustowError::Stow(redact_stow_error(error, redactions)),
         RustowError::Fs(error) => RustowError::Fs(redact_fs_error(error, redactions)),
         RustowError::Ignore(error) => RustowError::Ignore(redact_ignore_error(error, redactions)),
-        RustowError::Cli(message) => RustowError::Cli(redactions.redact(&message).into_owned()),
+        RustowError::Cli(message) => RustowError::Cli(redact_owned_string(message, redactions)),
         RustowError::InvalidPattern(pattern) => {
-            RustowError::InvalidPattern(redactions.redact(&pattern).into_owned())
+            RustowError::InvalidPattern(redact_owned_string(pattern, redactions))
         },
         other => other,
     }
@@ -536,19 +543,19 @@ fn redact_rustow_error(error: RustowError, redactions: &RedactionTable) -> Rusto
 fn redact_config_error(error: ConfigError, redactions: &RedactionTable) -> ConfigError {
     match error {
         ConfigError::InvalidTargetDir(message) => {
-            ConfigError::InvalidTargetDir(redactions.redact(&message).into_owned())
+            ConfigError::InvalidTargetDir(redact_owned_string(message, redactions))
         },
         ConfigError::InvalidStowDir(message) => {
-            ConfigError::InvalidStowDir(redactions.redact(&message).into_owned())
+            ConfigError::InvalidStowDir(redact_owned_string(message, redactions))
         },
         ConfigError::InvalidPackageName(message) => {
-            ConfigError::InvalidPackageName(redactions.redact(&message).into_owned())
+            ConfigError::InvalidPackageName(redact_owned_string(message, redactions))
         },
         ConfigError::InvalidRegexPattern(message) => {
-            ConfigError::InvalidRegexPattern(redactions.redact(&message).into_owned())
+            ConfigError::InvalidRegexPattern(redact_owned_string(message, redactions))
         },
         ConfigError::InvalidOperation(message) => {
-            ConfigError::InvalidOperation(redactions.redact(&message).into_owned())
+            ConfigError::InvalidOperation(redact_owned_string(message, redactions))
         },
         ConfigError::InvalidVerbosityLevel(level) => ConfigError::InvalidVerbosityLevel(level),
     }
@@ -557,16 +564,16 @@ fn redact_config_error(error: ConfigError, redactions: &RedactionTable) -> Confi
 fn redact_stow_error(error: StowError, redactions: &RedactionTable) -> StowError {
     match error {
         StowError::Conflict(message) => {
-            StowError::Conflict(redactions.redact(&message).into_owned())
+            StowError::Conflict(redact_owned_string(message, redactions))
         },
         StowError::PackageNotFound(package) => {
-            StowError::PackageNotFound(redactions.redact(&package).into_owned())
+            StowError::PackageNotFound(redact_owned_string(package, redactions))
         },
         StowError::InvalidPackageStructure(message) => {
-            StowError::InvalidPackageStructure(redactions.redact(&message).into_owned())
+            StowError::InvalidPackageStructure(redact_owned_string(message, redactions))
         },
         StowError::OperationFailed(message) => {
-            StowError::OperationFailed(redactions.redact(&message).into_owned())
+            StowError::OperationFailed(redact_owned_string(message, redactions))
         },
     }
 }
@@ -574,10 +581,10 @@ fn redact_stow_error(error: StowError, redactions: &RedactionTable) -> StowError
 fn redact_ignore_error(error: IgnoreError, redactions: &RedactionTable) -> IgnoreError {
     match error {
         IgnoreError::LoadPatternsError(message) => {
-            IgnoreError::LoadPatternsError(redactions.redact(&message).into_owned())
+            IgnoreError::LoadPatternsError(redact_owned_string(message, redactions))
         },
         IgnoreError::InvalidPattern(pattern) => {
-            IgnoreError::InvalidPattern(redactions.redact(&pattern).into_owned())
+            IgnoreError::InvalidPattern(redact_owned_string(pattern, redactions))
         },
     }
 }
@@ -692,6 +699,19 @@ mod tests {
         let redacted = redactions.redact("No path redaction needed");
 
         assert!(matches!(redacted, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_redact_owned_string_returns_original_allocation_when_unchanged() {
+        let redactions = RedactionTable::new(&[PathDisplayOverride::new(
+            PathBuf::from("/tmp/secret"),
+            "$RUSTOW_SECRET".to_string(),
+        )]);
+        let message = "No matching path".to_string();
+        let original_ptr = message.as_ptr();
+        let redacted = redact_owned_string(message, &redactions);
+
+        assert_eq!(redacted.as_ptr(), original_ptr);
     }
 
     #[test]

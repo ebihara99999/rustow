@@ -1,6 +1,8 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -112,6 +114,14 @@ where
         .envs(envs.iter().copied())
         .output()
         .expect("Failed to run rustow binary")
+}
+
+#[cfg(unix)]
+fn non_utf8_child(parent: &Path, child: &[u8]) -> PathBuf {
+    let mut bytes = parent.as_os_str().as_bytes().to_vec();
+    bytes.push(b'/');
+    bytes.extend_from_slice(child);
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
 }
 
 #[test]
@@ -3981,6 +3991,67 @@ fn test_binary_stowrc_long_option_diagnostics_match_gnu_style() {
     assert_eq!(unknown.status.code(), Some(2));
     assert!(unknown_stderr.contains("Unknown option: bad-option"));
     assert!(unknown_stderr.contains("./.stowrc:1"));
+}
+
+#[test]
+fn test_binary_stowrc_short_and_attached_bool_diagnostics_include_origin() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    let envs = vec![(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+
+    fs::write(cwd.join(".stowrc"), "-x\n").unwrap();
+    let unknown_short = run_rustow_with(["pkg"], &cwd, &envs);
+    let unknown_short_stderr = String::from_utf8_lossy(&unknown_short.stderr);
+    assert_eq!(unknown_short.status.code(), Some(2));
+    assert!(unknown_short_stderr.contains("Unknown option: x"));
+    assert!(unknown_short_stderr.contains("./.stowrc:1"));
+
+    fs::write(cwd.join(".stowrc"), "--simulate=yes\n").unwrap();
+    let attached_bool = run_rustow_with(["pkg"], &cwd, &envs);
+    let attached_bool_stderr = String::from_utf8_lossy(&attached_bool.stderr);
+    assert_eq!(attached_bool.status.code(), Some(2));
+    assert!(attached_bool_stderr.contains("Option simulate does not take a value"));
+    assert!(attached_bool_stderr.contains("./.stowrc:1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_binary_stowrc_literal_non_utf8_path_is_preserved() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    let stow_dir = non_utf8_child(temp_dir.path(), b"stow-\xff");
+    let target_dir = temp_dir.path().join("target");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(stow_dir.join("pkg/bin")).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::write(stow_dir.join("pkg/bin/tool"), "tool").unwrap();
+
+    let mut stowrc = b"--dir=".to_vec();
+    stowrc.extend_from_slice(stow_dir.as_os_str().as_bytes());
+    stowrc.extend_from_slice(b"\n--target=");
+    stowrc.extend_from_slice(target_dir.as_os_str().as_bytes());
+    stowrc.extend_from_slice(b"\n");
+    fs::write(cwd.join(".stowrc"), stowrc).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustow"))
+        .arg("pkg")
+        .current_dir(&cwd)
+        .env("HOME", &home_dir)
+        .env_remove("STOW_DIR")
+        .output()
+        .expect("Failed to run rustow binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr);
+    assert!(target_dir.join("bin/tool").exists());
 }
 
 #[test]
