@@ -1,4 +1,3 @@
-#[allow(dead_code)] // Allow dead code for this function as it will be used by other modules later
 pub fn process_item_name(item_name: &str, is_dotfiles_enabled: bool) -> String {
     if !is_dotfiles_enabled {
         return item_name.to_string();
