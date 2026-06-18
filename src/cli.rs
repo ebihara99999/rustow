@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{env, fs, io::ErrorKind, path::Path};
 
-const MAX_VERBOSITY: u8 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationMode {
     Stow,
@@ -142,7 +141,7 @@ pub struct Args {
     #[clap(short = 'n', long, alias = "no")]
     pub simulate: bool,
 
-    /// Set verbosity level (repeat -v or use --verbose=LEVEL, 0-5)
+    /// Set verbosity level (repeat -v or use --verbose=LEVEL)
     #[clap(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -312,9 +311,9 @@ fn validate_cli_option_tokens(argv: &[OsString]) -> Result<(), clap::Error> {
             let spec = match resolve_long_option(key) {
                 Ok(spec) => spec,
                 Err(LongOptionResolveError::Ambiguous) => {
-                    return Err(ambiguous_option_error(&format!("--{key}")));
+                    return Err(ambiguous_long_option_error(key));
                 },
-                Err(LongOptionResolveError::Unknown) => return Err(unknown_option_error(&arg)),
+                Err(LongOptionResolveError::Unknown) => return Err(unknown_long_option_error(key)),
             };
             match spec.kind {
                 LongOptionKind::Value(_) => {
@@ -334,24 +333,21 @@ fn validate_cli_option_tokens(argv: &[OsString]) -> Result<(), clap::Error> {
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
-            let flags: Vec<char> = arg[1..].chars().collect();
-            let mut index = 0;
-            while index < flags.len() {
-                let flag = flags[index];
+            let cluster = &arg[1..];
+            for (index, flag) in cluster.char_indices() {
                 if !is_known_short_option(flag) {
                     return Err(unknown_option_error(&format!("-{flag}")));
                 }
                 if flag == 'v' {
-                    let rest = flags.iter().skip(index + 1).collect::<String>();
-                    if is_verbose_numeric_token(&rest) {
+                    let rest = &cluster[index + flag.len_utf8()..];
+                    if starts_with_verbose_numeric_value(rest) {
                         break;
                     }
                 }
                 if matches!(flag, 't' | 'd') {
-                    expecting_option_value = index + 1 == flags.len();
+                    expecting_option_value = index + flag.len_utf8() == cluster.len();
                     break;
                 }
-                index += 1;
             }
         }
     }
@@ -368,12 +364,22 @@ fn unknown_option_error(option: &str) -> clap::Error {
     )
 }
 
-fn ambiguous_option_error(option: &str) -> clap::Error {
+fn unknown_long_option_error(option: &str) -> clap::Error {
     let mut command = <Args as clap::CommandFactory>::command();
     let usage = command.render_usage();
     clap::Error::raw(
         clap::error::ErrorKind::UnknownArgument,
-        format!("ambiguous option '{option}'\n\n{usage}"),
+        format!("Unknown option: {option}\n\n{usage}"),
+    )
+}
+
+fn ambiguous_long_option_error(option: &str) -> clap::Error {
+    let mut command = <Args as clap::CommandFactory>::command();
+    let usage = command.render_usage();
+    let candidates = long_option_abbreviation_candidates(option).join(", ");
+    clap::Error::raw(
+        clap::error::ErrorKind::UnknownArgument,
+        format!("Option {option} is ambiguous ({candidates})\n\n{usage}"),
     )
 }
 
@@ -852,6 +858,19 @@ fn resolve_long_option(option: &str) -> Result<LongOptionSpec, LongOptionResolve
     matched.ok_or(LongOptionResolveError::Unknown)
 }
 
+fn long_option_abbreviation_candidates(option: &str) -> Vec<&'static str> {
+    let mut candidates = Vec::new();
+    for spec in LONG_OPTION_SPECS
+        .iter()
+        .filter(|spec| spec.name.starts_with(option))
+    {
+        if !candidates.contains(&spec.name) {
+            candidates.push(spec.name);
+        }
+    }
+    candidates
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResourcePathValue {
     index: usize,
@@ -1070,30 +1089,28 @@ fn map_long_value_option(token: &str) -> Option<ResourceValueOption> {
 }
 
 fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
-    let chars: Vec<char> = token.chars().skip(1).collect();
-    if chars.is_empty() {
+    let cluster = &token[1..];
+    if cluster.is_empty() {
         return None;
     }
 
-    let mut bool_flags: Vec<char> = Vec::new();
-    let mut i = 0;
+    let mut bool_flags = String::new();
 
-    while i < chars.len() {
-        match chars[i] {
+    for (index, flag) in cluster.char_indices() {
+        match flag {
             'S' | 'D' | 'R' => {
-                i += 1;
                 continue;
             },
             't' | 'd' => {
-                let option_name = match chars[i] {
+                let option_name = match flag {
                     't' => ResourceValueOption::Target,
                     'd' => ResourceValueOption::Dir,
                     _ => unreachable!(),
                 };
-                let token_remainder = chars.iter().skip(i + 1).collect::<String>();
+                let token_remainder = &cluster[index + flag.len_utf8()..];
                 if token_remainder.is_empty() {
                     if bool_flags.is_empty() {
-                        let value_prefix = format!("-{}", chars[i]);
+                        let value_prefix = format!("-{flag}");
                         return Some(ParsedResourceOption {
                             tokens: Vec::new(),
                             expecting_value: Some(ResourceValueExpectation {
@@ -1104,8 +1121,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                             expecting_verbose_value: false,
                         });
                     }
-                    let value_prefix =
-                        format!("-{}{}", bool_flags.iter().collect::<String>(), chars[i]);
+                    let value_prefix = format!("-{}{}", bool_flags, flag);
                     return Some(ParsedResourceOption {
                         tokens: Vec::new(),
                         expecting_value: Some(ResourceValueExpectation {
@@ -1118,12 +1134,12 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                 }
 
                 let prefix = if bool_flags.is_empty() {
-                    format!("-{}", chars[i])
+                    format!("-{flag}")
                 } else {
-                    format!("-{}{}", bool_flags.iter().collect::<String>(), chars[i])
+                    format!("-{}{}", bool_flags, flag)
                 };
                 return Some(ParsedResourceOption {
-                    tokens: vec![OsString::from(format!("{}{}", prefix, token_remainder))],
+                    tokens: vec![OsString::from(format!("{prefix}{token_remainder}"))],
                     expecting_value: None,
                     path_value: Some(ResourcePathValue {
                         index: 0,
@@ -1134,8 +1150,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
                 });
             },
             'p' | 'v' | 'h' | 'V' | 'n' => {
-                bool_flags.push(chars[i]);
-                i += 1;
+                bool_flags.push(flag);
             },
             other if other.is_ascii_alphabetic() => {
                 return Some(ParsedResourceOption {
@@ -1160,7 +1175,7 @@ fn parse_short_stowrc_option(token: &str) -> Option<ParsedResourceOption> {
         None
     } else {
         Some(ParsedResourceOption {
-            tokens: vec![format!("-{}", bool_flags.iter().collect::<String>()).into()],
+            tokens: vec![format!("-{bool_flags}").into()],
             expecting_value: None,
             path_value: None,
             expecting_verbose_value: short_verbose_cluster_accepts_next_value(token),
@@ -1750,9 +1765,11 @@ fn normalize_verbose_args(argv: &[OsString]) -> Result<Vec<OsString>, clap::Erro
                     }
                 },
                 Err(LongOptionResolveError::Ambiguous) => {
-                    return Err(ambiguous_option_error(&format!("--{key}")));
+                    return Err(ambiguous_long_option_error(key));
                 },
-                Err(LongOptionResolveError::Unknown) => normalized_args.push(arg.clone()),
+                Err(LongOptionResolveError::Unknown) => {
+                    return Err(unknown_long_option_error(key));
+                },
             }
             continue;
         }
@@ -1779,16 +1796,14 @@ struct NormalizedShortArg {
 }
 
 fn normalize_short_verbose_arg(arg: &str) -> Result<NormalizedShortArg, clap::Error> {
-    let chars: Vec<char> = arg.chars().skip(1).collect();
+    let cluster = &arg[1..];
     let mut kept_flags = String::new();
-    let mut index = 0;
 
-    while index < chars.len() {
-        let flag = chars[index];
+    for (index, flag) in cluster.char_indices() {
         if matches!(flag, 't' | 'd') {
             kept_flags.push(flag);
-            let rest = chars.iter().skip(index + 1).collect::<String>();
-            kept_flags.push_str(&rest);
+            let rest = &cluster[index + flag.len_utf8()..];
+            kept_flags.push_str(rest);
             return Ok(NormalizedShortArg {
                 tokens: normalized_short_tokens(kept_flags),
                 expects_option_value: rest.is_empty(),
@@ -1797,7 +1812,7 @@ fn normalize_short_verbose_arg(arg: &str) -> Result<NormalizedShortArg, clap::Er
         }
 
         if flag == 'v' {
-            let rest = chars.iter().skip(index + 1).collect::<String>();
+            let rest = &cluster[index + flag.len_utf8()..];
             if rest.is_empty() {
                 return Ok(NormalizedShortArg {
                     tokens: normalized_short_tokens(kept_flags),
@@ -1805,20 +1820,18 @@ fn normalize_short_verbose_arg(arg: &str) -> Result<NormalizedShortArg, clap::Er
                     expects_verbose_value: true,
                 });
             }
-            if is_verbose_numeric_token(&rest) {
-                parse_verbose_numeric_value(&rest)?;
+            if starts_with_verbose_numeric_value(rest) {
+                parse_verbose_numeric_value(rest)?;
                 return Ok(NormalizedShortArg {
                     tokens: normalized_short_tokens(kept_flags),
                     expects_option_value: false,
                     expects_verbose_value: false,
                 });
             }
-            index += 1;
             continue;
         }
 
         kept_flags.push(flag);
-        index += 1;
     }
 
     Ok(NormalizedShortArg {
@@ -1859,19 +1872,20 @@ fn canonicalize_attached_long_arg(arg: &OsString, canonical: &str) -> OsString {
     OsString::from(format!("--{canonical}={value}"))
 }
 
-fn parse_numeric_verbose_level(level: &str) -> Option<u8> {
-    level
-        .parse::<u8>()
-        .ok()
-        .filter(|level| *level <= MAX_VERBOSITY)
-}
-
 fn parse_verbose_numeric_value(level: &str) -> Result<u8, clap::Error> {
-    parse_numeric_verbose_level(level).ok_or_else(|| verbose_level_error(level))
+    if !is_verbose_numeric_token(level) {
+        return Err(verbose_level_error(level));
+    }
+
+    Ok(level.parse::<u8>().unwrap_or(u8::MAX))
 }
 
 fn is_verbose_numeric_token(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn starts_with_verbose_numeric_value(value: &str) -> bool {
+    value.as_bytes().first().is_some_and(u8::is_ascii_digit)
 }
 
 fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
@@ -1927,7 +1941,7 @@ fn parse_verbose_level(argv: &[OsString]) -> Result<u8, clap::Error> {
                     | LongOptionKind::Version => {},
                 },
                 Err(LongOptionResolveError::Ambiguous) => {
-                    return Err(ambiguous_option_error(&format!("--{key}")));
+                    return Err(ambiguous_long_option_error(key));
                 },
                 Err(LongOptionResolveError::Unknown) => {},
             }
@@ -2011,10 +2025,8 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
-            let flags: Vec<char> = arg[1..].chars().collect();
-            let mut index = 0;
-            while index < flags.len() {
-                let flag = flags[index];
+            let cluster = &arg[1..];
+            for (index, flag) in cluster.char_indices() {
                 if !is_known_short_option(flag) {
                     return None;
                 }
@@ -2026,18 +2038,16 @@ fn help_or_version_arg(argv: &[OsString]) -> Option<OsString> {
                 }
 
                 if flag == 'v' {
-                    let rest = flags.iter().skip(index + 1).collect::<String>();
-                    if is_verbose_numeric_token(&rest) {
+                    let rest = &cluster[index + flag.len_utf8()..];
+                    if starts_with_verbose_numeric_value(rest) {
                         break;
                     }
                 }
 
                 if matches!(flag, 't' | 'd') {
-                    expecting_option_value = index + 1 == flags.len();
+                    expecting_option_value = index + flag.len_utf8() == cluster.len();
                     break;
                 }
-
-                index += 1;
             }
             continue;
         }
@@ -2060,55 +2070,47 @@ fn is_known_short_option(flag: char) -> bool {
 }
 
 fn parse_short_verbose_cluster(arg: &str, verbosity: &mut u8) -> Result<bool, clap::Error> {
-    let chars: Vec<char> = arg.chars().skip(1).collect();
-    let mut index = 0;
+    let cluster = &arg[1..];
 
-    while index < chars.len() {
-        let flag = chars[index];
+    for (index, flag) in cluster.char_indices() {
         if short_cluster_stops_value_parsing(flag) {
             break;
         }
 
         if flag == 'v' {
-            let rest = chars.iter().skip(index + 1).collect::<String>();
+            let rest = &cluster[index + flag.len_utf8()..];
             if rest.is_empty() {
                 increment_verbose_level(verbosity)?;
                 return Ok(true);
             }
-            if is_verbose_numeric_token(&rest) {
-                *verbosity = parse_verbose_numeric_value(&rest)?;
+            if starts_with_verbose_numeric_value(rest) {
+                *verbosity = parse_verbose_numeric_value(rest)?;
                 return Ok(false);
             }
             increment_verbose_level(verbosity)?;
         }
-
-        index += 1;
     }
 
     Ok(false)
 }
 
 fn short_verbose_cluster_accepts_next_value(arg: &str) -> bool {
-    let chars: Vec<char> = arg.chars().skip(1).collect();
-    let mut index = 0;
+    let cluster = &arg[1..];
 
-    while index < chars.len() {
-        let flag = chars[index];
+    for (index, flag) in cluster.char_indices() {
         if short_cluster_stops_value_parsing(flag) {
             return false;
         }
 
         if flag == 'v' {
-            let rest = chars.iter().skip(index + 1).collect::<String>();
+            let rest = &cluster[index + flag.len_utf8()..];
             if rest.is_empty() {
                 return true;
             }
-            if is_verbose_numeric_token(&rest) {
+            if starts_with_verbose_numeric_value(rest) {
                 return false;
             }
         }
-
-        index += 1;
     }
 
     false
@@ -2119,18 +2121,14 @@ fn short_cluster_stops_value_parsing(flag: char) -> bool {
 }
 
 fn increment_verbose_level(verbosity: &mut u8) -> Result<(), clap::Error> {
-    if *verbosity >= MAX_VERBOSITY {
-        return Err(verbose_level_error("--verbose"));
-    }
-
-    *verbosity += 1;
+    *verbosity = verbosity.saturating_add(1);
     Ok(())
 }
 
 fn verbose_level_error(value: &str) -> clap::Error {
     clap::Error::raw(
         clap::error::ErrorKind::InvalidValue,
-        format!("verbosity level must be between 0 and {MAX_VERBOSITY}: {value}"),
+        format!("verbosity level must be a non-negative integer: {value}"),
     )
 }
 
@@ -2437,17 +2435,38 @@ mod tests {
     fn test_compat_option_tables_cover_clap_options() {
         let command = <Args as clap::CommandFactory>::command();
         let mut long_options = BTreeSet::new();
+        let mut long_value_options = BTreeSet::new();
         let mut short_options = BTreeSet::new();
+        let mut short_value_options = BTreeSet::new();
 
         for arg in command.get_arguments() {
+            let takes_value = matches!(
+                arg.get_action(),
+                clap::ArgAction::Set | clap::ArgAction::Append
+            );
             if let Some(options) = arg.get_long_and_visible_aliases() {
-                long_options.extend(options.into_iter().map(str::to_string));
+                for option in options {
+                    long_options.insert(option.to_string());
+                    if takes_value {
+                        long_value_options.insert(option.to_string());
+                    }
+                }
             }
             if let Some(options) = arg.get_aliases() {
-                long_options.extend(options.into_iter().map(str::to_string));
+                for option in options {
+                    long_options.insert(option.to_string());
+                    if takes_value {
+                        long_value_options.insert(option.to_string());
+                    }
+                }
             }
             if let Some(options) = arg.get_short_and_visible_aliases() {
-                short_options.extend(options);
+                for option in options {
+                    short_options.insert(option);
+                    if takes_value {
+                        short_value_options.insert(option);
+                    }
+                }
             }
         }
         long_options.extend(["help".to_string(), "version".to_string()]);
@@ -2459,11 +2478,26 @@ mod tests {
                 "compat parser must know --{}",
                 option
             );
+            assert_eq!(
+                matches!(
+                    resolve_long_option(&option).map(|spec| spec.kind),
+                    Ok(LongOptionKind::Value(_))
+                ),
+                long_value_options.contains(&option),
+                "compat parser value shape must match --{}",
+                option
+            );
         }
         for option in short_options {
             assert!(
                 is_known_short_option(option),
                 "compat parser must know -{}",
+                option
+            );
+            assert_eq!(
+                matches!(option, 't' | 'd'),
+                short_value_options.contains(&option),
+                "compat parser value shape must match -{}",
                 option
             );
         }
@@ -2564,8 +2598,9 @@ mod tests {
         assert_eq!(args_long_level.verbose, 2);
         let args_long_zero = Args::parse_from(["rustow", "--verbose=0", "mypackage"]);
         assert_eq!(args_long_zero.verbose, 0);
+        let args_long_six = Args::parse_from(["rustow", "--verbose=6", "mypackage"]);
+        assert_eq!(args_long_six.verbose, 6);
         assert!(Args::try_parse_from(["rustow", "--verbose=invalid", "mypackage"]).is_err());
-        assert!(Args::try_parse_from(["rustow", "--verbose=6", "mypackage"]).is_err());
     }
 
     #[test]
@@ -2591,6 +2626,18 @@ mod tests {
         assert!(args.compat);
         assert_eq!(args.verbose, 2);
         assert_eq!(args.packages, vec!["mypackage"]);
+
+        let args = Args::parse_from(["rustow", "--verbose", "6", "mypackage"]);
+        assert_eq!(args.verbose, 6);
+        assert_eq!(args.packages, vec!["mypackage"]);
+
+        let args = Args::parse_from(["rustow", "-v6", "mypackage"]);
+        assert_eq!(args.verbose, 6);
+        assert_eq!(args.packages, vec!["mypackage"]);
+
+        let args = Args::parse_from(["rustow", "--verbose", "999", "mypackage"]);
+        assert_eq!(args.verbose, u8::MAX);
+        assert_eq!(args.packages, vec!["mypackage"]);
     }
 
     #[test]
@@ -2613,14 +2660,14 @@ mod tests {
     }
 
     #[test]
-    fn test_verbose_numeric_out_of_range_reports_range() {
+    fn test_verbose_non_numeric_value_reports_error() {
         let _lock = process_env_lock();
-        let error = Args::try_parse_from(["rustow", "--verbose=6", "mypackage"]).unwrap_err();
+        let error = Args::try_parse_from(["rustow", "--verbose=invalid", "mypackage"]).unwrap_err();
 
-        assert!(error.to_string().contains("between 0 and 5"));
+        assert!(error.to_string().contains("non-negative integer"));
 
-        let error = Args::try_parse_from(["rustow", "-v6", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("between 0 and 5"));
+        let error = Args::try_parse_from(["rustow", "-v2x", "mypackage"]).unwrap_err();
+        assert!(error.to_string().contains("non-negative integer"));
     }
 
     #[test]
@@ -2641,7 +2688,11 @@ mod tests {
         assert_eq!(args.packages, vec!["mypackage"]);
 
         let error = Args::try_parse_from(["rustow", "--ver", "mypackage"]).unwrap_err();
-        assert!(error.to_string().contains("ambiguous option '--ver'"));
+        assert!(
+            error
+                .to_string()
+                .contains("Option ver is ambiguous (verbose, version)")
+        );
     }
 
     #[test]
@@ -2764,7 +2815,7 @@ mod tests {
     }
 
     #[test]
-    fn test_help_takes_precedence_over_invalid_verbose() {
+    fn test_help_takes_precedence_over_verbose_value() {
         let _lock = process_env_lock();
         let error = Args::try_parse_from(["rustow", "--help", "--verbose=6"]).unwrap_err();
 
@@ -2794,13 +2845,25 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_option_prevents_help_or_version_precedence() {
+        let _lock = process_env_lock();
+        let error = Args::try_parse_from(["rustow", "--help", "--bad-option"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("Unknown option: bad-option"));
+
+        let error = Args::try_parse_from(["rustow", "--version", "--bad-option"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("Unknown option: bad-option"));
+    }
+
+    #[test]
     fn test_try_parse_from_with_operation_groups_returns_parse_errors() {
         let _lock = process_env_lock();
         let error =
-            Args::try_parse_from_with_operation_groups(["rustow", "--verbose=6", "mypackage"])
+            Args::try_parse_from_with_operation_groups(["rustow", "--verbose=bad", "mypackage"])
                 .unwrap_err();
 
-        assert!(error.to_string().contains("between 0 and 5"));
+        assert!(error.to_string().contains("non-negative integer"));
     }
 
     #[test]
@@ -3274,6 +3337,16 @@ mod tests {
         assert_eq!(args.verbose, 2);
         assert_eq!(args.packages, vec!["pkg"]);
 
+        write_file(&cwd.join(".stowrc"), "--verbose 6\n");
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.verbose, 6);
+        assert_eq!(args.packages, vec!["pkg"]);
+
+        write_file(&cwd.join(".stowrc"), "--verbose 999\n");
+        let args = parse_runtime_args(["rustow", "pkg"]);
+        assert_eq!(args.verbose, u8::MAX);
+        assert_eq!(args.packages, vec!["pkg"]);
+
         write_file(&cwd.join(".stowrc"), "-v2\n");
         let args = parse_runtime_args(["rustow", "pkg"]);
         assert_eq!(args.verbose, 2);
@@ -3301,7 +3374,15 @@ mod tests {
 
         write_file(&cwd.join(".stowrc"), "--ver\n");
         let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
-        assert!(error.to_string().contains("ambiguous option '--ver'"));
+        assert!(
+            error
+                .to_string()
+                .contains("Option ver is ambiguous (verbose, version)")
+        );
+
+        write_file(&cwd.join(".stowrc"), "--bad-option\n");
+        let error = try_parse_runtime_args(["rustow", "pkg"]).unwrap_err();
+        assert!(error.to_string().contains("Unknown option: bad-option"));
     }
 
     #[test]
@@ -3550,7 +3631,7 @@ mod tests {
             Args::try_parse_runtime_from_with_operation_groups(["rustow", "--bad-option", "pkg"])
                 .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-        assert!(error.to_string().contains("--bad-option"));
+        assert!(error.to_string().contains("Unknown option: bad-option"));
         assert!(!error.to_string().contains("resource file option"));
     }
 
@@ -3572,7 +3653,7 @@ mod tests {
             Args::try_parse_runtime_from_with_operation_groups(["rustow", "--bad-option", "pkg"])
                 .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-        assert!(error.to_string().contains("--bad-option"));
+        assert!(error.to_string().contains("Unknown option: bad-option"));
         assert!(
             !error
                 .to_string()

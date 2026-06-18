@@ -349,19 +349,25 @@ struct RedactionTable {
 
 impl RedactionTable {
     fn new(path_displays: &[PathDisplayOverride]) -> Self {
-        let mut replacements: Vec<(String, String)> = path_displays
-            .iter()
-            .filter_map(|override_path| {
+        let mut replacements: Vec<(String, String)> = Vec::new();
+        for override_path in path_displays {
+            if let Some((path, display)) = {
                 let path = override_path.path.display().to_string();
                 if path.is_empty()
                     || path == override_path.display
                     || is_bare_relative_redaction_path(&override_path.path)
                 {
-                    return None;
+                    None
+                } else {
+                    Some((path, override_path.display.clone()))
                 }
-                Some((path, override_path.display.clone()))
-            })
-            .collect();
+            } {
+                add_redaction_replacement(&mut replacements, path.clone(), display.clone());
+                let debug_path = debug_path_fragment(&override_path.path);
+                let debug_display = debug_string_fragment(&display);
+                add_redaction_replacement(&mut replacements, debug_path, debug_display);
+            }
+        }
         replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
 
         Self { replacements }
@@ -388,6 +394,35 @@ impl RedactionTable {
             PathBuf::from(redacted)
         }
     }
+}
+
+fn add_redaction_replacement(
+    replacements: &mut Vec<(String, String)>,
+    path: String,
+    display: String,
+) {
+    if !path.is_empty()
+        && path != display
+        && !replacements.iter().any(|(needle, _)| needle == &path)
+    {
+        replacements.push((path, display));
+    }
+}
+
+fn debug_path_fragment(path: &Path) -> String {
+    unquote_debug_fragment(&format!("{:?}", path))
+}
+
+fn debug_string_fragment(value: &str) -> String {
+    unquote_debug_fragment(&format!("{:?}", value))
+}
+
+fn unquote_debug_fragment(value: &str) -> String {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+        .to_string()
 }
 
 fn is_bare_relative_redaction_path(path: &Path) -> bool {
@@ -609,5 +644,19 @@ mod tests {
             redactions.redact("Path secret/stow/pkg is hidden"),
             "Path $RUSTOW_STOW_DIR/pkg is hidden"
         );
+    }
+
+    #[test]
+    fn test_redaction_table_replaces_debug_escaped_paths() {
+        let secret_path = PathBuf::from("/tmp/secret\\root/stow");
+        let redactions = RedactionTable::new(&[PathDisplayOverride::new(
+            secret_path.clone(),
+            "$RUSTOW_SECRET_ROOT/stow".to_string(),
+        )]);
+        let message = format!("SIMULATE: target {:?}", secret_path.join("pkg/bin/tool"));
+        let redacted = redactions.redact(&message);
+
+        assert!(!redacted.contains("secret\\\\root"));
+        assert!(redacted.contains("$RUSTOW_SECRET_ROOT/stow/pkg/bin/tool"));
     }
 }
