@@ -95,7 +95,7 @@ jobs:
     name: Publish to GitHub Releases
     runs-on: ubuntu-latest
     needs: build-release
-    if: ${{ env.RELEASE_TAG != '' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.tag != '' }}
     steps:
       - name: Validate release tag
         run: |
@@ -110,7 +110,6 @@ jobs:
           pattern: rustow-release-*
           path: dist
           merge-multiple: true
-          if-no-files-found: error
 
       - name: Create checksums
         run: |
