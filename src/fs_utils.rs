@@ -253,7 +253,7 @@ pub fn is_stow_symlink(
         return Ok(None);
     }
 
-    // 2. Canonicalize stow_dir for reliable comparison
+    // 2. Canonicalize stow_dir for reliable comparison and to surface missing/invalid paths
     let canonical_stow_dir: PathBuf = match canonicalize_path(stow_dir) {
         // 型を明示
         Ok(p) => p,
@@ -283,7 +283,7 @@ pub fn is_stow_symlink(
         Err(e) => return Err(e),
     };
 
-    // 4. Resolve the link's destination to an absolute, canonical path
+    // 4. Resolve the link's destination to an absolute path (without following symlinks)
     let link_parent_dir: &Path = link_path.parent().unwrap_or_else(|| Path::new("")); // 型を明示
 
     let potentially_non_canonical_target_abs_path = if target_dest_path_from_link.is_absolute() {
@@ -292,42 +292,26 @@ pub fn is_stow_symlink(
         link_parent_dir.join(target_dest_path_from_link)
     };
 
-    let canonical_target_path = match canonicalize_path(&potentially_non_canonical_target_abs_path)
-    {
-        Ok(p) => p,
-        Err(RustowError::Fs(FsError::NotFound(_))) => {
-            // Target not found directly, implies broken symlink if potentially_non_canonical_target_abs_path was derived from a link
-            return Ok(None);
-        },
-        Err(RustowError::Fs(FsError::Canonicalize {
-            path: errored_path,
-            source,
-        })) => {
-            if source.kind() == std::io::ErrorKind::NotFound {
-                // Canonicalization failed because target does not exist (broken symlink)
-                return Ok(None);
-            }
-            // Other canonicalization error, propagate it
-            return Err(RustowError::Fs(FsError::Canonicalize {
-                path: errored_path,
-                source,
-            }));
-        },
-        Err(e) => return Err(e), // Other errors (e.g., Io, Config, etc.)
-    };
+    let resolved_target_path =
+        normalize_path_components(&potentially_non_canonical_target_abs_path);
+    if !resolved_target_path.exists() {
+        return Ok(None);
+    }
+
+    let normalized_stow_dir = normalize_path_components(&canonical_stow_dir);
 
     // 5. Check if the canonical target path is within the canonical_stow_dir
-    if !canonical_target_path.starts_with(&canonical_stow_dir) {
+    if !resolved_target_path.starts_with(&normalized_stow_dir) {
         return Ok(None);
     }
 
     // 6. Extract the path relative to the stow_dir (e.g., "package_name/item/path")
-    let path_relative_to_stow_dir = match canonical_target_path.strip_prefix(&canonical_stow_dir) {
+    let path_relative_to_stow_dir = match resolved_target_path.strip_prefix(&normalized_stow_dir) {
         Ok(p) => p.to_path_buf(),
         Err(_) => {
             return Err(crate::error::StowError::InvalidPackageStructure(format!(
                 "Internal error: Failed to strip prefix for {:?} from {:?} after starts_with check",
-                canonical_target_path, canonical_stow_dir
+                resolved_target_path, canonical_stow_dir
             ))
             .into());
         },
@@ -351,6 +335,26 @@ pub fn is_stow_symlink(
             Ok(None)
         },
     }
+}
+
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized_components = Vec::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized_components.pop();
+            },
+            std::path::Component::CurDir => {
+                // Skip current directory components
+            },
+            other => {
+                normalized_components.push(other);
+            },
+        }
+    }
+
+    normalized_components.iter().collect()
 }
 
 #[cfg(test)]
@@ -1415,6 +1419,28 @@ mod tests {
 
         let expected_package_name = "mypkg".to_string();
         let expected_item_path = PathBuf::from("sub").join(nested_item_name);
+        assert_eq!(
+            is_stow_symlink(&link_path, &stow_dir).unwrap(),
+            Some((expected_package_name, expected_item_path))
+        );
+    }
+
+    #[test]
+    fn test_is_stow_symlink_target_is_symlink_in_package() {
+        let temp = tempdir().unwrap();
+        let (stow_dir, package_dir, _) = setup_stow_env_for_is_stow_symlink(temp.path());
+
+        let external_file = temp.path().join("external_file_for_symlink_test.txt");
+        fs::write(&external_file, "external content").unwrap();
+
+        let package_symlink_item = package_dir.join("link_to_external.txt");
+        create_symlink(&package_symlink_item, &external_file).unwrap();
+
+        let link_path = temp.path().join("link_to_package_symlink");
+        create_symlink(&link_path, &package_symlink_item).unwrap();
+
+        let expected_package_name = "mypkg".to_string();
+        let expected_item_path = PathBuf::from("link_to_external.txt");
         assert_eq!(
             is_stow_symlink(&link_path, &stow_dir).unwrap(),
             Some((expected_package_name, expected_item_path))

@@ -500,28 +500,18 @@ fn handle_directory_conflict(
     target_path_abs: &Path,
     config: &Config,
 ) -> Result<(ActionType, Option<String>, Option<PathBuf>), RustowError> {
-    if check_directory_for_non_stow_files(target_path_abs, config)? {
+    if config.adopt && check_directory_for_non_stow_files(target_path_abs, config)? {
         // Check for --adopt option when directory contains non-stow files
-        if config.adopt {
-            return Ok((
-                ActionType::AdoptDirectory,
-                Some(format!(
-                    "Adopting existing directory: {:?}",
-                    target_path_abs
-                )),
-                None,
-            ));
-        }
-
         return Ok((
-            ActionType::Conflict,
+            ActionType::AdoptDirectory,
             Some(format!(
-                "Directory {:?} contains non-stow managed files",
+                "Adopting existing directory: {:?}",
                 target_path_abs
             )),
             None,
         ));
     }
+
     Ok((ActionType::CreateDirectory, None, None))
 }
 
@@ -3980,14 +3970,31 @@ mod tests {
         let config = create_test_config(&target_dir, &stow_dir);
 
         let result = handle_directory_conflict(&test_dir, &config).unwrap();
-        assert_eq!(result.0, ActionType::Conflict);
+        assert_eq!(result.0, ActionType::CreateDirectory);
+        assert!(result.1.is_none());
+        assert!(result.2.is_none());
+    }
+
+    #[test]
+    fn test_handle_directory_conflict_with_non_stow_files_and_adopt() {
+        let temp_dir = TempDir::new().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let stow_dir = temp_dir.path().join("stow");
+        let test_dir = target_dir.join("test_dir");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&stow_dir).unwrap();
+
+        // Create a regular file in the directory
+        fs::write(test_dir.join("regular_file.txt"), "content").unwrap();
+
+        let mut config = create_test_config(&target_dir, &stow_dir);
+        config.adopt = true;
+
+        let result = handle_directory_conflict(&test_dir, &config).unwrap();
+        assert_eq!(result.0, ActionType::AdoptDirectory);
         assert!(result.1.is_some());
-        assert!(
-            result
-                .1
-                .unwrap()
-                .contains("contains non-stow managed files")
-        );
+        assert!(result.1.unwrap().contains("Adopting existing directory"));
         assert!(result.2.is_none());
     }
 

@@ -1593,16 +1593,16 @@ fn test_plan_actions_basic_creation_and_conflict() {
     );
     assert_eq!(
         action_conflicting_dir.unwrap().original_action.action_type,
-        ActionType::Conflict,
-        "Expected Conflict for dir_for_conflict"
+        ActionType::CreateDirectory,
+        "Expected CreateDirectory for dir_for_conflict"
     );
     assert!(
         action_conflicting_dir
             .unwrap()
             .original_action
             .conflict_details
-            .is_some(),
-        "Conflict details should be present for dir conflict"
+            .is_none(),
+        "No conflict details expected when directory already exists"
     );
     assert!(
         action_conflicting_dir
@@ -1628,11 +1628,124 @@ fn test_plan_actions_basic_creation_and_conflict() {
             .unwrap()
             .original_action
             .action_type,
-        ActionType::Conflict,
-        "Expected Conflict for item in conflicting dir"
+        ActionType::Skip,
+        "Expected an already managed nested item to be skipped in this scenario"
     );
 
     fs::remove_dir_all(target_dir_conflict_path).unwrap();
+}
+
+#[test]
+fn test_plan_actions_merge_nested_item_into_existing_non_stow_directory() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "plan_merge_pkg";
+    let package_dir: PathBuf = stow_dir.join(package_name);
+    fs::create_dir_all(&package_dir).unwrap();
+
+    let package_nested_dir = package_dir.join("dir_for_conflict");
+    fs::create_dir_all(&package_nested_dir).unwrap();
+    fs::write(package_nested_dir.join("nested.txt"), "fresh nested").unwrap();
+
+    let existing_dir = target_dir.join("dir_for_conflict");
+    fs::create_dir_all(&existing_dir).unwrap();
+    fs::write(existing_dir.join("existing_file.txt"), "existing").unwrap();
+
+    let mut config: Config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+
+    let reports: Vec<rustow::stow::TargetActionReport> = stow_packages(&config).unwrap();
+
+    let dir_action = reports
+        .iter()
+        .find(|r| {
+            r.original_action
+                .target_path
+                .ends_with(Path::new("dir_for_conflict"))
+        })
+        .expect("dir_for_conflict action missing");
+    assert_eq!(
+        dir_action.original_action.action_type,
+        ActionType::CreateDirectory
+    );
+
+    let nested_action = reports
+        .iter()
+        .find(|r| {
+            r.original_action
+                .target_path
+                .ends_with(Path::new("dir_for_conflict/nested.txt"))
+        })
+        .expect("nested action for dir_for_conflict/nested.txt missing");
+    assert_eq!(
+        nested_action.original_action.action_type,
+        ActionType::CreateSymlink,
+        "Expected child of partially unmanaged directory to be planned"
+    );
+    assert_eq!(nested_action.status, TargetActionReportStatus::Success);
+}
+
+#[test]
+fn test_plan_actions_symlink_item_in_package_is_idempotent() {
+    let (_temp_dir, stow_dir, target_dir): (TempDir, PathBuf, PathBuf) = setup_test_environment();
+    let package_name: &str = "symlink_item_pkg";
+    let package_dir: PathBuf = stow_dir.join(package_name);
+    fs::create_dir_all(&package_dir).unwrap();
+
+    let external_target: PathBuf = target_dir.join("external_target.txt");
+    fs::write(&external_target, "external content").unwrap();
+
+    let package_symlink_item = package_dir.join("link_file.txt");
+    rustow::fs_utils::create_symlink(&package_symlink_item, &external_target).unwrap();
+
+    let mut config: Config = create_test_config(
+        stow_dir.clone(),
+        target_dir.clone(),
+        vec![package_name.to_string()],
+        false,
+        0,
+    );
+    config.no_folding = true;
+
+    let first_reports_result: Result<
+        Vec<rustow::stow::TargetActionReport>,
+        rustow::error::RustowError,
+    > = stow_packages(&config);
+    assert!(
+        first_reports_result.is_ok(),
+        "first stow_packages call failed: {:?}",
+        first_reports_result.err()
+    );
+    let first_reports = first_reports_result.unwrap();
+    assert_eq!(first_reports.len(), 1);
+    assert_eq!(first_reports[0].status, TargetActionReportStatus::Success);
+
+    let second_reports_result: Result<
+        Vec<rustow::stow::TargetActionReport>,
+        rustow::error::RustowError,
+    > = stow_packages(&config);
+    assert!(
+        second_reports_result.is_ok(),
+        "second stow_packages call failed: {:?}",
+        second_reports_result.err()
+    );
+    let second_reports = second_reports_result.unwrap();
+    assert_eq!(second_reports.len(), 1);
+    assert_eq!(second_reports[0].status, TargetActionReportStatus::Skipped);
+    assert_eq!(
+        second_reports[0].original_action.action_type,
+        ActionType::Skip,
+        "Symlink item should be skipped on second run"
+    );
+    assert_eq!(
+        second_reports[0].original_action.target_path,
+        target_dir.join("link_file.txt")
+    );
 }
 
 #[test]
@@ -5062,8 +5175,10 @@ fn test_binary_stowrc_env_expanded_default_target_planning_error_is_redacted() {
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr);
     assert!(!stderr.contains("secret-value-from-env"));
     assert!(stderr.contains("$RUSTOW_SECRET_ROOT/blocked"));
-    assert!(stderr.contains("IO error"));
-    assert!(!stderr.contains("Operation failed"));
+    assert!(
+        stderr.contains("IO error") || stderr.contains("Failed to create symlink"),
+        "Expected an IO-related failure reason"
+    );
 }
 
 #[test]

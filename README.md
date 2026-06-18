@@ -10,6 +10,7 @@
 - **Advanced Conflict Resolution**: Comprehensive conflict detection with `--override` and `--defer` options
 - **Flexible Ignore Patterns**: Support for local, global, and built-in ignore patterns
 - **Tree Folding**: Intelligent directory structure optimization
+- **GNU stowrc compatibility**: `~/.stowrc` and `./.stowrc` are merged with CLI options (CLI takes precedence)
 - **Dry Run Mode**: Preview operations before execution with `--simulate`
 - **Verbose Logging**: Detailed output with configurable verbosity levels
 - **File Adoption**: Migrate existing files into Stow packages with `--adopt`
@@ -80,10 +81,16 @@ When you run `rustow package1` from `/path/to/stow/`, it creates symlinks in the
 - `-D, --delete` - Unstow packages (remove symlinks)
 - `-R, --restow` - Restow packages (unstow then stow)
 
+Notes:
+
+- Running stow repeatedly is idempotent for managed links; existing rustow-managed items are skipped.
+- A target directory that already exists (including with unmanaged files) is not treated as a hard conflict. Rustow creates/keeps the directory and continues with child entries.
+
 ### Directory Options
 
 - `-t DIR, --target=DIR` - Set target directory (default: parent of stow dir)
 - `-d DIR, --dir=DIR` - Set stow directory (default: current directory)
+- If `--dir` is not specified, Rustow also accepts `STOW_DIR` as fallback.
 
 ### Special Features
 
@@ -116,6 +123,13 @@ Rustow also reads configuration from resource files:
 - `./.stowrc` (current directory)
 
 Options in resource files are merged with CLI arguments (CLI args have higher priority), and resource values support environment variable and `~` expansion.
+
+#### Stowrc merge order
+
+- `~/.stowrc` (if readable regular file) is loaded first.
+- `./.stowrc` (if readable regular file) is loaded after.
+- When both contain the same option, later values override earlier ones.
+- `--` in `.stowrc` stops option parsing for the remaining tokens in that file.
 
 ## 📋 Examples
 
@@ -154,6 +168,17 @@ rustow --defer="\.vimrc" myvim
 
 # Adopt existing files into stow package
 rustow --adopt mypackage
+```
+
+### Symlink and existing-directory behavior
+
+```bash
+# Existing unmanaged directory is preserved, and nested items are still merged
+cd /path/to/stow
+rustow --no-folding package-with-mixed-dir
+
+# Package items that are symlinks are tracked as managed links, so re-running stow is a no-op for them
+rustow --no-folding package-with-symlink-items
 ```
 
 ## 🗂️ Ignore Patterns
