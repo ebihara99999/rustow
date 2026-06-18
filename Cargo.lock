@@ -251,6 +251,7 @@ dependencies = [
  "clap",
  "dirs",
  "lazy_static",
+ "libc",
  "pathdiff",
  "regex",
  "tempfile",

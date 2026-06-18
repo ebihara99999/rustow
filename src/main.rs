@@ -5,6 +5,8 @@ pub mod error;
 pub mod fs_utils;
 pub mod ignore;
 pub mod stow;
+#[cfg(test)]
+mod test_sync;
 
 use rustow::cli::Args;
 
@@ -19,10 +21,10 @@ fn main() {
     // let raw_cli_args: Vec<String> = std::env::args().collect();
     // eprintln!("stderr: Raw CLI args (non-test execution): {:?}", raw_cli_args);
 
-    let parsed_args = Args::parse_with_operation_groups();
+    let parsed_args = Args::parse_runtime_with_operation_groups();
     // eprintln!("stderr: Successfully parsed args in main: {:?}", args.clone());
 
-    if let Err(e) = rustow::run_parsed(parsed_args) {
+    if let Err(e) = rustow::run_runtime_parsed(parsed_args) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
