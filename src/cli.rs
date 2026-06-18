@@ -1786,7 +1786,7 @@ fn expand_path_value_with_display(
     let display = env_expanded
         .display
         .map(|display| unescape_tilde_markers(&display))
-        .or_else(|| tilde_expanded.display);
+        .or(tilde_expanded.display);
 
     Ok(ExpandedPathValue {
         value: tilde_expanded.value,
@@ -1808,7 +1808,7 @@ fn expand_path_value_os_with_display(
     let display = env_expanded
         .display
         .map(|display| unescape_tilde_markers(&display))
-        .or_else(|| tilde_expanded.display);
+        .or(tilde_expanded.display);
 
     Ok(ExpandedPathValue {
         value: tilde_expanded.value,
