@@ -199,6 +199,8 @@ By default, Rustow ignores:
 
 ### Custom Ignore Patterns
 
+As in GNU Stow, each pattern in an ignore list is a regular expression that must match a whole name. A pattern without `/` must match the entire file or directory name, so `\.git` ignores `.git` but not `.gitconfig`. A pattern with `/` is matched against the path from the package root (for example `/bin/tool`) and must match whole path segments.
+
 Create `.stow-local-ignore` in a package directory:
 
 ```

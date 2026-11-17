@@ -6871,3 +6871,50 @@ fn test_adopt_option_simulation_mode() {
         "Target should remain a regular file in simulation mode"
     );
 }
+
+#[test]
+fn test_cli_dotfiles_keeps_names_that_only_start_with_ignored_names() {
+    let (temp_dir, stow_dir, target_dir) = setup_test_environment();
+    let home_dir = temp_dir.path().join("home");
+    let cwd = temp_dir.path().join("cwd");
+    fs::create_dir_all(&home_dir).expect("Failed to create home dir");
+    fs::create_dir_all(&cwd).expect("Failed to create cwd");
+
+    let package_dir = stow_dir.join("git");
+    fs::create_dir_all(package_dir.join(".git")).expect("Failed to create .git dir");
+    fs::write(package_dir.join(".git").join("config"), "[core]")
+        .expect("Failed to create .git/config");
+    fs::write(package_dir.join("dot-gitconfig"), "[user]").expect("Failed to create dot-gitconfig");
+    fs::write(package_dir.join("dot-gitignore_global"), "*.swp")
+        .expect("Failed to create dot-gitignore_global");
+    fs::write(package_dir.join("notes~"), "backup").expect("Failed to create notes~");
+
+    let envs = [(
+        "HOME",
+        home_dir.to_str().expect("home dir should be valid utf-8"),
+    )];
+    let output = run_rustow_with(
+        [
+            "--dotfiles",
+            "-d",
+            stow_dir.to_str().expect("stow dir should be valid utf-8"),
+            "-t",
+            target_dir
+                .to_str()
+                .expect("target dir should be valid utf-8"),
+            "git",
+        ],
+        &cwd,
+        &envs,
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target_dir.join(".gitconfig").is_symlink());
+    assert!(target_dir.join(".gitignore_global").is_symlink());
+    assert!(!target_dir.join(".git").exists());
+    assert!(!target_dir.join("notes~").exists());
+}
