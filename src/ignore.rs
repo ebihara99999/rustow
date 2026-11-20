@@ -2,9 +2,11 @@
 
 use regex;
 use regex::Regex;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct IgnorePatterns {
@@ -93,6 +95,25 @@ pub fn is_ignored(
     false
 }
 
+// Compile an ignore list entry with GNU Stow anchoring: a pattern without "/" must
+// match the whole basename, and a pattern with "/" must match whole path segments.
+fn compile_ignore_list_pattern(pattern: &str) -> Result<Regex, IgnoreError> {
+    let invalid_pattern = |e: regex::Error| IgnoreError::InvalidPattern {
+        pattern: pattern.to_string(),
+        source: e,
+    };
+    // Validate the pattern on its own so that wrapping cannot turn an invalid
+    // pattern such as "a)(b" into a valid one.
+    Regex::new(pattern).map_err(invalid_pattern)?;
+
+    let anchored_pattern: String = if pattern.contains('/') {
+        format!("(?:^|/)(?:{pattern})(?:/|$)")
+    } else {
+        format!("^(?:{pattern})$")
+    };
+    Regex::new(&anchored_pattern).map_err(invalid_pattern)
+}
+
 // Helper function to read patterns from a file, skipping comments and empty lines
 fn read_patterns_from_file(file_path: &Path) -> Result<Vec<Regex>, IgnoreError> {
     let file: File = File::open(file_path).map_err(|e| IgnoreError::FileIoError {
@@ -112,14 +133,29 @@ fn read_patterns_from_file(file_path: &Path) -> Result<Vec<Regex>, IgnoreError> 
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
             continue;
         }
-        patterns.push(
-            Regex::new(trimmed_line).map_err(|e| IgnoreError::InvalidPattern {
-                pattern: trimmed_line.to_string(),
-                source: e,
-            })?,
-        );
+        patterns.push(compile_ignore_list_pattern(trimmed_line)?);
+        if trimmed_line.ends_with('/') {
+            warn_unmatchable_pattern(file_path, trimmed_line);
+        }
     }
     Ok(patterns)
+}
+
+// A pattern ending in "/" can never match because the checked paths never end in "/".
+// Ignore lists are loaded many times per run, so warn only once per file and pattern.
+fn warn_unmatchable_pattern(file_path: &Path, pattern: &str) {
+    static WARNED: OnceLock<Mutex<HashSet<(PathBuf, String)>>> = OnceLock::new();
+    let mut warned = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if warned.insert((file_path.to_path_buf(), pattern.to_string())) {
+        eprintln!(
+            "WARNING: Ignore pattern '{}' in {} never matches because it ends with '/'. Remove the trailing '/' to ignore that path.",
+            pattern,
+            file_path.display()
+        );
+    }
 }
 
 // Default ignore patterns based on specification.md
@@ -131,12 +167,14 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
     r"\.svn",
     r"RCS",
     r"_darcs",
+    r"\.hg",
     r".*~",   // Example: file.txt~
     r"#.*#",  // Example: #file.txt#
     r"\.#.+", // From spec table for Emacs lock files etc. Example: .#file.txt
     r".+,v",  // Corrected: From spec table for RCS/CVS version files. Example: file.c,v
     r"\.stow-local-ignore",
     r"\.gitignore",
+    r"\.gitmodules",
     r"\.cvsignore",
     // Full path patterns (must start with ^/ as per spec examples)
     r"^/README.*",
@@ -147,12 +185,7 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
 fn get_default_ignore_patterns() -> Result<Vec<Regex>, IgnoreError> {
     DEFAULT_IGNORE_PATTERNS
         .iter()
-        .map(|s| {
-            Regex::new(s).map_err(|e| IgnoreError::InvalidPattern {
-                pattern: (*s).to_string(), // Dereference &&str to &str, then to_string()
-                source: e,
-            })
-        })
+        .map(|s| compile_ignore_list_pattern(s))
         .collect()
 }
 
@@ -344,6 +377,25 @@ mod tests {
         // Basename matches from default
         assert!(is_ignored(Path::new("/.git"), ".git", &patterns));
         assert!(is_ignored(Path::new("/some/dir/.git"), ".git", &patterns));
+        assert!(is_ignored(Path::new("/.git/config"), "config", &patterns));
+        assert!(!is_ignored(
+            Path::new("/.gitconfig"),
+            ".gitconfig",
+            &patterns
+        ));
+        assert!(!is_ignored(
+            Path::new("/.gitignore_global"),
+            ".gitignore_global",
+            &patterns
+        ));
+        assert!(!is_ignored(Path::new("/RCSfile"), "RCSfile", &patterns));
+        assert!(is_ignored(
+            Path::new("/.gitmodules"),
+            ".gitmodules",
+            &patterns
+        ));
+        assert!(is_ignored(Path::new("/.hg"), ".hg", &patterns));
+        assert!(is_ignored(Path::new("/.hg/hgrc"), "hgrc", &patterns));
         assert!(is_ignored(Path::new("/file.txt~"), "file.txt~", &patterns));
         assert!(is_ignored(
             Path::new("/#save.txt#"),
@@ -421,8 +473,18 @@ mod tests {
 
         let patterns = IgnorePatterns::load(&stow_dir, Some(package_name), &home_dir).unwrap();
         assert_eq!(patterns.patterns.len(), 2);
-        assert_eq!(patterns.patterns[0].as_str(), ".*\\.log");
-        assert_eq!(patterns.patterns[1].as_str(), "temp_file");
+        assert!(is_ignored(Path::new("/app.log"), "app.log", &patterns));
+        assert!(is_ignored(Path::new("/temp_file"), "temp_file", &patterns));
+        assert!(!is_ignored(
+            Path::new("/my_temp_file"),
+            "my_temp_file",
+            &patterns
+        ));
+        assert!(!is_ignored(
+            Path::new("/app.log.bak"),
+            "app.log.bak",
+            &patterns
+        ));
 
         teardown_load_test_dir(&base_dir);
     }
@@ -435,14 +497,16 @@ mod tests {
 
         let home_dir = base_dir.join("actual_home");
         fs::create_dir_all(&home_dir).unwrap();
-        let global_ignore_content = "^/glob/\n\\.cache";
+        let global_ignore_content = "^/glob\n\\.cache";
         create_temp_file_for_test(&home_dir.join(".stow-global-ignore"), global_ignore_content)
             .unwrap();
 
         let patterns = IgnorePatterns::load(&stow_dir, Some("pkg_no_local"), &home_dir).unwrap();
         assert_eq!(patterns.patterns.len(), 2);
-        assert_eq!(patterns.patterns[0].as_str(), "^/glob/");
-        assert_eq!(patterns.patterns[1].as_str(), "\\.cache");
+        assert!(is_ignored(Path::new("/glob/file"), "file", &patterns));
+        assert!(!is_ignored(Path::new("/globe"), "globe", &patterns));
+        assert!(is_ignored(Path::new("/dir/.cache"), ".cache", &patterns));
+        assert!(!is_ignored(Path::new("/.cache2"), ".cache2", &patterns));
 
         teardown_load_test_dir(&base_dir);
     }
@@ -486,7 +550,16 @@ mod tests {
 
         let patterns = IgnorePatterns::load(&stow_dir, Some(package_name), &home_dir).unwrap();
         assert_eq!(patterns.patterns.len(), 1);
-        assert_eq!(patterns.patterns[0].as_str(), "local_rule");
+        assert!(is_ignored(
+            Path::new("/local_rule"),
+            "local_rule",
+            &patterns
+        ));
+        assert!(!is_ignored(
+            Path::new("/global_rule"),
+            "global_rule",
+            &patterns
+        ));
 
         teardown_load_test_dir(&base_dir);
     }
@@ -518,6 +591,32 @@ mod tests {
         }
 
         teardown_load_test_dir(&base_dir);
+    }
+
+    #[test]
+    fn test_compile_ignore_list_pattern_rejects_pattern_valid_only_when_wrapped() {
+        // "^(?:a)(b)$" is a valid regex, but the entry itself is not.
+        assert!(matches!(
+            compile_ignore_list_pattern("a)(b"),
+            Err(IgnoreError::InvalidPattern { pattern, .. }) if pattern == "a)(b"
+        ));
+    }
+
+    #[test]
+    fn test_compile_ignore_list_pattern_keeps_alternation_and_flags_inside_anchors() {
+        let patterns = IgnorePatterns {
+            patterns: vec![
+                compile_ignore_list_pattern("foo|bar").unwrap(),
+                compile_ignore_list_pattern("(?i)readme").unwrap(),
+            ],
+        };
+
+        assert!(is_ignored(Path::new("/foo"), "foo", &patterns));
+        assert!(is_ignored(Path::new("/bar"), "bar", &patterns));
+        assert!(!is_ignored(Path::new("/foox"), "foox", &patterns));
+        assert!(!is_ignored(Path::new("/xbar"), "xbar", &patterns));
+        assert!(is_ignored(Path::new("/README"), "README", &patterns));
+        assert!(!is_ignored(Path::new("/README.md"), "README.md", &patterns));
     }
 
     // --- Tests for filter_items ---

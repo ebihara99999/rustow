@@ -192,24 +192,28 @@ Rustow supports three levels of ignore patterns:
 ### Built-in Ignore Patterns
 
 By default, Rustow ignores:
-- Version control directories (`.git`, `.svn`, `CVS`, etc.)
+- Version control files and directories (`.git`, `.gitmodules`, `.svn`, `.hg`, `CVS`, etc.)
 - Editor backup files (`*~`, `#*#`, `.#*`)
 - Documentation files (`README*`, `LICENSE*`, `COPYING`)
 - Ignore files themselves (`.gitignore`, `.stow-local-ignore`)
 
 ### Custom Ignore Patterns
 
+As in GNU Stow, each pattern in an ignore list is a regular expression that must match a whole name. A pattern without `/` must match the entire file or directory name, so `\.git` ignores `.git` but not `.gitconfig`. A pattern with `/` is matched against the path from the package root (for example `/bin/tool`) and must match whole path segments.
+
+A pattern that ends with `/` never matches, and Rustow prints a warning for it. Write `^/secrets` instead of `^/secrets/`. Unlike GNU Stow, Rustow does not treat `#` after a pattern as a comment, so put comments on their own lines. Patterns passed with `--ignore` are not anchored and match anywhere in the name or path.
+
 Create `.stow-local-ignore` in a package directory:
 
 ```
-# Ignore all .org files in package root
-^/.*\.org$
+# Ignore .org files in the package root
+^/[^/]+\.org
 
 # Ignore temp directories anywhere
 temp
 
 # Ignore specific files
-build.log
+build\.log
 ```
 
 ## 🧪 Development
